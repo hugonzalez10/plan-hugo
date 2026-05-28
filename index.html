@@ -960,6 +960,103 @@ async function gistPull(pat, gistId) {
   return { state: parsed, updatedAt: data.updated_at };
 }
 
+// Firma estable de los datos sincronizables (excluye credenciales, caches y sourceImage).
+function syncSig(state) {
+  if (!state) return 0;
+  const weights = Array.isArray(state.weights)
+    ? state.weights.map(({ sourceImage, ...rest }) => rest) : [];
+  const slice = {
+    userProfile: state.userProfile ?? null,
+    snackBank: state.snackBank ?? [], proteinBank: state.proteinBank ?? [],
+    dessertBank: state.dessertBank ?? [], rules: state.rules ?? [],
+    recipeBank: state.recipeBank ?? [], days: state.days ?? {},
+    weights, theme: state.theme ?? null,
+  };
+  const s = JSON.stringify(slice);
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) { h = (((h << 5) + h) ^ s.charCodeAt(i)) | 0; }
+  return h;
+}
+
+// Preserva credenciales/sync locales al aplicar un estado remoto bajado del gist.
+function applyRemoteState(prev, remote, updatedAt) {
+  const merged = { ...remote };
+  merged.settings = {
+    ...(remote.settings || {}),
+    githubPAT: prev.settings?.githubPAT ?? null,
+    syncGistId: prev.settings?.syncGistId ?? null,
+    anthropicApiKey: prev.settings?.anthropicApiKey ?? null,
+    bridgeUrl: prev.settings?.bridgeUrl ?? null,
+    autoSync: prev.settings?.autoSync ?? true,
+    lastRemoteUpdatedAt: updatedAt,
+    lastSyncAt: new Date().toISOString(),
+  };
+  merged.bridge = prev.bridge || merged.bridge;
+  merged.settings.lastPushedSig = syncSig(merged);
+  return merged;
+}
+
+// Auto-sync con el Gist, a prueba de fallos:
+//  - SUBE solo (debounced) cuando hay cambios locales y la nube NO avanzó (si avanzó, no pisa).
+//  - BAJA solo al abrir/volver SOLO si el equipo está limpio (sin cambios sin subir) y la nube es más nueva.
+//  - Ante cualquier conflicto o error: no toca nada (quedan los botones manuales).
+function useGistAutoSync(state, setState) {
+  const s = state.settings || {};
+  const pat = s.githubPAT, gistId = s.syncGistId;
+  const enabled = (s.autoSync ?? true) && !!pat && !!gistId;
+  const dataSig = syncSig(state);
+  const lastPushedSig = s.lastPushedSig ?? null;
+  const lastRemoteUpdatedAt = s.lastRemoteUpdatedAt ?? null;
+  const busyRef = React.useRef(false);
+
+  // SUBIR (debounced) cuando el equipo está "sucio"
+  useEffect(() => {
+    if (!enabled) return;
+    // Sin base aún (recién conectado, sin subir/bajar manual) → NO auto-subir: evita pisar la nube buena con datos vacíos.
+    if (lastPushedSig == null || dataSig === lastPushedSig) return;
+    const t = setTimeout(async () => {
+      if (busyRef.current) return;
+      busyRef.current = true;
+      try {
+        const meta = await gistPull(pat, gistId);
+        const cloudAdvanced = lastRemoteUpdatedAt && new Date(meta.updatedAt) > new Date(lastRemoteUpdatedAt);
+        if (cloudAdvanced) return; // la nube cambió en otro equipo → no pisar (conflicto, lo resuelve el pull manual)
+        const { updatedAt } = await gistPush(pat, gistId, state);
+        setState((prev) => ({
+          ...prev,
+          settings: { ...prev.settings, lastPushedSig: syncSig(prev), lastRemoteUpdatedAt: updatedAt, lastSyncAt: new Date().toISOString() },
+        }));
+      } catch (e) { /* silencioso: quedan los botones manuales */ }
+      finally { busyRef.current = false; }
+    }, 2500);
+    return () => clearTimeout(t);
+  }, [enabled, dataSig, lastPushedSig, lastRemoteUpdatedAt, pat, gistId]);
+
+  // BAJAR al abrir / volver a primer plano (solo si limpio + nube más nueva)
+  useEffect(() => {
+    if (!enabled) return;
+    const run = async () => {
+      if (busyRef.current) return;
+      busyRef.current = true;
+      try {
+        const { state: remote, updatedAt } = await gistPull(pat, gistId);
+        if (!remote || typeof remote !== 'object') return;
+        setState((prev) => {
+          const clean = prev.settings?.lastPushedSig != null && syncSig(prev) === prev.settings.lastPushedSig;
+          const cloudNewer = !prev.settings?.lastRemoteUpdatedAt || new Date(updatedAt) > new Date(prev.settings.lastRemoteUpdatedAt);
+          if (!(clean && cloudNewer)) return prev; // sucio o sin novedad → no tocar
+          return applyRemoteState(prev, remote, updatedAt);
+        });
+      } catch (e) { /* silencioso */ }
+      finally { busyRef.current = false; }
+    };
+    run();
+    const onVis = () => { if (document.visibilityState === 'visible') run(); };
+    document.addEventListener('visibilitychange', onVis);
+    return () => document.removeEventListener('visibilitychange', onVis);
+  }, [enabled, pat, gistId]);
+}
+
 function parseJsonLoose(text) {
   if (!text) return null;
   const match = text.match(/\{[\s\S]*\}/);
@@ -1316,6 +1413,9 @@ function migrateState(parsed) {
     syncGistId: next.settings.syncGistId ?? null,
     lastSyncAt: next.settings.lastSyncAt ?? null,
     bridgeUrl: next.settings.bridgeUrl ?? null,
+    autoSync: next.settings.autoSync ?? true,
+    lastPushedSig: next.settings.lastPushedSig ?? null,
+    lastRemoteUpdatedAt: next.settings.lastRemoteUpdatedAt ?? null,
   };
   next.weights = Array.isArray(next.weights) ? next.weights : [];
   next.recipeBank = Array.isArray(next.recipeBank) ? next.recipeBank : [];
@@ -6205,8 +6305,9 @@ function SyncSection({ state, setState }) {
     setLoading(true);
     try {
       savePAT(pat.trim());
-      const { id, htmlUrl } = await gistCreate(pat.trim(), state);
+      const { id, updatedAt, htmlUrl } = await gistCreate(pat.trim(), state);
       saveGistId(id);
+      setState((prev) => ({ ...prev, settings: { ...prev.settings, lastPushedSig: syncSig(prev), lastRemoteUpdatedAt: updatedAt } }));
       setInfo(`Gist creado ✓ — abre ${htmlUrl} para copiar el ID y usarlo en otro dispositivo.`);
     } catch (err) {
       setError(err.message || 'Error');
@@ -6241,8 +6342,8 @@ function SyncSection({ state, setState }) {
     if (!gistId) { setError('Conecta primero (crea el gist).'); return; }
     setLoading(true);
     try {
-      await gistPush(pat.trim(), gistId, state);
-      updateLastSync();
+      const { updatedAt } = await gistPush(pat.trim(), gistId, state);
+      setState((prev) => ({ ...prev, settings: { ...prev.settings, lastPushedSig: syncSig(prev), lastRemoteUpdatedAt: updatedAt, lastSyncAt: new Date().toISOString() } }));
       setInfo('Backup subido a GitHub ✓');
     } catch (err) {
       setError(err.message || 'Error al subir');
@@ -6257,24 +6358,10 @@ function SyncSection({ state, setState }) {
     if (!gistId) { setError('Conecta primero.'); return; }
     setLoading(true);
     try {
-      const { state: remoteState } = await gistPull(pat.trim(), gistId);
+      const { state: remoteState, updatedAt } = await gistPull(pat.trim(), gistId);
       if (!remoteState || typeof remoteState !== 'object') throw new Error('Backup remoto inválido');
-      // Reemplazar local con remoto (manteniendo settings sync local)
-      const preservedSettings = {
-        githubPAT: pat.trim(),
-        syncGistId: gistId,
-        lastSyncAt: new Date().toISOString(),
-      };
-      // Preservar credenciales/endpoint LOCALES (el remoto ya no los trae).
-      setState((prev) => ({
-        ...remoteState,
-        settings: {
-          ...(remoteState.settings || {}),
-          anthropicApiKey: prev.settings?.anthropicApiKey ?? null,
-          bridgeUrl: prev.settings?.bridgeUrl ?? null,
-          ...preservedSettings,
-        },
-      }));
+      // Reemplazar local con remoto, preservando credenciales/endpoint locales y fijando la base del auto-sync.
+      setState((prev) => applyRemoteState(prev, remoteState, updatedAt));
       setInfo('Backup restaurado desde GitHub ✓');
       setConfirmRestore(false);
     } catch (err) {
@@ -6338,6 +6425,18 @@ function SyncSection({ state, setState }) {
             <span className="text-gray-500 dark:text-gray-400">Última sync:</span>
             <span className="text-gray-700 dark:text-gray-300">{new Date(lastSync).toLocaleString('es-CL')}</span>
           </div>
+        )}
+        {gistId && (
+          <label className="flex items-center justify-between text-[11px] pt-1 cursor-pointer">
+            <span className="text-gray-600 dark:text-gray-300 font-medium">⚡ Sincronizar automático</span>
+            <input type="checkbox"
+              checked={state.settings?.autoSync ?? true}
+              onChange={(e) => setState((prev) => ({ ...prev, settings: { ...(prev.settings || {}), autoSync: e.target.checked } }))}
+              className="w-4 h-4 accent-emerald-500" />
+          </label>
+        )}
+        {gistId && (state.settings?.autoSync ?? true) && (
+          <p className="text-[10px] text-gray-400 dark:text-gray-500">Sube solo al editar; baja solo al abrir si el otro equipo tiene algo más nuevo (y este no tiene cambios sin subir).</p>
         )}
       </div>
 
@@ -8826,6 +8925,7 @@ function CmdKPalette({ open, onClose, onAction }) {
 
 function App() {
   const [state, setState] = usePersistentState();
+  useGistAutoSync(state, setState);
   const [tab, setTab] = useState(() => {
     const h = (location.hash || '').replace(/^#?\/?/, '').toLowerCase();
     const hit = BENTO_TABS.find((t) => t.id === h);
