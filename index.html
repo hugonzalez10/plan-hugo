@@ -875,7 +875,9 @@ function gistHeaders(pat) {
   };
 }
 
-// Sanea state para subir: elimina sourceImage (imágenes pesadas) por defecto
+// Sanea state para subir: elimina sourceImage (imágenes pesadas) y NUNCA sube
+// credenciales/endpoints. Los gists "secretos" de GitHub son públicos por URL y
+// los escanea el detector de secretos: subir la API key revoca la cuenta.
 function sanitizeStateForUpload(state) {
   const next = JSON.parse(JSON.stringify(state || {}));
   if (Array.isArray(next.weights)) {
@@ -883,6 +885,11 @@ function sanitizeStateForUpload(state) {
       const { sourceImage, ...rest } = w || {};
       return rest;
     });
+  }
+  if (next.settings && typeof next.settings === 'object') {
+    delete next.settings.anthropicApiKey;
+    delete next.settings.githubPAT;
+    delete next.settings.bridgeUrl;
   }
   return next;
 }
@@ -6258,11 +6265,16 @@ function SyncSection({ state, setState }) {
         syncGistId: gistId,
         lastSyncAt: new Date().toISOString(),
       };
-      const merged = {
+      // Preservar credenciales/endpoint LOCALES (el remoto ya no los trae).
+      setState((prev) => ({
         ...remoteState,
-        settings: { ...(remoteState.settings || {}), ...preservedSettings },
-      };
-      setState(() => merged);
+        settings: {
+          ...(remoteState.settings || {}),
+          anthropicApiKey: prev.settings?.anthropicApiKey ?? null,
+          bridgeUrl: prev.settings?.bridgeUrl ?? null,
+          ...preservedSettings,
+        },
+      }));
       setInfo('Backup restaurado desde GitHub ✓');
       setConfirmRestore(false);
     } catch (err) {
