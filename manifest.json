@@ -1,0 +1,26 @@
+{
+  "name": "Plan Hugo",
+  "short_name": "Plan Hugo",
+  "description": "Seguimiento nutricional diario personal",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#ffffff",
+  "theme_color": "#10b981",
+  "lang": "es-CL",
+  "icons": [
+    {
+      "src": "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'><rect width='192' height='192' rx='40' fill='%2310b981'/><text x='96' y='130' font-size='110' text-anchor='middle' font-family='Apple Color Emoji,Segoe UI Emoji'>🍽️</text></svg>",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'><rect width='512' height='512' rx='110' fill='%2310b981'/><text x='256' y='345' font-size='290' text-anchor='middle' font-family='Apple Color Emoji,Segoe UI Emoji'>🍽️</text></svg>",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
