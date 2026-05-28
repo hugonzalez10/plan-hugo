@@ -8675,10 +8675,10 @@ function BentoMobileTopBar({ activeTab, onCmdK, onOpenSettings, theme, onToggleT
   const tab = BENTO_TABS.find((t) => t.id === activeTab);
   const isDark = theme === 'dark';
   return (
-    <div className="bento-topbar-mobile safe-top" style={{
+    <div className="bento-topbar-mobile" style={{
       position: 'sticky', top: 0, zIndex: 30,
       background: 'var(--bento-bg)', borderBottom: '1px solid var(--bento-hairline)',
-      padding: '10px 14px',
+      padding: 'calc(env(safe-area-inset-top) + 10px) 14px 10px',
       display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10,
     }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
