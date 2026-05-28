@@ -4,7 +4,7 @@
  * NO interceptamos llamadas a api.anthropic.com.
  */
 
-const CACHE_NAME = 'plan-hugo-v3';
+const CACHE_NAME = 'plan-hugo-v4-secfix';
 const CORE_URLS = [
   './index.html',
   './manifest.json',
