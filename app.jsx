@@ -1376,6 +1376,7 @@ async function fetchBridge(url) {
     meals: Array.isArray(data.meals) ? data.meals : [],
     weights: Array.isArray(data.weights) ? data.weights : [],
     workouts: Array.isArray(data.workouts) ? data.workouts : [],
+    checks: Array.isArray(data.checks) ? data.checks : [],
   };
 }
 
@@ -1385,7 +1386,7 @@ function mergeBridge(state, bridge) {
   const importedIds = new Set((state.bridge?.importedIds) || []);
   const days = { ...(state.days || {}) };
   const weights = Array.isArray(state.weights) ? [...state.weights] : [];
-  const added = { meals: 0, weights: 0, workouts: 0 };
+  const added = { meals: 0, weights: 0, workouts: 0, checks: 0 };
 
   const ensureDay = (dk) => {
     const base = days[dk] || { eaten: {}, snackId: null, proteinId: null, water: { ml: 0 }, skipped: [], nudgesDismissed: [], dessertAlmuerzoId: null, dessertCenaId: null, notes: null };
@@ -1431,6 +1432,20 @@ function mergeBridge(state, bridge) {
       weights.push(out);
     }
     importedIds.add(wt.id); added.weights++;
+  }
+
+  // Marca secciones FIJAS del plan como comidas (sin duplicar). Backward-compatible:
+  // los bridges antiguos no traen `checks`. Cada check se aplica una sola vez (id en
+  // importedIds), para no re-marcar si Hugo lo destilda manualmente en la app.
+  if (Array.isArray(bridge.checks)) {
+    const FIXED_MEAL_SLOTS = new Set(['desayuno', 'almuerzo', 'colacion', 'cena', 'antojo', 'dessertAlmuerzo', 'dessertCena']);
+    for (const c of bridge.checks) {
+      if (c == null || c.id == null || importedIds.has(c.id)) continue;
+      if (!FIXED_MEAL_SLOTS.has(c.meal)) continue;
+      const d = ensureDay(c.date || todayKey());
+      d.eaten = { ...(d.eaten || {}), [c.meal]: true };
+      importedIds.add(c.id); added.checks++;
+    }
   }
 
   const nextState = {
@@ -6414,8 +6429,9 @@ function BridgeSyncSection({ state, setState }) {
     if (!res.ok) {
       setStatus({ type: 'err', msg: res.reason === 'fetch' ? ('No se pudo leer Drive: ' + (res.error || '')) : 'Configura la URL.' });
     } else {
-      const a = res.added; const n = a.meals + a.weights + a.workouts;
-      setStatus({ type: 'ok', msg: n === 0 ? 'Al día, nada nuevo.' : `Importado: ${a.meals} comida(s) · ${a.weights} peso(s) · ${a.workouts} entrenamiento(s).` });
+      const a = res.added; const n = a.meals + a.weights + a.workouts + (a.checks || 0);
+      const checksMsg = a.checks ? ` · ${a.checks} marcada(s) del plan` : '';
+      setStatus({ type: 'ok', msg: n === 0 ? 'Al día, nada nuevo.' : `Importado: ${a.meals} comida(s) · ${a.weights} peso(s) · ${a.workouts} entrenamiento(s)${checksMsg}.` });
     }
   };
 
