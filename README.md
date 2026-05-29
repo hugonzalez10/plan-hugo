@@ -1,25 +1,46 @@
 # Plan Hugo
 
-App personal de seguimiento nutricional diario. **Un solo archivo**, sin backend, sin build, sin dependencias instaladas.
+App personal de seguimiento nutricional diario. Sin backend, sin dependencias instaladas.
+
+El código de la app vive en **`app.jsx`** (React + JSX). Se compila a **`app.js`** con
+esbuild — ya **no** se compila JSX en el navegador con Babel, así que el arranque en el
+teléfono es inmediato. `index.html` es solo el shell (HTML + estilos + carga de `app.js`).
+
+## Editar y compilar
+
+1. Edita `app.jsx`.
+2. Recompila:
+
+   ```sh
+   ./build.sh
+   ```
+
+   (descarga esbuild al vuelo vía `npx`, no instala nada). Genera `app.js`.
+3. Recarga la app. Recuerda subir la versión del cache en `sw.js` (`CACHE_NAME`) si publicas,
+   para forzar el refresco del Service Worker.
 
 ## Cómo abrirla
 
-**Local (Mac) — más simple:**
-- Doble-click en `index.html` en Finder, o `open index.html` desde Terminal.
-- Funciona offline una vez cargado en el navegador (los CDN de React/Tailwind/Babel quedan en caché del browser).
+**Local (Mac):**
+- `python3 -m http.server 8765` y abre `http://localhost:8765`.
+  (No uses doble-click `file://`: `app.js` y el Service Worker necesitan servirse por http.)
+- Funciona offline una vez cargada (el SW cachea `index.html`, `app.js` y los CDN).
 
 **Desde iPhone:**
-1. Subir `index.html` a cualquier hosting estático (GitHub Pages, Netlify drop, Vercel) o servirlo local con `python3 -m http.server 8080`.
-2. Abrir la URL en Safari del iPhone.
-3. Compartir → "Agregar a inicio" para instalarla como app.
+1. Sube los archivos a un hosting estático (GitHub Pages, Netlify drop, Vercel) — incluyendo
+   `app.js` ya compilado.
+2. Abre la URL en Safari → Compartir → "Agregar a inicio" para instalarla como PWA.
 
-## Persistencia
+## Persistencia y respaldo
 
-Los datos se guardan en `localStorage` del navegador (clave `plan-hugo-v1`):
-- Cada dispositivo y cada navegador tiene su propia copia.
-- Si borras los datos de sitio en Safari, pierdes el historial.
-- No hay sincronización entre Mac e iPhone (por ahora).
+Datos en `localStorage` (clave `plan-hugo-v3`), con copia de respaldo rotatoria
+(`plan-hugo-v3-bak`) y escritura verificada: si un guardado falla (p. ej. sin espacio), la
+app avisa con un banner y no pisa la copia buena. Sync opcional a GitHub Gist con indicador
+de estado en la barra superior (verde = sincronizado, ámbar = pendiente/conflicto, rojo =
+error). Cada dispositivo tiene su copia; el respaldo en la nube es la fuente de verdad
+compartida.
 
 ## Stack
 
-React 18 + Tailwind via CDN, JSX compilado en runtime por Babel standalone. Todo el código (React app + estilos + CDN imports) en un único `index.html` ~750 líneas.
+React 18 (UMD, versión fija + SRI) + Tailwind vía CDN. App en `app.jsx`, precompilada a
+`app.js` con esbuild. PWA con Service Worker (`sw.js`) y `manifest.json`.

@@ -1,12 +1,13 @@
 /* Plan Hugo — Service Worker mínimo
- * Estrategia: network-first para index.html (queremos la última versión),
- * cache-first para CDN (Tailwind, React, Babel) — son immutable por URL.
+ * Estrategia: network-first para index.html y app.js (queremos la última versión),
+ * cache-first para CDN (Tailwind, React) — son immutable por URL.
  * NO interceptamos llamadas a api.anthropic.com.
  */
 
-const CACHE_NAME = 'plan-hugo-v6-autosync';
+const CACHE_NAME = 'plan-hugo-v8-prebuild';
 const CORE_URLS = [
   './index.html',
+  './app.js',
   './manifest.json',
 ];
 const CDN_HOSTS = ['cdn.tailwindcss.com', 'unpkg.com'];
