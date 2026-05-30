@@ -1302,12 +1302,20 @@ function migrateState(parsed) {
   const migratedDays = {};
   for (const [k, v] of Object.entries(next.days)) {
     if (!v) continue;
+    const cleanExtras = Array.isArray(v.extras)
+      ? dedupeDayExtras(v.extras).map((x) => ({ carbs: 0, fat: 0, fiber: 0, ...x }))
+      : [];
+    // Si ya hay comida registrada de colación/cena, el slot está cumplido aunque
+    // se haya importado antes de existir la detección automática.
+    const eaten = { ...(v.eaten || {}) };
+    for (const slot of ['colacion', 'cena']) {
+      if (cleanExtras.some((x) => x.mealSlot === slot)) eaten[slot] = true;
+    }
     migratedDays[k] = {
       ...v,
       water: v.water || { ml: 0 },
-      extras: Array.isArray(v.extras)
-        ? dedupeDayExtras(v.extras).map((x) => ({ carbs: 0, fat: 0, fiber: 0, ...x }))
-        : [],
+      extras: cleanExtras,
+      eaten,
       nudgesDismissed: Array.isArray(v.nudgesDismissed) ? v.nudgesDismissed : [],
       skipped: Array.isArray(v.skipped) ? v.skipped : [],
       dessertAlmuerzoId: v.dessertAlmuerzoId ?? null,
