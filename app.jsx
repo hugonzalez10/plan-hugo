@@ -1224,6 +1224,36 @@ function buildSeed() {
   };
 }
 
+// Firma de contenido de una comida del chat: slot|nombre|kcal. El backend del bridge reasigna
+// un UUID por fila en cada import, así que re-registrar el mismo plan trae ids nuevos que el
+// dedup por id no cacha. Esta firma colapsa esos duplicados (ventana = el mismo día).
+function chatMealSig(slot, name, kcal) {
+  return `${slot || 'extra'}|${normalizeName(name)}|${Math.round(Number(kcal) || 0)}`;
+}
+
+// Colapsa extras duplicados dentro de un mismo día. Por id (re-importación obsoleta del bridge)
+// y, SOLO para comidas del chat (source 'skill-chat'), también por contenido: el bridge les
+// reasigna UUIDs en cada import y duplicaría el plan. Los extras manuales se dedupean solo por
+// id, para no subcontar snacks repetidos legítimos.
+function dedupeDayExtras(extras) {
+  const seen = new Set();
+  const sigSeen = new Set();
+  const out = [];
+  for (const x of extras) {
+    if (x && x.id != null) {
+      if (seen.has(x.id)) continue;
+      seen.add(x.id);
+    }
+    if (x && x.source === 'skill-chat') {
+      const sig = chatMealSig(x.mealSlot, x.name, x.kcal);
+      if (sigSeen.has(sig)) continue;
+      sigSeen.add(sig);
+    }
+    out.push(x);
+  }
+  return out;
+}
+
 function migrateState(parsed) {
   if (!parsed || typeof parsed !== 'object') return null;
   if (!Array.isArray(parsed.snackBank) || !Array.isArray(parsed.proteinBank)) return null;
@@ -1276,7 +1306,7 @@ function migrateState(parsed) {
       ...v,
       water: v.water || { ml: 0 },
       extras: Array.isArray(v.extras)
-        ? v.extras.map((x) => ({ carbs: 0, fat: 0, fiber: 0, ...x }))
+        ? dedupeDayExtras(v.extras).map((x) => ({ carbs: 0, fat: 0, fiber: 0, ...x }))
         : [],
       nudgesDismissed: Array.isArray(v.nudgesDismissed) ? v.nudgesDismissed : [],
       skipped: Array.isArray(v.skipped) ? v.skipped : [],
@@ -1394,13 +1424,30 @@ function mergeBridge(state, bridge) {
     return days[dk];
   };
 
+  // Slots que, al venir del bridge, marcan la sección como cumplida. Solo colación/cena:
+  // no tienen ítems fijos con kcal, así que marcar `eaten` no duplica calorías (las kcal
+  // vienen del extra). Marcar desayuno/almuerzo/antojo sí dispararía el fallback legacy de
+  // getMealItemTicks y sumaría kcal fantasma, por eso se excluyen.
+  const BRIDGE_SLOT_DETECT = new Set(['colacion', 'cena']);
   for (const m of bridge.meals) {
     if (m.id == null || importedIds.has(m.id)) continue;
-    ensureDay(m.date || todayKey()).extras.push({
+    const slot = m.mealSlot || 'extra';
+    const d = ensureDay(m.date || todayKey());
+    // Idempotencia a nivel id contra importedIds obsoleto (p.ej. tras un pull del Gist): si el
+    // día ya tiene un extra con este id, no lo re-agregues (pero sí dalo por importado).
+    if (d.extras.some((x) => x.id === m.id)) { importedIds.add(m.id); continue; }
+    // Dedup por contenido contra comidas del chat ya presentes ese día: el bridge reasigna
+    // UUIDs por fila, así que reimportar el mismo plan trae ids nuevos. Lo damos por importado.
+    const sig = chatMealSig(slot, m.name, m.kcal);
+    if (d.extras.some((x) => x.source === 'skill-chat' && chatMealSig(x.mealSlot, x.name, x.kcal) === sig)) {
+      importedIds.add(m.id); continue;
+    }
+    d.extras.push({
       id: m.id, name: m.name || 'Comida', kcal: num(m.kcal), protein: num(m.protein),
       carbs: num(m.carbs), fat: num(m.fat), fiber: num(m.fiber),
-      mealSlot: m.mealSlot || 'extra', source: 'skill-chat',
+      mealSlot: slot, source: 'skill-chat',
     });
+    if (BRIDGE_SLOT_DETECT.has(slot)) d.eaten = { ...(d.eaten || {}), [slot]: true };
     importedIds.add(m.id); added.meals++;
   }
 
@@ -1529,6 +1576,14 @@ function computeDayTotals(day, snackBank, proteinBank, targets, dessertBank, cus
 
 function normalizeName(name) {
   return (name || '').toLowerCase().trim().replace(/\s+/g, ' ');
+}
+
+// Cubeta de despliegue de un extra según su mealSlot. Solo colación/cena se muestran dentro
+// de su sección; todo lo demás (incluido mealSlot ausente o 'desayuno'/'almuerzo'/'antojo')
+// cae en 'extra' → lista "Extras del día".
+function extraSlotBucket(x) {
+  const s = x?.mealSlot;
+  return (s === 'colacion' || s === 'cena') ? s : 'extra';
 }
 
 // ---------- Reglas personales ----------
@@ -3506,9 +3561,39 @@ function AddExtraModal({ apiKey, onCancel, onSave }) {
   );
 }
 
+// Lista compacta de alimentos registrados (vía WhatsApp/bridge o captura) asignados a un slot
+// del plan (colación/cena), para mostrarlos DENTRO de su sección en vez de en "Extras del día".
+function SlotLoggedItems({ items, onRemove }) {
+  if (!items || items.length === 0) return null;
+  return (
+    <div className="mt-2.5 rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 overflow-hidden">
+      <div className="px-4 pt-3 pb-1.5 text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">📝 Registrado</div>
+      {items.map((item) => (
+        <div key={item.id} className="flex items-center gap-3 px-4 py-2.5 border-t border-gray-100 dark:border-gray-800">
+          <span className="text-xl shrink-0 leading-none">{emojiForFood(item.name)}</span>
+          <div className="flex-1 min-w-0">
+            <div className="font-medium text-sm truncate">{item.name}</div>
+            <div className="text-xs text-gray-500 dark:text-gray-400">
+              <span className="font-semibold text-gray-700 dark:text-gray-300">{item.kcal}</span> kcal
+              {item.protein > 0 && <> · P <span className="font-semibold text-gray-700 dark:text-gray-300">{item.protein}g</span></>}
+              {item.carbs > 0 && <> · C {Math.round(item.carbs)}g</>}
+              {item.fat > 0 && <> · G {Math.round(item.fat)}g</>}
+              {item.fiber > 0 && <> · F {Number(item.fiber).toFixed(0)}g</>}
+            </div>
+          </div>
+          <button onClick={() => onRemove(item.id)} aria-label="Borrar"
+            className="shrink-0 w-9 h-9 rounded-full bg-rose-50 dark:bg-rose-900/30 text-rose-600 dark:text-rose-300 flex items-center justify-center text-base hover:bg-rose-100 dark:hover:bg-rose-900/50">✕</button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function ExtrasSection({ day, onUpdate, apiKey, tryWithRules }) {
   const [adding, setAdding] = useState(false);
-  const items = day.extras || [];
+  const allItems = day.extras || [];
+  // Solo la cubeta 'extra' se lista aquí; colación/cena se muestran dentro de sus secciones.
+  const items = allItems.filter((e) => extraSlotBucket(e) === 'extra');
 
   const handleSave = (item) => {
     const tagSet = new Set(item.tags || []);
@@ -3519,7 +3604,7 @@ function ExtrasSection({ day, onUpdate, apiKey, tryWithRules }) {
     if (tagSet.has('alcohol')) actions.push('add_alcohol');
 
     const doSave = () => {
-      onUpdate({ extras: [...items, { ...item, id: uuid() }] });
+      onUpdate({ extras: [...allItems, { ...item, id: uuid() }] });
       setAdding(false);
     };
 
@@ -3529,7 +3614,7 @@ function ExtrasSection({ day, onUpdate, apiKey, tryWithRules }) {
       doSave();
     }
   };
-  const handleRemove = (id) => { onUpdate({ extras: items.filter((e) => e.id !== id) }); };
+  const handleRemove = (id) => { onUpdate({ extras: allItems.filter((e) => e.id !== id) }); };
 
   return (
     <>
@@ -4850,6 +4935,21 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
     setState((prev) => ({ ...prev, days: { ...prev.days, [today]: { ...(prev.days[today] || {}), ...patch } } }));
   }, [setState, today]);
 
+  // Alimentos registrados (bridge/captura) asignados a colación/cena, para mostrarlos dentro
+  // de su sección. Quitar uno lo borra de day.extras y, si no queda ninguno ni hay pick de
+  // banco, vuelve a marcar el slot como pendiente.
+  const dayExtras = day.extras || [];
+  const colacionExtras = dayExtras.filter((x) => extraSlotBucket(x) === 'colacion');
+  const cenaExtras = dayExtras.filter((x) => extraSlotBucket(x) === 'cena');
+  const removeSlotExtra = (slot, id) => {
+    const nextExtras = dayExtras.filter((e) => e.id !== id);
+    const stillHasSlot = nextExtras.some((e) => extraSlotBucket(e) === slot);
+    const bankPick = slot === 'colacion' ? day.snackId : day.proteinId;
+    const patch = { extras: nextExtras };
+    if (!stillHasSlot && !bankPick) patch.eaten = { ...(day.eaten || {}), [slot]: false };
+    updateDay(patch);
+  };
+
   // Enforcement de reglas: acumula violaciones, muestra modal único si hay
   const [pendingViolation, setPendingViolation] = useState(null);
   const [suggestSlot, setSuggestSlot] = useState(null); // 'snack' | 'dinner' | 'dessert_almuerzo' | 'dessert_cena' | null
@@ -5194,6 +5294,9 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
               ))}
             </div>
           )}
+          {!skippedSet.has('colacion') && (
+            <SlotLoggedItems items={colacionExtras} onRemove={(id) => removeSlotExtra('colacion', id)} />
+          )}
         </div>
         <div>
           <div className="flex items-end justify-between mb-1">
@@ -5226,6 +5329,9 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
                   targets={targets} />
               ))}
             </div>
+          )}
+          {!skippedSet.has('cena') && (
+            <SlotLoggedItems items={cenaExtras} onRemove={(id) => removeSlotExtra('cena', id)} />
           )}
           {!skippedSet.has('cena') && (
             <DessertSection meal="cena" dessertBank={state.dessertBank} day={day} eaten={eaten}
