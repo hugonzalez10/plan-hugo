@@ -9023,6 +9023,47 @@ function App() {
     return () => document.removeEventListener('visibilitychange', onVis);
   }, [bridgeUrl, setState]);
 
+  // Empuje app→bridge: manda al bridge el total REAL del día (lo que la app
+  // calcula: plan fijo marcado + extras − ejercicio) para que el chat pueda
+  // responder "cómo voy hoy" con el mismo número que se ve en pantalla.
+  const snapDayKey = todayKey();
+  const snapPayload = useMemo(() => {
+    const t = computeDayTotals(
+      (state.days || {})[snapDayKey], state.snackBank || [], state.proteinBank || [],
+      targets, state.dessertBank || [], state.antojoCustomItems || []);
+    return {
+      op: 'snapshot', date: snapDayKey, ts: Date.now(),
+      totals: {
+        kcalIn: t.kcalIn, kcalBurned: t.kcalBurned, kcalNet: t.kcalNet,
+        protein: t.protein, carbs: t.carbs, fat: t.fat, fiber: t.fiber, waterMl: t.waterMl,
+      },
+      targets: {
+        kcalMax: targets.kcalMax, proteinMin: targets.proteinMin, carbsTarget: targets.carbsTarget,
+        fatTarget: targets.fatTarget, fiberTarget: targets.fiberTarget, waterTarget: targets.waterTarget,
+      },
+      remaining: {
+        kcal: t.kcalRemaining, protein: t.proteinRemaining, carbs: t.carbsRemaining,
+        fat: t.fatRemaining, fiber: t.fiberRemaining, water: t.waterRemaining,
+      },
+      extras: (t.extras || []).map((x) => x?.name).filter(Boolean),
+    };
+  }, [state.days, state.snackBank, state.proteinBank, state.dessertBank, state.antojoCustomItems, targets, snapDayKey]);
+  // El `ts` cambia en cada render; para no empujar de más, comparamos solo lo sustantivo.
+  const snapBody = useMemo(() => {
+    const { ts, ...rest } = snapPayload; void ts; return JSON.stringify(rest);
+  }, [snapPayload]);
+  useEffect(() => {
+    if (!bridgeUrl) return;
+    const id = setTimeout(() => {
+      fetch(bridgeUrl, {
+        method: 'POST', mode: 'no-cors', keepalive: true,
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({ ...JSON.parse(snapBody), ts: Date.now() }),
+      }).catch(() => {});
+    }, 1500);
+    return () => clearTimeout(id);
+  }, [bridgeUrl, snapBody]);
+
   // Persist tab en hash + shortcuts
   useEffect(() => { history.replaceState(null, '', '#/' + tab); }, [tab]);
   useEffect(() => {
