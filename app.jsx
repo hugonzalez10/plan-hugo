@@ -1261,6 +1261,20 @@ function migrateState(parsed) {
   next.version = 3;
   if (next.userProfile === undefined) next.userProfile = null;
   if (next.userProfile && typeof next.userProfile === 'object') {
+    // Migración de esquema viejo→nuevo: perfiles guardados por versiones previas
+    // usaban otros nombres de campo, lo que dejaba a calcMifflinStJeor con valores
+    // undefined y la meta caía al fallback plano (2300). Mapear a los nombres que
+    // calcTargets espera (solo si el campo nuevo aún no existe).
+    const up = next.userProfile;
+    if (up.weightKg == null && up.weight != null) up.weightKg = Number(up.weight) || null;
+    if (up.heightCm == null && up.height != null) up.heightCm = Number(up.height) || null;
+    if (up.activityLevel == null && up.activity != null) up.activityLevel = up.activity;
+    if (up.sex === 'male' || up.sex === 'M') up.sex = 'M';
+    else if (up.sex === 'female' || up.sex === 'F') up.sex = 'F';
+    if (up.goal === 'cut') up.goal = 'lose';
+    else if (up.goal === 'bulk') up.goal = 'gain';
+    else if (up.goal === 'maintain' || up.goal === 'maintenance') up.goal = 'maintain';
+    delete up.weight; delete up.height; delete up.activity;
     if (!Number.isFinite(next.userProfile.kcalDeficit)) {
       next.userProfile.kcalDeficit = next.userProfile.goal === 'lose' ? 400 : null;
     }
@@ -9063,6 +9077,44 @@ function App() {
     }, 1500);
     return () => clearTimeout(id);
   }, [bridgeUrl, snapBody]);
+
+  // Empuje app→bridge: manda el perfil + metas calculadas (meta diaria, déficit,
+  // TMB/TDEE, antropometría) para que la skill food-tracker NO hardcodee ~2.150 y
+  // lea la meta real. Se guarda en `config` del bridge (GET ?config=1 lo devuelve).
+  const configBody = useMemo(() => {
+    const p = state.userProfile;
+    if (!p) return null;
+    return JSON.stringify({
+      op: 'config',
+      config: {
+        goal: p.goal ?? null, sex: p.sex ?? null, age: p.age ?? null,
+        heightCm: p.heightCm ?? null, weightKg: p.weightKg ?? null,
+        activityLevel: p.activityLevel ?? null,
+        kcalTarget: p.kcalTarget ?? null, kcalDeficit: p.kcalDeficit ?? null,
+        targets: {
+          kcalMax: targets.kcalMax, kcalMin: targets.kcalMin, proteinMin: targets.proteinMin,
+          carbsTarget: targets.carbsTarget, fatTarget: targets.fatTarget,
+          fiberTarget: targets.fiberTarget, waterTarget: targets.waterTarget,
+          bmr: targets.bmr ?? null, tdee: targets.tdee ?? null,
+        },
+      },
+    });
+  }, [state.userProfile, targets]);
+  // configBody no lleva timestamp: el efecto solo dispara cuando el perfil/metas
+  // cambian de verdad, no en cada render. Debounce 1800ms (escalonado del snapshot).
+  useEffect(() => {
+    if (!bridgeUrl || !configBody) return;
+    const id = setTimeout(() => {
+      const payload = JSON.parse(configBody);
+      payload.config.updatedAt = new Date().toISOString();
+      fetch(bridgeUrl, {
+        method: 'POST', mode: 'no-cors', keepalive: true,
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(payload),
+      }).catch(() => {});
+    }, 1800);
+    return () => clearTimeout(id);
+  }, [bridgeUrl, configBody]);
 
   // Persist tab en hash + shortcuts
   useEffect(() => { history.replaceState(null, '', '#/' + tab); }, [tab]);

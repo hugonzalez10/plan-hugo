@@ -25,6 +25,8 @@
 // ── Contrato ─────────────────────────────────────────────────────────────────
 //  GET  /exec                        → lee y devuelve el JSON del canónico (la app)
 //  GET  /exec?totals=YYYY-MM-DD      → devuelve solo los totales de ese día (rápido)
+//  GET  /exec?config=1               → devuelve solo el bloque `config` (la skill)
+//  GET  /exec?cleanup=1              → barre duplicados en todo Drive (mantención)
 //  GET  /exec?commit=<uploadFileId>  → aplica ese upload (delta o bridge) al canónico
 //  POST /exec  (body = delta|bridge) → aplica directo (si el runtime puede postear)
 //
@@ -40,6 +42,12 @@
 //      "totals":{kcalNet,kcalIn,kcalBurned,protein,carbs,fat,fiber,waterMl},
 //      "targets":{...}, "remaining":{...}, "eaten":[...] }
 //  Se guarda en `snapshots[date]`. GET ?totals=<date> lo devuelve con source:"app".
+//
+//  CONFIG (lo empuja la APP por POST cuando cambia el perfil): meta diaria, déficit,
+//  TMB/TDEE y antropometría, para que la skill no hardcodee ~2.150 kcal:
+//    { "op":"config", "config":{ goal, sex, age, heightCm, weightKg, activityLevel,
+//      kcalTarget, kcalDeficit, targets:{kcalMax,proteinMin,...,bmr,tdee} } }
+//  Se guarda en `config`. GET ?config=1 lo devuelve. NO se poda.
 //
 // ── Mantenimiento ────────────────────────────────────────────────────────────
 //  Si algún día se recrea el archivo, actualiza CANONICAL_ID aquí Y en
@@ -69,6 +77,9 @@ function _readCanonical() {
   // `snapshots` = mapa por fecha con los totales que la APP calcula y empuja
   // (plan fijo marcado + extras − ejercicio). Es la fuente real de "cómo voy hoy".
   if (typeof b.snapshots !== 'object' || b.snapshots === null || Array.isArray(b.snapshots)) b.snapshots = {};
+  // `config` = perfil + metas que la APP empuja (meta diaria, déficit, TMB/TDEE,
+  // antropometría). La skill lo lee para no hardcodear ~2.150. NO se poda.
+  if (typeof b.config !== 'object' || b.config === null || Array.isArray(b.config)) b.config = {};
   return b;
 }
 
@@ -80,13 +91,18 @@ function _writeCanonical(bridge) {
 
 // Manda a la papelera todo plan-hugo-bridge.json que NO sea el canónico y todos
 // los plan-hugo-bridge.upload.json (temporales ya consumidos).
+//
+// BARRE TODO DRIVE, no solo la carpeta del canónico: un create_file mal dirigido
+// puede dejar el duplicado en OTRA carpeta, y el sweep por carpeta nunca lo veía
+// (ese era el bug que dejaba duplicados vivos). `getFilesByName` sin carpeta busca
+// en todo el Drive del dueño. Devuelve cuántos archivos mandó a la papelera.
 function _trashDuplicates() {
-  var folder = _bridgeFolder();
-  if (!folder) return;
-  var dups = folder.getFilesByName(BRIDGE_TITLE);
-  while (dups.hasNext()) { var f = dups.next(); if (f.getId() !== CANONICAL_ID) f.setTrashed(true); }
-  var ups = folder.getFilesByName(UPLOAD_TITLE);
-  while (ups.hasNext()) ups.next().setTrashed(true);
+  var n = 0;
+  var dups = DriveApp.getFilesByName(BRIDGE_TITLE);
+  while (dups.hasNext()) { var f = dups.next(); if (f.getId() !== CANONICAL_ID) { f.setTrashed(true); n++; } }
+  var ups = DriveApp.getFilesByName(UPLOAD_TITLE);
+  while (ups.hasNext()) { ups.next().setTrashed(true); n++; }
+  return n;
 }
 
 function _daysAgoKey(n) {
@@ -119,8 +135,22 @@ function _totals(bridge, day) {
   return { totals: t, workoutsKcal: wk };
 }
 
-// Aplica un delta (merge incremental) o un bridge completo (sobrescritura).
+// Aplica un delta/snapshot/config/bridge bajo lock de script. Hay DOS POST
+// frecuentes desde la app (snapshot y config) que hacen read-modify-write sobre
+// el MISMO archivo; sin lock uno podría pisar al otro (lost update). El lock
+// serializa toda mutación del canónico.
 function _apply(payload) {
+  var lock = LockService.getScriptLock();
+  try { lock.waitLock(20000); } catch (e) { return { ok: false, reason: 'busy' }; }
+  try {
+    return _applyInner(payload);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// Aplica un delta (merge incremental) o un bridge completo (sobrescritura).
+function _applyInner(payload) {
   var bridge = _readCanonical();
   var day = (payload && payload.today) || _daysAgoKey(0);
   var added = 0;
@@ -139,6 +169,16 @@ function _apply(payload) {
     _prune(bridge);
     _writeCanonical(bridge);
     return { ok: true, snapshot: true, today: payload.date };
+  }
+
+  // CONFIG: la app empuja su perfil + metas calculadas. No toca meals/etc.; solo
+  // guarda/reemplaza el bloque `config`. La skill lo lee con GET ?config=1.
+  if (payload && payload.op === 'config' && payload.config) {
+    bridge.config = payload.config;
+    bridge.config.updatedAt = payload.config.updatedAt || new Date().toISOString();
+    _prune(bridge);
+    _writeCanonical(bridge);
+    return { ok: true, config: true };
   }
 
   if (payload && payload.op === 'add' && payload.section) {
@@ -173,8 +213,9 @@ function _commitFromUpload(uploadId) {
   if (uploadId && uploadId !== '1') {
     file = DriveApp.getFileById(uploadId);
   } else {
-    var folder = _bridgeFolder();
-    var it = folder ? folder.getFilesByName(UPLOAD_TITLE) : DriveApp.getFilesByName(UPLOAD_TITLE);
+    // Busca el temporal en TODO Drive (no solo en la carpeta del canónico): un
+    // upload puede haber caído en otra carpeta. Toma el más reciente por nombre.
+    var it = DriveApp.getFilesByName(UPLOAD_TITLE);
     while (it.hasNext()) { var f = it.next(); if (!file || f.getLastUpdated() > file.getLastUpdated()) file = f; }
   }
   if (!file) return { ok: false, reason: 'no-upload' };
@@ -185,6 +226,10 @@ function _commitFromUpload(uploadId) {
 function doGet(e) {
   var p = (e && e.parameter) || {};
   if (p.commit) return _json(_commitFromUpload(p.commit));
+  // Limpieza a demanda: barre duplicados en todo Drive y reporta cuántos borró.
+  if (p.cleanup) return _json({ ok: true, trashed: _trashDuplicates() });
+  // Config: la skill la lee para conocer meta/déficit/antropometría.
+  if (p.config) return _json({ ok: true, config: _readCanonical().config || {} });
   if (p.totals) {
     var bR = _readCanonical();
     var snap = bR.snapshots && bR.snapshots[p.totals];
