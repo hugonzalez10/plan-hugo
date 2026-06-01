@@ -30,6 +30,10 @@
 //  4. La primera vez pedirá permiso de Drive: acéptalo.
 //
 // ── Contrato ─────────────────────────────────────────────────────────────────
+//  POST /exec  (body = delta|bridge) → CAMINO DE ESCRITURA PRINCIPAL de la skill.
+//                                       Aplica el delta directo al canónico y
+//                                       devuelve los totales del día. La skill
+//                                       food-tracker hace este POST con `curl`.
 //  GET  /exec                        → lee y devuelve el JSON del canónico (la app).
 //                                       Antes de servir, AUTO-HEAL: absorbe y borra
 //                                       cualquier duplicado/upload suelto.
@@ -37,8 +41,19 @@
 //  GET  /exec?config=1               → devuelve solo el bloque `config` (la skill)
 //  GET  /exec?cleanup=1              → barre duplicados en todo Drive (mantención)
 //  GET  /exec?heal=1                 → fuerza el auto-heal y reporta cuántos absorbió
-//  GET  /exec?commit=<uploadFileId>  → aplica ese upload (delta o bridge) al canónico
-//  POST /exec  (body = delta|bridge) → aplica directo (si el runtime puede postear)
+//  GET  /exec?commit=<uploadFileId>  → LEGACY: aplica un upload suelto al canónico.
+//                                       Era del flujo viejo `create_file` + commit,
+//                                       que fallaba en la raíz del Shared Drive
+//                                       (canAddChildren:false). Se conserva por
+//                                       compatibilidad / auto-heal; la skill ya no
+//                                       lo usa: postea el delta directo (ver arriba).
+//
+//  ── Cómo postea la skill (gotcha de curl, NO cambiar) ────────────────────────
+//   El `/exec` responde el resultado del doPost vía un 302 a
+//   script.googleusercontent.com. Con `curl`:
+//     curl -sL --data '<delta JSON>' "<BRIDGE_URL>"      ✓ (postea y baja a GET)
+//   NUNCA con `-X POST`: fuerza re-POST en el redirect y googleusercontent da 405.
+//   `-L` es obligatorio para seguir ese redirect.
 //
 //  Formato del "delta" (lo que deja la skill en el upload temporal):
 //    { "op":"add", "section":"meals", "today":"2026-05-30",
