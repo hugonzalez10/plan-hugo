@@ -1219,25 +1219,35 @@ function buildSeed() {
     },
     weights: [],
     recipeBank: [],
-    bridge: { lastSyncAt: null, importedIds: [] },
+    bridge: { lastSyncAt: null, importedIds: [], pushedIds: [] },
     aiCache: { coach: {}, weekly: {}, patterns: null, lastSubstitution: null },
   };
 }
 
-// Firma de contenido de una comida del chat: slot|nombre|kcal. El backend del bridge reasigna
-// un UUID por fila en cada import, así que re-registrar el mismo plan trae ids nuevos que el
-// dedup por id no cacha. Esta firma colapsa esos duplicados (ventana = el mismo día).
+// Firma de contenido de una comida: slot|nombre|kcal. El servidor del bridge asigna el id y
+// dedup por contenido, así que el mismo plato desde la app y desde el chat trae ids distintos
+// que un dedup por id no cacharía. Esta firma colapsa esos duplicados dentro de la ventana.
 function chatMealSig(slot, name, kcal) {
   return `${slot || 'extra'}|${normalizeName(name)}|${Math.round(Number(kcal) || 0)}`;
 }
 
-// Colapsa extras duplicados dentro de un mismo día. Por id (re-importación obsoleta del bridge)
-// y, SOLO para comidas del chat (source 'skill-chat'), también por contenido: el bridge les
-// reasigna UUIDs en cada import y duplicaría el plan. Los extras manuales se dedupean solo por
-// id, para no subcontar snacks repetidos legítimos.
+// Ventana de dedup por contenido (debe coincidir con WINDOW_MS del Apps Script). Dos entradas
+// con la misma firma se consideran la MISMA si caen dentro de la ventana; más allá, repeticiones
+// legítimas (p.ej. dos cafés en el día). Si a alguna le falta ts (datos legacy) se cae al match
+// por mismo día (conservador: colapsa, como antes).
+const DEDUP_WINDOW_MS = 5 * 60 * 1000;
+function sameWindow(tsA, tsB) {
+  if (tsA == null || tsB == null) return true;
+  return Math.abs(Number(tsA) - Number(tsB)) <= DEDUP_WINDOW_MS;
+}
+
+// Colapsa extras duplicados dentro de un mismo día. Por id, y por contenido+ventana SOLO para
+// comidas del chat (source 'skill-chat'): el chat puede re-registrar el mismo plato. Los extras
+// de la app se dedupean solo por id, para no subcontar repeticiones legítimas que el usuario
+// ingresó a mano.
 function dedupeDayExtras(extras) {
   const seen = new Set();
-  const sigSeen = new Set();
+  const sigSeen = [];
   const out = [];
   for (const x of extras) {
     if (x && x.id != null) {
@@ -1246,8 +1256,8 @@ function dedupeDayExtras(extras) {
     }
     if (x && x.source === 'skill-chat') {
       const sig = chatMealSig(x.mealSlot, x.name, x.kcal);
-      if (sigSeen.has(sig)) continue;
-      sigSeen.add(sig);
+      if (sigSeen.some((s) => s.sig === sig && sameWindow(s.ts, x.ts))) continue;
+      sigSeen.push({ sig, ts: x.ts });
     }
     out.push(x);
   }
@@ -1458,14 +1468,16 @@ function mergeBridge(state, bridge) {
     // Idempotencia a nivel id contra importedIds obsoleto (p.ej. tras un pull del Gist): si el
     // día ya tiene un extra con este id, no lo re-agregues (pero sí dalo por importado).
     if (d.extras.some((x) => x.id === m.id)) { importedIds.add(m.id); continue; }
-    // Dedup por contenido contra comidas del chat ya presentes ese día: el bridge reasigna
-    // UUIDs por fila, así que reimportar el mismo plan trae ids nuevos. Lo damos por importado.
+    // Dedup por contenido+ventana contra CUALQUIER extra ya presente ese día (no solo del chat):
+    // así también se absorbe el eco del propio empuje app→bridge, que vuelve con id de servidor
+    // distinto. Lo damos por importado.
     const sig = chatMealSig(slot, m.name, m.kcal);
-    if (d.extras.some((x) => x.source === 'skill-chat' && chatMealSig(x.mealSlot, x.name, x.kcal) === sig)) {
+    if (d.extras.some((x) => chatMealSig(x.mealSlot, x.name, x.kcal) === sig && sameWindow(x.ts, m.ts))) {
       importedIds.add(m.id); continue;
     }
     d.extras.push({
-      id: m.id, name: m.name || 'Comida', kcal: num(m.kcal), protein: num(m.protein),
+      id: m.id, ts: m.ts != null ? m.ts : Date.now(), name: m.name || 'Comida',
+      kcal: num(m.kcal), protein: num(m.protein),
       carbs: num(m.carbs), fat: num(m.fat), fiber: num(m.fiber),
       mealSlot: slot, source: 'skill-chat',
     });
@@ -1475,9 +1487,17 @@ function mergeBridge(state, bridge) {
 
   for (const w of bridge.workouts) {
     if (w.id == null || importedIds.has(w.id)) continue;
-    const ex = { id: w.id, name: w.name || 'Entrenamiento', kcal: num(w.kcal) };
+    const d = ensureDay(w.date || todayKey());
+    if (d.exercise.some((x) => x.id === w.id)) { importedIds.add(w.id); continue; }
+    // Dedup por contenido+ventana (nombre normalizado dentro del día): absorbe el eco del
+    // empuje app→bridge, que vuelve con id de servidor distinto.
+    const wname = normalizeName(w.name);
+    if (d.exercise.some((x) => normalizeName(x.name) === wname && sameWindow(x.ts, w.ts))) {
+      importedIds.add(w.id); continue;
+    }
+    const ex = { id: w.id, ts: w.ts != null ? w.ts : Date.now(), name: w.name || 'Entrenamiento', kcal: num(w.kcal) };
     if (w.minutes != null) ex.minutes = num(w.minutes);
-    ensureDay(w.date || todayKey()).exercise.push(ex);
+    d.exercise.push(ex);
     importedIds.add(w.id); added.workouts++;
   }
 
@@ -3626,7 +3646,7 @@ function ExtrasSection({ day, onUpdate, apiKey, tryWithRules }) {
     if (tagSet.has('alcohol')) actions.push('add_alcohol');
 
     const doSave = () => {
-      onUpdate({ extras: [...allItems, { ...item, id: uuid() }] });
+      onUpdate({ extras: [...allItems, { ...item, id: uuid(), ts: Date.now() }] });
       setAdding(false);
     };
 
@@ -3759,6 +3779,7 @@ function MealPhotoModal({ state, setState, dateKey, onClose }) {
         if (it.portion) namePieces.push(`(${it.portion})`);
         extras.push({
           id: uuid(),
+          ts: Date.now(),
           name: namePieces.join(' '),
           kcal: it.kcal, protein: it.protein,
           carbs: it.carbs, fat: it.fat, fiber: it.fiber,
@@ -4659,13 +4680,13 @@ function ExerciseSection({ day, onUpdate, apiKey, userWeightKg }) {
   const handleQuickAdd = () => {
     const n = Number(quickKcal);
     if (!Number.isFinite(n) || n <= 0) return;
-    onUpdate({ exercise: [...items, { id: uuid(), name: 'Entrenamiento', kcal: n }] });
+    onUpdate({ exercise: [...items, { id: uuid(), ts: Date.now(), name: 'Entrenamiento', kcal: n }] });
     setQuickKcal('');
   };
-  const handleSave = (item) => { onUpdate({ exercise: [...items, { ...item, id: uuid() }] }); setAdding(false); };
+  const handleSave = (item) => { onUpdate({ exercise: [...items, { ...item, id: uuid(), ts: Date.now() }] }); setAdding(false); };
   const handleRemove = (id) => { onUpdate({ exercise: items.filter((e) => e.id !== id) }); };
   const handleCaptureSave = (item) => {
-    onUpdate({ exercise: [...items, item] });
+    onUpdate({ exercise: [...items, { ...item, id: item.id ?? uuid(), ts: item.ts ?? Date.now() }] });
     setCapturing(false);
   };
 
@@ -5176,6 +5197,7 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
     updateDay({
       extras: [...cur, {
         id: uuid(),
+        ts: Date.now(),
         name: r.name,
         kcal: r.kcal, protein: r.protein,
         carbs: r.carbs, fat: r.fat, fiber: r.fiber,
@@ -8653,7 +8675,7 @@ function BulkWorkoutsModal({ state, setState, onClose }) {
         const existing = day.exercise || [];
         const minLabel = r.minutes && Number(r.minutes) > 0 ? ` · ${Number(r.minutes)} min` : '';
         const name = (r.name?.trim() || 'Entrenamiento') + minLabel;
-        days[r.date] = { ...day, exercise: [...existing, { id: uuid(), name, kcal: Number(r.kcal) }] };
+        days[r.date] = { ...day, exercise: [...existing, { id: uuid(), ts: Date.now(), name, kcal: Number(r.kcal) }] };
       }
       return { ...prev, days };
     });
@@ -9115,6 +9137,77 @@ function App() {
     }, 1800);
     return () => clearTimeout(id);
   }, [bridgeUrl, configBody]);
+
+  // Empuje app→bridge de entradas creadas en la app (extras, ejercicios, pesos) para que el
+  // chat y el bridge las vean (bidireccional). El servidor reasigna el id y dedup por contenido,
+  // así que reenviar es inocuo. NO se reenvía lo que vino del bridge (id en importedIds) ni lo ya
+  // enviado (id en pushedIds). Mismo patrón POST no-cors/text-plain que snapshot/config.
+  const pushPayload = useMemo(() => {
+    const imported = new Set(state.bridge?.importedIds || []);
+    const pushed = new Set(state.bridge?.pushedIds || []);
+    const cutoff = shiftDate(todayKey(), -10);
+    const numv = (v) => Number(v) || 0;
+    const out = [];
+    const days = state.days || {};
+    for (const dk of Object.keys(days)) {
+      if (dk < cutoff) continue;
+      const d = days[dk] || {};
+      for (const x of (d.extras || [])) {
+        if (!x || x.id == null || imported.has(x.id) || pushed.has(x.id)) continue;
+        out.push({ localId: x.id, section: 'meals', date: dk, entry: {
+          name: x.name, kcal: numv(x.kcal), protein: numv(x.protein), carbs: numv(x.carbs),
+          fat: numv(x.fat), fiber: numv(x.fiber), mealSlot: x.mealSlot || 'extra',
+          date: dk, ts: x.ts != null ? x.ts : null, source: 'app',
+        } });
+      }
+      for (const ex of (d.exercise || [])) {
+        if (!ex || ex.id == null || imported.has(ex.id) || pushed.has(ex.id)) continue;
+        const entry = { name: ex.name, kcal: numv(ex.kcal), date: dk, ts: ex.ts != null ? ex.ts : null, source: 'app' };
+        if (ex.minutes != null) entry.minutes = numv(ex.minutes);
+        out.push({ localId: ex.id, section: 'workouts', date: dk, entry });
+      }
+    }
+    for (const wt of (state.weights || [])) {
+      if (!wt || wt.id == null) continue;
+      const wdate = wt.date || '';
+      if (wdate < cutoff || imported.has(wt.id) || pushed.has(wt.id)) continue;
+      const entry = { date: wdate, source: 'app', ts: wt.ts != null ? wt.ts : null };
+      for (const wf of WEIGHT_FIELDS) if (wt[wf.key] != null) entry[wf.key] = wt[wf.key];
+      if (wt.time) entry.time = wt.time;
+      out.push({ localId: wt.id, section: 'weights', date: wdate, entry });
+    }
+    return out;
+  }, [state.days, state.weights, state.bridge]);
+  const pushBody = useMemo(() => JSON.stringify(pushPayload), [pushPayload]);
+  useEffect(() => {
+    if (!bridgeUrl) return;
+    let items;
+    try { items = JSON.parse(pushBody); } catch (e) { items = []; }
+    if (!items.length) return;
+    const id = setTimeout(async () => {
+      const pushedNow = [];
+      for (const it of items) {
+        try {
+          await fetch(bridgeUrl, {
+            method: 'POST', mode: 'no-cors', keepalive: true,
+            headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+            body: JSON.stringify({
+              op: 'add', section: it.section, today: it.date,
+              entries: [{ ...it.entry, ts: it.entry.ts != null ? it.entry.ts : Date.now() }],
+            }),
+          });
+          pushedNow.push(it.localId);
+        } catch (e) { /* red caída: queda sin marcar y se reintenta en el próximo cambio */ }
+      }
+      if (pushedNow.length) {
+        setState((prev) => ({
+          ...prev,
+          bridge: { ...(prev.bridge || {}), pushedIds: [...new Set([...(prev.bridge?.pushedIds || []), ...pushedNow])] },
+        }));
+      }
+    }, 2200);
+    return () => clearTimeout(id);
+  }, [bridgeUrl, pushBody, setState]);
 
   // Persist tab en hash + shortcuts
   useEffect(() => { history.replaceState(null, '', '#/' + tab); }, [tab]);

@@ -19,28 +19,35 @@ La skill hace TODO el trabajo con IA. La app solo lee el JSON desde Drive y lo
 mergea a su estado local. **Un solo archivo en Drive: `plan-hugo-bridge.json`**
 con cuatro secciones (`meals`, `weights`, `workouts`, `checks`).
 
-## Persistencia — registro por WebFetch (GET) al Apps Script (LEER ANTES DE GUARDAR)
+## Persistencia — registro por `curl`/Bash al Apps Script (LEER ANTES DE GUARDAR)
 
 > **REGLA DURA: para registrar NUNCA uses el conector de Drive (`create_file`,
 > `update_file`, `download_file_content`, etc.) ni descargues el bridge completo.
-> Se escribe con una llamada `WebFetch` (GET) al Apps Script.**
+> Se escribe con `curl` directo al Apps Script (`BRIDGE_URL`).**
+>
+> **NO uses `web_fetch`/`WebFetch` para el bridge:** bloquea la URL del `/exec` por no
+> venir de un resultado de búsqueda. Usa **`curl` por Bash** (POST preferido, o GET).
 >
 > Por qué: el bridge vive en la RAÍZ de un Shared Drive con restricción de IA, así
 > que el conector **no puede ni leerlo ni escribirlo** (`canAddChildren:false` +
 > "ineligible for generative AI contexts"). La skill manda la entrada nueva por
-> **GET al `/exec`** (`?w=add&section=...&...`); el Apps Script hace el merge, la
-> poda y la sobrescritura en sitio sobre el `FILE_ID` fijo, y devuelve los totales
-> del día ya sumados. `WebFetch` está en todas las superficies (incluida la app del
-> celular), así que esto funciona en cualquier lado. El conector de Drive queda
-> fuera del camino por completo.
+> `curl` al `/exec`; el Apps Script hace el merge, la poda y la sobrescritura en sitio
+> sobre el `FILE_ID` fijo, y devuelve los totales del día ya sumados. El conector de
+> Drive queda fuera del camino por completo.
+>
+> **El SERVIDOR asigna el `id` y deduplica por CONTENIDO** (nombre normalizado +
+> `mealSlot` + `date` + ventana de ~5 min), no por el `id` del cliente. Así el mismo
+> plato registrado desde la app y desde el chat (o dos veces) NO se duplica aunque
+> traiga ids distintos. El `id` que mandes es opcional y el servidor lo ignora/reasigna;
+> conviene mandar `time` (o `ts` en ms) para afinar la ventana.
 >
 > **Ningún `create_file` es necesario ni permitido para registrar.** Si te ves
 > tentado a crear un archivo en Drive, estás en el flujo viejo (roto): vuelve a
-> este paso y usa el POST.
+> este paso y usa `curl`.
 >
 > Red de seguridad: el Apps Script tiene auto-heal en la lectura, así que cualquier
 > `plan-hugo-bridge.json` suelto que quede de un flujo viejo se absorbe y borra solo
-> en la próxima lectura de la app. Eso NO es excusa para saltarse el POST.
+> en la próxima lectura de la app. Eso NO es excusa para saltarse el `curl`.
 
 Constantes (no cambiar salvo que se recree el archivo; si cambia el `FILE_ID`,
 actualízalo también en `apps-script/bridge-writer.gs`):
@@ -54,17 +61,18 @@ actualízalo también en `apps-script/bridge-writer.gs`):
 usan: eran del flujo `create_file` + `?commit=` que fallaba en el Shared Drive.)
 
 **Flujo de REGISTRO (rápido) en una línea:** clasificar con visión → armar la
-entrada → **`WebFetch` GET a `BRIDGE_URL?w=add&section=...&...`** → el Apps Script
-lo aplica al `FILE_ID`, poda lo viejo, barre duplicados y **responde los totales del
-día**. Un solo paso, sin tocar Drive.
+entrada → **`curl` POST (o GET `?w=add`) a `BRIDGE_URL`** → el Apps Script lo aplica
+al `FILE_ID`, dedup por contenido, poda lo viejo, barre duplicados y **responde los
+totales del día**. Un solo paso, sin tocar Drive.
 
-Forma del `delta` (lo que va dentro del temporal):
+Forma del `delta` (lo que postea la skill):
 ```json
 { "op": "add", "section": "meals", "today": "2026-05-30", "entries": [ { ...entrada... } ] }
 ```
 `section` ∈ `meals` | `weights` | `workouts` | `checks`. `entries` admite una o
-varias (p. ej. dos workouts de una foto). El Apps Script dedup por `id`, poda
-entradas con `date` de más de 10 días y actualiza `updated_at` solo.
+varias (p. ej. dos workouts de una foto). El Apps Script asigna el `id` y dedup por
+contenido (ventana ~5 min), poda entradas con `date` de más de 10 días y actualiza
+`updated_at` solo.
 
 ## Metas diarias (para el feedback de comida)
 
@@ -98,7 +106,9 @@ Grasa visceral índice 15 → marcador crítico. Penalizar carbos simples y gras
 Antes de procesar, decide qué es:
 
 - **Comida** → plato, alimento, etiqueta nutricional, o texto tipo "comí…".
-  Aquí hay un sub-paso OBLIGATORIO (ver abajo): ¿es del **PLAN FIJO** o es un **EXTRA**?
+  Toda comida se registra como una entrada en `meals` (ver Paso 3). Hugo NO tiene un
+  plan de comidas fijo, solo metas de macros: no intentes mapear el alimento a un
+  "plan del día".
 - **Peso / composición** → captura de báscula o app de composición corporal
   (Withings, Speediance, etc.): peso, % grasa, músculo, IMC, etc. → sección `weights`.
 - **Ejercicio** → captura de entrenamiento (Apple Fitness, Strava, anillos):
@@ -107,42 +117,12 @@ Antes de procesar, decide qué es:
 
 Si hay ambigüedad, pregunta en una línea.
 
-### Sub-paso 0.b — Comida: ¿PLAN FIJO o EXTRA? (anti-duplicado)
-
-> **REGLA ANTI-DUPLICADO (OBLIGATORIA):**
-> ANTES de agregar cualquier comida al bridge, verifica si ese ítem ya existe
-> en el PLAN FIJO del día (desayuno/almuerzo/colación/antojo).
-> - Si Hugo dice 'tomé/comí [algo que ya está en el plan fijo]' → NO crear meal
->   ni extra nuevo. Indicarle que lo marque en la app (Marcar todo / el check
->   del ítem).
-> - Usar los valores nutricionales del PLAN FIJO para ese ítem, no recalcular
->   unos distintos.
-> - Solo agregar a meals/extras la comida que sea GENUINAMENTE fuera del plan
->   del día.
-> En caso de duda sobre si un ítem ya está en el plan, preguntar en una línea
-> antes de escribir el bridge.
-
-El **PLAN FIJO** de la app tiene estas secciones (con `mealId` exacto entre paréntesis):
-
-| Sección | `mealId` | Ítems fijos del plan |
-|---------|----------|----------------------|
-| Desayuno | `desayuno` | 2 huevos duros · Yogurt Colun Protein Plus · Café |
-| Almuerzo | `almuerzo` | 1 taza arroz · 1 taza proteína animal · Fruta · Yogurt + 30g granola |
-| Colación | `colacion` | snack elegido en la app (banco) |
-| Cena | `cena` | proteína elegida en la app (banco) |
-| Antojo nocturno | `antojo` | Not Squares Peanut Butter (extensible) |
-
-Cómo decidir:
-
-1. **¿La frase de Hugo coincide con una sección o ítem del plan fijo de arriba?**
-   Ej: "tomé el desayuno", "comí el almuerzo", "ya almorcé", "me comí el antojo",
-   "comí los huevos del desayuno".
-   → **Es PLAN FIJO.** Ir a la opción A del Paso 3 (marcar, **nunca** duplicar).
-2. **¿Es comida que NO está en el plan de hoy?** (algo que se comió de más, fuera
-   del plan: un completo, una empanada, otra colación no planificada, etc.)
-   → **Es EXTRA.** Ir a la opción B del Paso 3 (agregar a `meals` como hasta hoy).
-3. **¿Duda?** Pregunta en una línea: "¿Eso es el almuerzo del plan o algo extra?"
-   antes de escribir nada en el bridge.
+> **Dedup automático (ya no clasificas "plan fijo vs extra").** Hugo no tiene un plan
+> de comidas definido, solo metas de macros. Registra siempre la comida como entrada
+> en `meals` (Paso 3). El servidor dedup por contenido (nombre + `mealSlot` + `date` +
+> ventana de ~5 min), así que registrar el mismo plato dos veces, o que Hugo lo
+> registre también en la app, NO lo duplica. El `mealSlot` es solo una etiqueta de
+> horario (ver tabla más abajo).
 
 ---
 
@@ -193,97 +173,44 @@ Para registrar comida/peso/ejercicio **no leas el archivo**: el merge lo hace el
 Apps Script. Salta directo al Paso 3 (armar el delta). Esto es lo que hace rápido
 el registro.
 
-Solo necesitas leer en dos casos puntuales (siempre por GET al `BRIDGE_URL`, nunca
-por el conector de Drive):
-- **"cómo voy hoy" / "resumen del día":** GET `BRIDGE_URL?totals=YYYY-MM-DD` (ver
-  detalle en la sección "Comando: cómo voy hoy" más abajo — la respuesta trae
+Solo necesitas leer en dos casos puntuales (siempre por `curl` al `BRIDGE_URL`, nunca
+por el conector de Drive ni por `web_fetch`):
+- **"cómo voy hoy" / "resumen del día":** `curl -sL "$BRIDGE_URL?totals=YYYY-MM-DD"`
+  (ver detalle en la sección "Comando: cómo voy hoy" más abajo — la respuesta trae
   `source:"app"` con el número real, o `source:"bridge"` si la app no sincronizó
-  hoy). Para el detalle de comidas, GET `BRIDGE_URL` (el JSON completo).
-- **Inspección manual:** GET `BRIDGE_URL` (el doGet ya devuelve el JSON del bridge
-  vía auto-heal). No uses `download_file_content`/`read_file_content` del conector.
-
-Cualquiera de estos GET sirve con `WebFetch` o con `curl -sL "$BRIDGE_URL?..."`.
-
-`checks` es la sección para **marcar secciones del plan fijo sin duplicar** (ver
-opción A del Paso 3); es retrocompatible (la app la ignora si no está).
+  hoy). Para el detalle de comidas, `curl -sL "$BRIDGE_URL"` (el JSON completo).
+- **Inspección manual:** `curl -sL "$BRIDGE_URL"` (el doGet ya devuelve el JSON del
+  bridge vía auto-heal). No uses `download_file_content`/`read_file_content` del
+  conector.
 
 ---
 
-## Paso 3 — Agregar entrada(s) a la sección correcta
-
-> **RECORDATORIO ANTI-DUPLICADO (OBLIGATORIO, repetido a propósito):**
-> ANTES de agregar cualquier comida al bridge, verifica si ese ítem ya existe
-> en el PLAN FIJO del día (desayuno/almuerzo/colación/antojo).
-> - Si Hugo dice 'tomé/comí [algo que ya está en el plan fijo]' → NO crear meal
->   ni extra nuevo. Indicarle que lo marque en la app (Marcar todo / el check
->   del ítem).
-> - Usar los valores nutricionales del PLAN FIJO para ese ítem, no recalcular
->   unos distintos.
-> - Solo agregar a meals/extras la comida que sea GENUINAMENTE fuera del plan
->   del día.
-> En caso de duda sobre si un ítem ya está en el plan, preguntar en una línea
-> antes de escribir el bridge.
+## Paso 3 — Armar la entrada de la sección correcta
 
 Reglas comunes para TODA entrada:
-- `id`: timestamp Unix en segundos al registrar (`floor(now/1000)`). Si registras
-  varias entradas de una sola foto, usa ids consecutivos distintos (id, id+1, …).
-  El `id` es la clave de deduplicación: la app ignora ids ya importados.
+- **`id`: NO lo mandes** (o mándalo y será ignorado). El servidor asigna el id y
+  deduplica por contenido. Lo que importa para la ventana de dedup es el tiempo:
+  manda `time` (`HH:MM`) o `ts` (ms).
 - `date`: `YYYY-MM-DD` del registro (o de la captura si la muestra).
 - `source`: `"skill-chat"`.
+- `mealSlot` (solo comida): etiqueta de horario según la hora (ver tabla). La app
+  usa `desayuno|almuerzo|colacion|cena|antojo|extra`. Toda comida entra como entrada
+  de `meals`.
 
-### Comida — opción A: ítem del PLAN FIJO (marcar, NUNCA duplicar)
-
-Si en el Paso 0.b clasificaste la comida como **PLAN FIJO**, NO la agregues a
-`meals`. Tienes dos formas, en orden de preferencia:
-
-- **A1 (preferida) — escribir en `checks`:** push una marca a la sección `checks`
-  del bridge. La app marca esa sección fija como comida (usa sus valores del plan,
-  no recalcula) y NO la duplica. Una entrada por sección:
-  ```json
-  { "id": 1748441400, "date": "2026-05-28", "meal": "desayuno", "source": "skill-chat" }
-  ```
-  `meal` debe ser uno de: `desayuno|almuerzo|colacion|cena|antojo`
-  (también acepta `dessertAlmuerzo|dessertCena`). El `id` se deduplica como todo
-  lo demás: se aplica una sola vez, así que si Hugo lo destilda en la app no se
-  vuelve a marcar solo. **No** uses esto para colación/cena si Hugo aún no eligió
-  el ítem en la app (no hay valores que marcar) — en ese caso usa A2.
-- **A2 — solo indicar:** si dudas del `mealId` correcto, no escribas nada y
-  responde: "Eso ya está en tu plan fijo — márcalo en la app (Marcar todo o el
-  check del ítem)."
-
-### Comida — opción B: EXTRA real (fuera del plan)
-
-Solo si en el Paso 0.b clasificaste la comida como **EXTRA** → push a `meals`
-(la app la suma a "EXTRAS DEL DÍA", aparte del plan fijo):
+**Comida** → push a `meals`:
 ```json
 {
-  "id": 1748441400, "date": "2026-05-28", "time": "17:10", "mealSlot": "extra",
+  "date": "2026-05-28", "time": "17:10", "mealSlot": "extra",
   "name": "Empanada de pino", "kcal": 290, "protein": 12,
   "carbs": 32, "fat": 13, "fiber": 2, "gi": "alto", "sat_fat_warning": true,
-  "notes": "Fuera del plan; carbo simple + grasa saturada", "source": "skill-chat"
+  "notes": "Carbo simple + grasa saturada", "source": "skill-chat"
 }
 ```
-`mealSlot` según la hora (ver tabla). La app usa: `desayuno|almuerzo|colacion|cena|antojo|extra`.
-(El `mealSlot` es solo una etiqueta de horario: toda comida del bridge entra como
-EXTRA en la app, nunca reemplaza ni marca una sección del plan fijo.)
 
-### Mini-ejemplos (plan fijo vs extra real)
-
-- **Ítem del PLAN FIJO** — Hugo: "tomé el desayuno" → es la sección fija `desayuno`.
-  **NO** crear meal. Opción A1: push a `checks`
-  `{ "id": 1748460000, "date": "2026-05-28", "meal": "desayuno", "source": "skill-chat" }`,
-  o A2: "Eso ya está en tu plan — márcalo en la app." Responder con los valores del
-  plan (huevos+yogurt+café), no recalcular.
-- **Extra real** — Hugo: "me comí una empanada en la tarde" → no está en el plan.
-  Push a `meals` como el ejemplo de arriba (`mealSlot: "extra"`).
-- **Caso de duda** — Hugo: "comí pollo con arroz" (el almuerzo del plan ES arroz +
-  proteína animal). Preguntar: "¿Eso es tu almuerzo del plan o algo aparte?" antes
-  de escribir el bridge.
-
-**Peso** → push a `weights` (solo las claves legibles + id/date/time/source):
+**Peso** → push a `weights` (solo las claves legibles + date/time/source):
 ```json
 {
-  "id": 1748441401, "date": "2026-05-28", "time": "07:00",
+  "date": "2026-05-28", "time": "07:00",
   "weightKg": 78.2, "bodyFatPct": 18.0, "muscleKg": 60.1, "visceralFat": 15,
   "source": "skill-chat"
 }
@@ -291,61 +218,77 @@ EXTRA en la app, nunca reemplaza ni marca una sección del plan fijo.)
 
 **Ejercicio** → push a `workouts` (una entrada por entrenamiento):
 ```json
-{ "id": 1748441402, "date": "2026-05-28", "name": "Bicicleta fija", "kcal": 307, "minutes": 20, "source": "skill-chat" },
-{ "id": 1748441403, "date": "2026-05-28", "name": "Entrenamiento de fuerza", "kcal": 319, "minutes": 35, "source": "skill-chat" }
+{ "date": "2026-05-28", "time": "07:30", "name": "Bicicleta fija", "kcal": 307, "minutes": 20, "source": "skill-chat" },
+{ "date": "2026-05-28", "time": "08:05", "name": "Entrenamiento de fuerza", "kcal": 319, "minutes": 35, "source": "skill-chat" }
 ```
 
 ---
 
-## Paso 4 — Registrar con WebFetch (GET) al Apps Script (sin tocar Drive)
+## Paso 4 — Registrar con `curl`/Bash al Apps Script (sin tocar Drive)
 
-Registra con **UNA sola llamada `WebFetch` (GET)** a `BRIDGE_URL`, pasando la entrada
-como **parámetros key=value** en la URL. Funciona en cualquier superficie (incluida
-la app de Claude del celular, que solo tiene WebFetch). NO uses el conector de Drive.
+Registra por **Bash con `curl`** al `BRIDGE_URL`. **NO uses `web_fetch`** (bloquea la
+URL del bridge por no venir de un search) ni el conector de Drive.
 
-Construye la URL así (una entrada por llamada):
+**Método preferido — POST del delta (una llamada, admite varias entradas):**
+```bash
+curl -sL --data '{"op":"add","section":"meals","today":"2026-05-30","entries":[
+  {"date":"2026-05-30","time":"20:48","mealSlot":"extra","name":"Empanada de pino",
+   "kcal":290,"protein":12,"carbs":32,"fat":13,"fiber":2,"gi":"alto",
+   "sat_fat_warning":true,"source":"skill-chat"}
+]}' "$BRIDGE_URL"
 ```
-BRIDGE_URL?w=add&section=meals&id=<unix>&date=2026-05-30&time=20:48
-  &name=Empanada%20de%20pino&kcal=290&protein=12&carbs=32&fat=13&fiber=2
-  &gi=alto&satfat=1&mealSlot=extra&notes=Fuera%20del%20plan
+- **`--data` SIN `-X POST`** (el `/exec` responde con un 302 a
+  `script.googleusercontent.com`; con `-X POST` reintenta el POST y da 405).
+- **`-L` obligatorio** para seguir ese redirect y leer la respuesta.
+- `section` ∈ `meals|weights|workouts|checks`. `entries` admite varias (p. ej. dos
+  workouts de una foto). El servidor asigna el `id` y dedup por contenido.
+
+**Alternativa — GET inline (`?w=add`, una entrada por llamada):**
+```bash
+curl -sL "$BRIDGE_URL?w=add&section=meals&date=2026-05-30&time=20:48\
+&name=Empanada%20de%20pino&kcal=290&protein=12&carbs=32&fat=13&fiber=2\
+&gi=alto&satfat=1&mealSlot=extra&notes=Carbo%20simple"
 ```
-Reglas:
-- `w=add` siempre. `section` ∈ `meals|weights|workouts|checks`.
-- `date` = fecha local de hoy (`YYYY-MM-DD`). `id` = timestamp Unix en segundos.
-- **Percent-encodea los valores** con espacios o acentos (`espacio→%20`, `é→%C3%A9`).
+- **Percent-encodea** valores con espacios o acentos (`espacio→%20`, `é→%C3%A9`).
   Si un valor trae `&`, omítelo o cámbialo por `y` para no romper la URL.
 - Campos por sección:
-  - `meals` (extra): `name,kcal,protein,carbs,fat,fiber,gi,satfat(0/1),mealSlot,notes`
-  - `checks` (plan fijo marcado): `meal=desayuno|almuerzo|colacion|cena|antojo` (sin macros)
+  - `meals`: `name,kcal,protein,carbs,fat,fiber,gi,satfat(0/1),mealSlot,time,notes`
   - `weights`: `weightKg,bodyFatPct,muscleKg,visceralFat,time`
-  - `workouts`: `name,kcal,minutes` (una llamada por entrenamiento)
+  - `workouts`: `name,kcal,minutes,time` (una llamada por entrenamiento)
+- También puedes mandar el delta entero por GET: `BRIDGE_URL?delta=<json url-encoded>`.
 
-El Apps Script arma la entrada, la **mergea al `FILE_ID`** (dedup por `id`), poda lo
-de >10 días, sobrescribe el canónico en sitio, barre duplicados y responde:
+Cualquiera de los dos responde con los totales del día ya sumados:
 ```json
 { "ok": true, "added": 1, "today": "2026-05-30",
   "totals": { "kcal": 1234, "protein": 89, "carbs": 102, "fat": 45 },
   "workoutsKcal": 565 }
 ```
 Usa esos `totals` para el Paso 5 (no los recalcules).
-- Si WebFetch reporta una redirección a `script.googleusercontent.com`, vuelve a
-  hacer GET a ESA URL: ahí se sirve la respuesta (igual que el viejo `?commit`).
 - Si la respuesta **no** trae `ok`/`totals` (p. ej. te devuelve el JSON completo del
-  bridge), el endpoint `?w=add` no está desplegado: avísale a Hugo que **redespliegue
-  el Apps Script** (`apps-script/bridge-writer.gs`). NO caigas a `create_file`.
-- Si responde `{ "ok": false, ... }` o falla la red, reintenta la misma GET una vez.
+  bridge), el endpoint no está desplegado: avísale a Hugo que **redespliegue el Apps
+  Script** (`apps-script/bridge-writer.gs`). NO caigas a `create_file`.
+- Si responde `{ "ok": false, ... }` o falla la red, reintenta la misma llamada una vez.
+- `added: 0` no es error: significa que el servidor lo dedupó por contenido (ya estaba
+  registrado, p. ej. Hugo lo ingresó en la app). Igual usa los `totals` devueltos.
 
 > **Por qué así:** el bridge vive en la raíz de un Shared Drive con restricción de IA;
 > el conector de Drive no puede leerlo ni escribirlo (`canAddChildren:false` +
-> "ineligible for generative AI contexts"). El GET al Apps Script saca al conector del
-> camino: el merge, la sobrescritura en sitio sobre el `FILE_ID` fijo, la poda y la
-> limpieza pasan server-side. WebFetch (GET) está en todas las superficies, así que el
-> registro funciona también desde el celular. Ver `apps-script/bridge-writer.gs`.
+> "ineligible for generative AI contexts"). `curl` al Apps Script saca al conector del
+> camino: el merge, el dedup por contenido, la sobrescritura en sitio sobre el `FILE_ID`,
+> la poda y la limpieza pasan server-side. Ver `apps-script/bridge-writer.gs`.
 
-(Alternativa de escritorio con `Bash`/`curl` — mismo resultado, por POST:
-`curl -sL --data '{"op":"add","section":"meals","today":"...","entries":[{...}]}' "$BRIDGE_URL"`
-— **sin `-X POST`** (el 302 a googleusercontent daría 405); `-L` obligatorio. También
-puedes mandar el delta entero por GET: `BRIDGE_URL?delta=<json url-encoded>`.)
+---
+
+## Paso 4.b — Borrar un registro errado (limpiar desde el chat)
+
+Si registraste algo mal (o Hugo pide borrarlo), elimínalo por `id`:
+```bash
+curl -sL "$BRIDGE_URL?w=delete&section=meals&id=<id>"
+# → { "ok": true, "deleted": 1, "section": "meals", "id": "<id>" }
+```
+`section` ∈ `meals|weights|workouts|checks`. Para saber el `id`, lee primero el JSON
+completo (`curl -sL "$BRIDGE_URL"`) y ubica la entrada por nombre/fecha. `deleted: 0`
+significa que no había ninguna con ese id.
 
 ---
 
@@ -362,21 +305,10 @@ puedes mandar el delta entero por GET: `BRIDGE_URL?delta=<json url-encoded>`.)
 
 [alerta si corresponde]
 ```
-Barra de 10 bloques. Los totales vienen **directos en la respuesta del commit**
+Barra de 10 bloques. Los totales vienen **directos en la respuesta del registro**
 (`totals.kcal`, `totals.protein`, …) — NO los recalcules ni vuelvas a bajar el
-bridge. Si por alguna razón el commit no trajo `totals`, recién ahí
-GET `BRIDGE_URL?totals=<hoy>`.
-
-### Comida del PLAN FIJO (marcada, no nueva)
-Cuando fue un ítem del plan fijo (opción A), NO digas "registrado" como comida
-nueva. Usa los valores del plan, no los recalcules:
-```
-✅ [Sección] del plan marcado como comido
-~[kcal del plan] kcal | P:[x]g | C:[x]g | G:[x]g  (valores del plan)
-
-[Si usaste A1] Lo marqué en la app vía sync.
-[Si usaste A2] Márcalo en la app (Marcar todo o el check del ítem).
-```
+bridge. Si por alguna razón la respuesta no trajo `totals`, recién ahí
+`curl -sL "$BRIDGE_URL?totals=<hoy>"`.
 
 ### Peso
 ```
@@ -394,11 +326,11 @@ nueva. Usa los valores del plan, no los recalcules:
 
 ## Comando: "cómo voy hoy"
 
-GET `BRIDGE_URL?totals=<hoy>`. La respuesta trae un campo **`source`** que decide
-cómo responder:
+`curl -sL "$BRIDGE_URL?totals=<hoy>"`. La respuesta trae un campo **`source`** que
+decide cómo responder:
 
-- **`source:"app"`** → es el número REAL que ve Hugo en la app (plan fijo marcado +
-  extras del chat − ejercicio). Úsalo tal cual, NO sumes nada más. Trae:
+- **`source:"app"`** → es el número REAL que ve Hugo en la app (todo lo del día
+  − ejercicio). Úsalo tal cual, NO sumes nada más. Trae:
   - `totals.kcal` = kcal **neto** del día (ya descontó el ejercicio).
     También `totals.kcalIn` (comido bruto), `totals.kcalBurned`, `protein`,
     `carbs`, `fat`, `fiber`, `waterMl`.
@@ -411,13 +343,13 @@ cómo responder:
   de la pantalla.
 
 - **`source:"bridge"`** → la app **no se ha abierto/sincronizado hoy**, así que solo
-  hay extras registrados por el chat (parcial, NO incluye el plan fijo). Trae
-  `{ totals:{kcal,protein,carbs,fat}, workoutsKcal }`. Muéstralo, pero **avísale a
-  Hugo** que es parcial: "Esto es solo lo que registré por el chat; abre la app un
-  segundo para que sincronice el total completo del día".
+  hay lo registrado por el chat (parcial). Trae `{ totals:{kcal,protein,carbs,fat},
+  workoutsKcal }`. Muéstralo, pero **avísale a Hugo** que es parcial: "Esto es solo lo
+  que registré por el chat; abre la app un segundo para que sincronice el total
+  completo del día".
 
-Si Hugo pide el **detalle** de qué comió, GET `BRIDGE_URL` (el JSON completo) y
-lista las comidas de hoy.
+Si Hugo pide el **detalle** de qué comió, `curl -sL "$BRIDGE_URL"` (el JSON completo)
+y lista las comidas de hoy.
 
 ---
 

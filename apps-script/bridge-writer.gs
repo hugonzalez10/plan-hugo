@@ -30,11 +30,16 @@
 //  4. La primera vez pedirá permiso de Drive: acéptalo.
 //
 // ── Contrato ─────────────────────────────────────────────────────────────────
-//  GET  /exec?w=add&section=...&...  → ESCRITURA INLINE para la app de Claude del
-//                                       celular (solo tiene WebFetch/GET). Arma una
-//                                       entrada desde params key=value y la aplica.
-//                                       section ∈ meals|weights|workouts|checks.
-//                                       Ej: ?w=add&section=meals&id=..&date=..&name=..&kcal=..
+//  GET  /exec?w=add&section=...&...  → ESCRITURA INLINE (chat por curl/bash o app).
+//                                       Arma una entrada desde params key=value y la
+//                                       aplica. section ∈ meals|weights|workouts|checks.
+//                                       Ej: ?w=add&section=meals&date=..&name=..&kcal=..
+//                                       El SERVIDOR asigna el id (uuid) y deduplica por
+//                                       CONTENIDO (ver "Dedup" abajo); el id del cliente
+//                                       es opcional/ignorado en esta rama.
+//  GET  /exec?w=delete&section=..&id=..→ borra de una sección la entrada con ese id y
+//                                       devuelve { ok, deleted:<n>, section, id }. Para
+//                                       limpiar errores desde el chat.
 //  GET  /exec?delta=<json url-enc>   → aplica un payload/delta JSON entero por GET.
 //  POST /exec  (body = delta|bridge) → escritura por POST (runtimes con curl/Bash).
 //                                       Aplica el delta directo al canónico y
@@ -60,11 +65,26 @@
 //   NUNCA con `-X POST`: fuerza re-POST en el redirect y googleusercontent da 405.
 //   `-L` es obligatorio para seguir ese redirect.
 //
-//  Formato del "delta" (lo que deja la skill en el upload temporal):
+//  Formato del "delta" (lo que postea el chat/app):
 //    { "op":"add", "section":"meals", "today":"2026-05-30",
 //      "entries":[ { ...una o varias entradas... } ] }
 //    section ∈ meals | weights | workouts | checks
-//  También acepta un BRIDGE COMPLETO ({meals,weights,...}) → lo sobrescribe tal cual.
+//  Borrado:  { "op":"delete", "section":"meals", "id":"<id>" }
+//  También acepta un BRIDGE COMPLETO ({meals,weights,...}) → unión por contenido.
+//
+//  ── Dedup por CONTENIDO + autoridad del id en el servidor ────────────────────
+//   El id ya NO lo fija el cliente: en la rama `op:add` el servidor asigna un uuid
+//   y deduplica por CONTENIDO, no por id. Así el mismo plato registrado desde la app
+//   y desde el chat (o dos veces) NO se duplica aunque traiga ids distintos. Firma:
+//     · meals    : nombre normalizado | mealSlot | date   (+ ventana ±5 min sobre ts)
+//     · workouts : nombre normalizado | date              (+ ventana ±5 min sobre ts)
+//     · weights  : date  → si ya hay medición del día, MERGEA campos (no duplica)
+//     · checks   : meal | date  → idempotente
+//   Conviene mandar `ts` (ms) o `time` para que la ventana funcione; si faltan, el
+//   servidor sella `ts` con la hora de llegada. La normalización debe ser idéntica a
+//   `normalizeName` de app.jsx (minúsculas, trim, espacios colapsados) o el dedup
+//   diverge entre lados. En la unión de un BRIDGE COMPLETO / auto-heal los ids
+//   existentes se conservan (estabilidad); solo se asignan en `op:add` o si faltan.
 //
 //  SNAPSHOT (lo empuja la APP por POST): el total real del día ya calculado en
 //  pantalla, para que el chat responda "cómo voy hoy" con ese número:
@@ -99,6 +119,11 @@ var BRIDGE_TITLE = 'plan-hugo-bridge.json';
 var UPLOAD_TITLE = 'plan-hugo-bridge.upload.json';
 var PRUNE_DAYS   = 10;
 var SECTIONS     = ['meals', 'weights', 'workouts', 'checks'];
+var WINDOW_MS    = 5 * 60 * 1000; // ventana de dedup por contenido (meals/workouts)
+// Campos de composición que se mergean sobre la medición del día (no duplica peso).
+var WEIGHT_MERGE_FIELDS = ['weightKg', 'bodyFatPct', 'muscleKg', 'visceralFat', 'time', 'note',
+  'skeletalMuscleKg', 'fatFreeMassKg', 'boneKg', 'musclePct', 'waterPct', 'proteinPct',
+  'bmi', 'ffmi', 'metabolicAge', 'basalMetabolismKcal', 'waistCm', 'rawExtracted'];
 
 function _json(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj))
@@ -205,21 +230,23 @@ function _mergeInto(bridge, payload, day) {
     return 0;
   }
 
-  // DELTA add: agrega entradas a una sección, dedup por id.
+  // DELTA add: agrega entradas a una sección, dedup por CONTENIDO. El servidor
+  // asigna el id (autoridad) y sella el ts.
   if (payload.op === 'add' && payload.section) {
     var sec = payload.section;
     if (SECTIONS.indexOf(sec) < 0) return 0;
     var entries = payload.entries || (payload.entry ? [payload.entry] : []);
-    return _unionInto(bridge, sec, entries);
+    return _contentUnion(bridge, sec, entries, true);
   }
 
-  // BRIDGE COMPLETO: unión por id en cada sección (NO sobrescribe a ciegas, así
-  // un archivo suelto no borra entradas que el canónico tenga y él no). Snapshots
-  // y config se mergean con la misma regla de arriba si vienen.
+  // BRIDGE COMPLETO: unión por contenido en cada sección (NO sobrescribe a ciegas, así
+  // un archivo suelto no borra entradas que el canónico tenga y él no). Conserva los
+  // ids existentes (assignId=false). Snapshots y config se mergean con la misma regla
+  // de arriba si vienen.
   if (SECTIONS.some(function (s) { return Array.isArray(payload[s]); })) {
     var added = 0;
     SECTIONS.forEach(function (s) {
-      if (Array.isArray(payload[s])) added += _unionInto(bridge, s, payload[s]);
+      if (Array.isArray(payload[s])) added += _contentUnion(bridge, s, payload[s], false);
     });
     if (payload.snapshots && typeof payload.snapshots === 'object') {
       Object.keys(payload.snapshots).forEach(function (d) {
@@ -238,20 +265,96 @@ function _mergeInto(bridge, payload, day) {
   return 0;
 }
 
-// Unión por id de un array de entradas en una sección. Las entradas sin id se
-// agregan siempre (no hay forma de dedup); las con id solo si no estaban.
-function _unionInto(bridge, sec, entries) {
-  var seen = {};
-  bridge[sec].forEach(function (e) { if (e && e.id != null) seen[e.id] = true; });
+// Normalización idéntica a `normalizeName` de app.jsx (minúsculas, trim, espacios
+// colapsados; SIN quitar acentos). Debe coincidir carácter a carácter o el dedup
+// por contenido diverge entre el servidor y la app.
+function _norm(s) {
+  return String(s == null ? '' : s).toLowerCase().trim().replace(/\s+/g, ' ');
+}
+
+// Firma de contenido por sección (sin ts: la ventana temporal se compara aparte).
+function _sig(sec, e) {
+  if (!e) return null;
+  if (sec === 'meals')    return _norm(e.name) + '|' + _norm(e.mealSlot || 'extra') + '|' + (e.date || '');
+  if (sec === 'workouts') return _norm(e.name) + '|' + (e.date || '');
+  if (sec === 'weights')  return (e.date || '');
+  if (sec === 'checks')   return _norm(e.meal) + '|' + (e.date || '');
+  return null;
+}
+
+// ts en ms para la ventana. Orden: e.ts (ms) → date+time → id unix-segundos → nowMs.
+function _entryTs(e, nowMs) {
+  if (!e) return nowMs;
+  if (e.ts != null && !isNaN(Number(e.ts)) && Number(e.ts) > 0) return Number(e.ts);
+  if (e.date && e.time) {
+    var hhmm = String(e.time);
+    var t = new Date(e.date + 'T' + (hhmm.length === 5 ? hhmm + ':00' : hhmm));
+    if (!isNaN(t.getTime())) return t.getTime();
+  }
+  if (e.id != null && /^\d{9,11}$/.test(String(e.id))) return Number(e.id) * 1000;
+  return nowMs;
+}
+
+// Unión por CONTENIDO (reemplaza la unión por id). El servidor es la autoridad del
+// id: a cada entrada NUEVA (sin match) le asigna un uuid y le sella el ts. Dedup:
+//   · meals/workouts → misma firma de contenido Y |Δts| ≤ WINDOW_MS.
+//   · weights        → misma fecha → merge de campos en la existente (no duplica).
+//   · checks         → misma (meal|fecha) → idempotente, descarta el repetido.
+// `assignId`: true en `op:add` (autoridad del servidor, reasigna siempre); false en
+// la unión de un bridge completo / auto-heal (conserva ids existentes; solo asigna
+// si faltan) para no churnar ids en cada lectura. Devuelve cuántas entradas agregó.
+function _contentUnion(bridge, sec, entries, assignId) {
+  if (SECTIONS.indexOf(sec) < 0) return 0;
+  var nowMs = new Date().getTime();
   var added = 0;
   entries.forEach(function (e) {
     if (!e) return;
-    if (e.id != null && seen[e.id]) return;
+    var sig = _sig(sec, e);
+    var ets = _entryTs(e, nowMs);
+    var hitIdx = -1;
+    for (var i = 0; i < bridge[sec].length; i++) {
+      var x = bridge[sec][i];
+      if (!x || _sig(sec, x) !== sig) continue;
+      if (sec === 'meals' || sec === 'workouts') {
+        if (Math.abs(ets - _entryTs(x, nowMs)) > WINDOW_MS) continue;
+      }
+      hitIdx = i; break;
+    }
+    if (hitIdx >= 0) {
+      if (sec === 'weights') {
+        var cur = bridge[sec][hitIdx];
+        WEIGHT_MERGE_FIELDS.forEach(function (k) {
+          if (e[k] != null && e[k] !== '') cur[k] = e[k];
+        });
+      }
+      return; // dedup: ya existe (o mergeado, en weights)
+    }
+    if (assignId || e.id == null) e.id = Utilities.getUuid();
+    e.ts = ets;
     bridge[sec].push(e);
-    if (e.id != null) seen[e.id] = true;
     added++;
   });
   return added;
+}
+
+// Borra de una sección la entrada con ese id (compara como String → sirve para ids
+// numéricos legacy y uuid nuevos). Bajo lock. Devuelve { ok, deleted, section, id }.
+function _applyDelete(section, id) {
+  if (SECTIONS.indexOf(section) < 0) return { ok: false, reason: 'bad-section' };
+  if (id == null || id === '') return { ok: false, reason: 'no-id' };
+  var lock = LockService.getScriptLock();
+  try { lock.waitLock(20000); } catch (e) { return { ok: false, reason: 'busy' }; }
+  try {
+    var bridge = _readCanonical();
+    var before = bridge[section].length;
+    var target = String(id);
+    bridge[section] = bridge[section].filter(function (e) { return !e || String(e.id) !== target; });
+    var deleted = before - bridge[section].length;
+    if (deleted > 0) _writeCanonical(bridge);
+    return { ok: true, deleted: deleted, section: section, id: id };
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 // ── Aplicación bajo lock ─────────────────────────────────────────────────────
@@ -326,23 +429,25 @@ function _commitFromUpload(uploadId) {
   return _apply(JSON.parse(file.getBlob().getDataAsString()));
 }
 
-// ── ESCRITURA INLINE POR GET (móvil/WebFetch, sin curl ni conector) ──────────
-// La app de Claude del celular solo dispone de WebFetch (GET) y puede no tener cómo
-// encodear un JSON largo. Esta rama arma UNA entrada desde parámetros key=value
-// legibles y reusa _apply (mismo merge/poda/dedup/totales que doPost). No agrega
-// exposición: el doPost ya es abierto.
-//   GET ?w=add&section=meals&id=<unix>&date=YYYY-MM-DD&name=...&kcal=..&protein=..
-//   section ∈ meals|weights|workouts|checks. Para plan fijo: section=checks&meal=almuerzo.
+// ── ESCRITURA INLINE POR GET (chat por curl/bash, o app) ─────────────────────
+// El chat escribe con curl directo al `/exec` (web_fetch bloquea esta URL por no
+// venir de un search). Esta rama arma UNA entrada desde parámetros key=value y reusa
+// _apply (mismo merge/poda/dedup/totales que doPost).
+//   GET ?w=add&section=meals&date=YYYY-MM-DD&name=...&kcal=..&protein=..[&ts=<ms>]
+//   section ∈ meals|weights|workouts|checks. El servidor asigna el id y dedup por
+//   contenido; manda `ts` (ms) o `time` para afinar la ventana de 5 min.
 // Alternativa: ?delta=<json url-encoded> para mandar el objeto/payload entero.
 function _entryFromParams(p) {
   var entry = { source: p.source || 'skill-chat' };
-  ['id', 'date', 'time', 'name', 'mealSlot', 'meal', 'gi', 'notes'].forEach(function (k) {
+  ['date', 'time', 'name', 'mealSlot', 'meal', 'gi', 'notes'].forEach(function (k) {
     if (p[k] != null && p[k] !== '') entry[k] = p[k];
   });
-  ['kcal', 'protein', 'carbs', 'fat', 'fiber', 'minutes', 'weightKg', 'bodyFatPct',
+  ['kcal', 'protein', 'carbs', 'fat', 'fiber', 'minutes', 'ts', 'weightKg', 'bodyFatPct',
    'muscleKg', 'visceralFat'].forEach(function (k) {
     if (p[k] != null && p[k] !== '') entry[k] = Number(p[k]);
   });
+  // El id del cliente es opcional: en `op:add` el servidor lo reasigna (autoridad).
+  // Se conserva solo como pista para derivar el ts si no viene `ts`/`time`.
   if (p.id != null && p.id !== '') entry.id = Number(p.id);
   if (p.satfat != null) entry.sat_fat_warning = (p.satfat === '1' || p.satfat === 'true');
   return entry;
@@ -353,6 +458,9 @@ function doGet(e) {
   var p = (e && e.parameter) || {};
   if (p.w === 'add' && p.section) {
     return _json(_apply({ op: 'add', section: p.section, today: (p.date || p.today), entries: [_entryFromParams(p)] }));
+  }
+  if (p.w === 'delete' && p.section && p.id != null) {
+    return _json(_applyDelete(p.section, p.id));
   }
   if (p.delta)   return _json(_apply(JSON.parse(p.delta)));
   if (p.commit)  return _json(_commitFromUpload(p.commit));
@@ -389,7 +497,11 @@ function doGet(e) {
 function doPost(e) {
   var content = (e && e.postData) ? e.postData.contents : '';
   if (!content) return _json({ ok: false, reason: 'empty' });
-  return _json(_apply(JSON.parse(content)));
+  var payload = JSON.parse(content);
+  // Borrado por POST (op:'delete') con su propio lock; no pasa por _apply para no
+  // anidar locks.
+  if (payload && payload.op === 'delete') return _json(_applyDelete(payload.section, payload.id));
+  return _json(_apply(payload));
 }
 
 // Opcional: si el runtime de la skill NO pudiera disparar el commit por GET,
