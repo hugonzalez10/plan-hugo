@@ -4,7 +4,7 @@
  * NO interceptamos llamadas a api.anthropic.com.
  */
 
-const CACHE_NAME = 'plan-hugo-v11-config-bridge';
+const CACHE_NAME = 'plan-hugo-v12-bridge-bidir';
 const CORE_URLS = [
   './index.html',
   './app.js',
