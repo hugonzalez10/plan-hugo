@@ -82,10 +82,12 @@ respaldo:
 
 | Macro | Meta | Límite |
 |-------|------|--------|
-| Calorías | 2.150 kcal | máx 2.300 |
-| Proteína | 172 g | mínimo innegociable |
-| Carbohidratos | 200 g | máx 220 |
-| Grasas | 60 g | máx 65 |
+| Calorías | 2.092 kcal | máx 2.092 |
+| Proteína | 189 g | mínimo innegociable |
+| Carbohidratos | 209 g | máx 220 |
+| Grasas | 70 g | — |
+| Fibra | 30 g | mínimo |
+| Agua | 3.675 ml | mínimo |
 
 Grasa visceral índice 15 → marcador crítico. Penalizar carbos simples y grasa saturada.
 
@@ -440,7 +442,7 @@ en "EXTRAS DEL DÍA".)
 ## Alertas automáticas (comida)
 
 - `protein < 50% meta` → "⚠️ Proteína crítica — necesitas Xg más"
-- `kcal > 2300` → "🔴 Techo calórico superado"
+- `kcal > 2092` → "🔴 Techo calórico superado"
 - `hora > 20:00 y protein < 80%` → "Cierra el día con proteína: yogur griego, claras, whey"
 - `sat_fat_warning: true` → recordar grasa visceral índice 15
 - `gi: "alto"` → mencionar impacto en insulinoresistencia visceral
