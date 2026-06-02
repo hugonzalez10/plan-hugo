@@ -19,19 +19,20 @@ La skill hace TODO el trabajo con IA. La app solo lee el JSON desde Drive y lo
 mergea a su estado local. **Un solo archivo en Drive: `plan-hugo-bridge.json`**
 con cuatro secciones (`meals`, `weights`, `workouts`, `checks`).
 
-## Persistencia — delta por POST al Apps Script (LEER ANTES DE GUARDAR)
+## Persistencia — registro por WebFetch (GET) al Apps Script (LEER ANTES DE GUARDAR)
 
 > **REGLA DURA: para registrar NUNCA uses el conector de Drive (`create_file`,
-> `update_file`, etc.) ni descargues el bridge completo. Se escribe SOLO por un
-> POST con `curl` al Apps Script.**
+> `update_file`, `download_file_content`, etc.) ni descargues el bridge completo.
+> Se escribe con una llamada `WebFetch` (GET) al Apps Script.**
 >
-> Por qué: el bridge vive en la RAÍZ de un Shared Drive (`canAddChildren: false`),
-> así que `create_file` ahí **falla** —y cuando funcionaba, paría duplicados porque
-> el conector solo sabe crear, no sobrescribir—. La skill ahora manda la entrada
-> nueva (un "delta" de ~300 bytes) **por POST directo al `/exec`**; el Apps Script
-> hace el merge, la poda y la sobrescritura en sitio sobre el `FILE_ID` fijo, y
-> devuelve los totales del día ya sumados. El conector de Drive queda fuera del
-> camino de escritura por completo.
+> Por qué: el bridge vive en la RAÍZ de un Shared Drive con restricción de IA, así
+> que el conector **no puede ni leerlo ni escribirlo** (`canAddChildren:false` +
+> "ineligible for generative AI contexts"). La skill manda la entrada nueva por
+> **GET al `/exec`** (`?w=add&section=...&...`); el Apps Script hace el merge, la
+> poda y la sobrescritura en sitio sobre el `FILE_ID` fijo, y devuelve los totales
+> del día ya sumados. `WebFetch` está en todas las superficies (incluida la app del
+> celular), así que esto funciona en cualquier lado. El conector de Drive queda
+> fuera del camino por completo.
 >
 > **Ningún `create_file` es necesario ni permitido para registrar.** Si te ves
 > tentado a crear un archivo en Drive, estás en el flujo viejo (roto): vuelve a
@@ -52,10 +53,10 @@ actualízalo también en `apps-script/bridge-writer.gs`):
 (El `PARENT_ID` del Shared Drive y el viejo `plan-hugo-bridge.upload.json` ya NO se
 usan: eran del flujo `create_file` + `?commit=` que fallaba en el Shared Drive.)
 
-**Flujo de REGISTRO (rápido) en una línea:** clasificar con visión → armar el
-`delta` con la entrada nueva → **POST del delta a `BRIDGE_URL` con `curl`** → el
-Apps Script lo aplica al `FILE_ID`, poda lo viejo, barre duplicados y **responde los
-totales del día**. Un solo paso, sin tocar Drive.
+**Flujo de REGISTRO (rápido) en una línea:** clasificar con visión → armar la
+entrada → **`WebFetch` GET a `BRIDGE_URL?w=add&section=...&...`** → el Apps Script
+lo aplica al `FILE_ID`, poda lo viejo, barre duplicados y **responde los totales del
+día**. Un solo paso, sin tocar Drive.
 
 Forma del `delta` (lo que va dentro del temporal):
 ```json
@@ -294,53 +295,55 @@ EXTRA en la app, nunca reemplaza ni marca una sección del plan fijo.)
 
 ---
 
-## Paso 4 — POST del delta al Apps Script (UN solo paso, sin tocar Drive)
+## Paso 4 — Registrar con WebFetch (GET) al Apps Script (sin tocar Drive)
 
-Arma el **delta** con la(s) entrada(s) del Paso 3 y mándalo por POST al `/exec` con
-`Bash` + `curl`. Una sola tool call:
+Registra con **UNA sola llamada `WebFetch` (GET)** a `BRIDGE_URL`, pasando la entrada
+como **parámetros key=value** en la URL. Funciona en cualquier superficie (incluida
+la app de Claude del celular, que solo tiene WebFetch). NO uses el conector de Drive.
 
-```bash
-curl -sL --max-time 30 \
-  -H "Content-Type: application/json" \
-  --data '{"op":"add","section":"meals","today":"2026-05-30","entries":[{"id":1780179200,"date":"2026-05-30","time":"20:48","mealSlot":"extra","name":"Empanada de pino","kcal":290,"protein":12,"carbs":32,"fat":13,"fiber":2,"gi":"alto","sat_fat_warning":true,"notes":"...","source":"skill-chat"}]}' \
-  "https://script.google.com/macros/s/AKfycbwcxEoa0nvjhMv6nrdfMcaHKS130PcXV0isbc7ajNj_CMfuBXCR6RhL63LHv-e1zW9W_w/exec"
+Construye la URL así (una entrada por llamada):
 ```
+BRIDGE_URL?w=add&section=meals&id=<unix>&date=2026-05-30&time=20:48
+  &name=Empanada%20de%20pino&kcal=290&protein=12&carbs=32&fat=13&fiber=2
+  &gi=alto&satfat=1&mealSlot=extra&notes=Fuera%20del%20plan
+```
+Reglas:
+- `w=add` siempre. `section` ∈ `meals|weights|workouts|checks`.
+- `date` = fecha local de hoy (`YYYY-MM-DD`). `id` = timestamp Unix en segundos.
+- **Percent-encodea los valores** con espacios o acentos (`espacio→%20`, `é→%C3%A9`).
+  Si un valor trae `&`, omítelo o cámbialo por `y` para no romper la URL.
+- Campos por sección:
+  - `meals` (extra): `name,kcal,protein,carbs,fat,fiber,gi,satfat(0/1),mealSlot,notes`
+  - `checks` (plan fijo marcado): `meal=desayuno|almuerzo|colacion|cena|antojo` (sin macros)
+  - `weights`: `weightKg,bodyFatPct,muscleKg,visceralFat,time`
+  - `workouts`: `name,kcal,minutes` (una llamada por entrenamiento)
 
-`today` = fecha local de hoy (`YYYY-MM-DD`). `section` ∈ `meals|weights|workouts|checks`.
-`entries` puede traer varias (p. ej. 2 workouts de una foto, ids consecutivos).
-
-> **CRÍTICO sobre el `curl` (no lo cambies):**
-> - **NUNCA uses `-X POST`.** El `/exec` responde un 302 a `script.googleusercontent.com`;
->   con `-X POST` curl reintenta POST en el redirect y Google contesta **405**. Con
->   `--data ... -L` (sin `-X`) curl postea en el primer hop y baja a GET en el
->   redirect → trae el JSON con los totales. Es la única combinación que funciona.
-> - **`-L` es obligatorio** (hay que seguir ese redirect).
-> - El `Content-Type` puede ser `application/json` o `text/plain`, da igual: el
->   `doPost` lee el body crudo.
-
-El Apps Script lee el delta del body, lo **mergea al `FILE_ID`** (dedup por `id`),
-poda lo de >10 días, sobrescribe el canónico en sitio, barre duplicados y responde:
+El Apps Script arma la entrada, la **mergea al `FILE_ID`** (dedup por `id`), poda lo
+de >10 días, sobrescribe el canónico en sitio, barre duplicados y responde:
 ```json
 { "ok": true, "added": 1, "today": "2026-05-30",
   "totals": { "kcal": 1234, "protein": 89, "carbs": 102, "fat": 45 },
   "workoutsKcal": 565 }
 ```
-Usa esos `totals` para el resumen del Paso 5 (no los recalcules).
-- Si responde `{ "ok": false, ... }` o la red falla, reintenta el mismo POST una vez.
-- Si falla dos veces, dilo en el chat y para. **NUNCA** caigas a `create_file` —
-  en el Shared Drive falla y/o deja duplicados. Como salvaguarda extra puedes hacer
-  GET `BRIDGE_URL?heal=1` y reintentar el POST.
+Usa esos `totals` para el Paso 5 (no los recalcules).
+- Si WebFetch reporta una redirección a `script.googleusercontent.com`, vuelve a
+  hacer GET a ESA URL: ahí se sirve la respuesta (igual que el viejo `?commit`).
+- Si la respuesta **no** trae `ok`/`totals` (p. ej. te devuelve el JSON completo del
+  bridge), el endpoint `?w=add` no está desplegado: avísale a Hugo que **redespliegue
+  el Apps Script** (`apps-script/bridge-writer.gs`). NO caigas a `create_file`.
+- Si responde `{ "ok": false, ... }` o falla la red, reintenta la misma GET una vez.
 
-> **Por qué así:** el bridge vive en la raíz de un Shared Drive, donde el conector
-> de Drive no puede crear ni sobrescribir (`canAddChildren: false`), y de todos
-> modos solo sabe `create_file` (id nuevo → duplicados). El POST directo al Apps
-> Script saca al conector del camino: el merge, la sobrescritura en sitio sobre el
-> `FILE_ID` fijo, la poda y la limpieza de duplicados pasan server-side. La skill
-> manda ~300 bytes → registro rápido, sin duplicados y a prueba de Shared Drive.
-> Ver `apps-script/bridge-writer.gs` (función `doPost`) en el repo de la app.
+> **Por qué así:** el bridge vive en la raíz de un Shared Drive con restricción de IA;
+> el conector de Drive no puede leerlo ni escribirlo (`canAddChildren:false` +
+> "ineligible for generative AI contexts"). El GET al Apps Script saca al conector del
+> camino: el merge, la sobrescritura en sitio sobre el `FILE_ID` fijo, la poda y la
+> limpieza pasan server-side. WebFetch (GET) está en todas las superficies, así que el
+> registro funciona también desde el celular. Ver `apps-script/bridge-writer.gs`.
 
-(Compat: si mandas un **bridge completo** `{meals,weights,...}` en el body, el Apps
-Script lo absorbe igual por unión. Pero para registrar usa el delta.)
+(Alternativa de escritorio con `Bash`/`curl` — mismo resultado, por POST:
+`curl -sL --data '{"op":"add","section":"meals","today":"...","entries":[{...}]}' "$BRIDGE_URL"`
+— **sin `-X POST`** (el 302 a googleusercontent daría 405); `-L` obligatorio. También
+puedes mandar el delta entero por GET: `BRIDGE_URL?delta=<json url-encoded>`.)
 
 ---
 

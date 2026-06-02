@@ -30,10 +30,15 @@
 //  4. La primera vez pedirá permiso de Drive: acéptalo.
 //
 // ── Contrato ─────────────────────────────────────────────────────────────────
-//  POST /exec  (body = delta|bridge) → CAMINO DE ESCRITURA PRINCIPAL de la skill.
+//  GET  /exec?w=add&section=...&...  → ESCRITURA INLINE para la app de Claude del
+//                                       celular (solo tiene WebFetch/GET). Arma una
+//                                       entrada desde params key=value y la aplica.
+//                                       section ∈ meals|weights|workouts|checks.
+//                                       Ej: ?w=add&section=meals&id=..&date=..&name=..&kcal=..
+//  GET  /exec?delta=<json url-enc>   → aplica un payload/delta JSON entero por GET.
+//  POST /exec  (body = delta|bridge) → escritura por POST (runtimes con curl/Bash).
 //                                       Aplica el delta directo al canónico y
-//                                       devuelve los totales del día. La skill
-//                                       food-tracker hace este POST con `curl`.
+//                                       devuelve los totales del día.
 //  GET  /exec                        → lee y devuelve el JSON del canónico (la app).
 //                                       Antes de servir, AUTO-HEAL: absorbe y borra
 //                                       cualquier duplicado/upload suelto.
@@ -321,9 +326,35 @@ function _commitFromUpload(uploadId) {
   return _apply(JSON.parse(file.getBlob().getDataAsString()));
 }
 
+// ── ESCRITURA INLINE POR GET (móvil/WebFetch, sin curl ni conector) ──────────
+// La app de Claude del celular solo dispone de WebFetch (GET) y puede no tener cómo
+// encodear un JSON largo. Esta rama arma UNA entrada desde parámetros key=value
+// legibles y reusa _apply (mismo merge/poda/dedup/totales que doPost). No agrega
+// exposición: el doPost ya es abierto.
+//   GET ?w=add&section=meals&id=<unix>&date=YYYY-MM-DD&name=...&kcal=..&protein=..
+//   section ∈ meals|weights|workouts|checks. Para plan fijo: section=checks&meal=almuerzo.
+// Alternativa: ?delta=<json url-encoded> para mandar el objeto/payload entero.
+function _entryFromParams(p) {
+  var entry = { source: p.source || 'skill-chat' };
+  ['id', 'date', 'time', 'name', 'mealSlot', 'meal', 'gi', 'notes'].forEach(function (k) {
+    if (p[k] != null && p[k] !== '') entry[k] = p[k];
+  });
+  ['kcal', 'protein', 'carbs', 'fat', 'fiber', 'minutes', 'weightKg', 'bodyFatPct',
+   'muscleKg', 'visceralFat'].forEach(function (k) {
+    if (p[k] != null && p[k] !== '') entry[k] = Number(p[k]);
+  });
+  if (p.id != null && p.id !== '') entry.id = Number(p.id);
+  if (p.satfat != null) entry.sat_fat_warning = (p.satfat === '1' || p.satfat === 'true');
+  return entry;
+}
+
 // ── LECTURA (la app) + TOTALES + COMMIT/HEAL por GET ─────────────────────────
 function doGet(e) {
   var p = (e && e.parameter) || {};
+  if (p.w === 'add' && p.section) {
+    return _json(_apply({ op: 'add', section: p.section, today: (p.date || p.today), entries: [_entryFromParams(p)] }));
+  }
+  if (p.delta)   return _json(_apply(JSON.parse(p.delta)));
   if (p.commit)  return _json(_commitFromUpload(p.commit));
   if (p.cleanup) return _json({ ok: true, trashed: _trashDuplicates() });
   if (p.heal)    return _json({ ok: true, absorbed: _absorbStrays() });
