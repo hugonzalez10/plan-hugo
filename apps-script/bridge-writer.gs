@@ -48,9 +48,10 @@
 //                                       Antes de servir, AUTO-HEAL: absorbe y borra
 //                                       cualquier duplicado/upload suelto.
 //  GET  /exec?totals=YYYY-MM-DD      → devuelve solo los totales de ese día (rápido).
-//                                       Si hay snapshot de la app, lo RECONCILIA con
-//                                       las meals registradas después (por chat) para
-//                                       no mostrar de menos. Ver `_mealsSince`.
+//                                       meals[] es la autoridad del log de comida; si
+//                                       hay snapshot de la app toma el MAYOR por
+//                                       nutriente (nunca muestra de menos, conserva el
+//                                       plan fijo del snapshot). Ver el branch p.totals.
 //  GET  /exec?config=1               → devuelve solo el bloque `config` (la skill)
 //  GET  /exec?cleanup=1              → barre duplicados en todo Drive (mantención)
 //  GET  /exec?heal=1                 → fuerza el auto-heal y reporta cuántos absorbió
@@ -95,7 +96,7 @@
 //      "totals":{kcalNet,kcalIn,kcalBurned,protein,carbs,fat,fiber,waterMl},
 //      "targets":{...}, "remaining":{...}, "eaten":[...] }
 //  Se guarda en `snapshots[date]`. GET ?totals=<date> lo devuelve con source:"app"
-//  (o "app+chat" si tuvo que sumarle comidas registradas por chat más nuevas que él).
+//  (o "app+meals" si meals[] tenía más que el snapshot y mandó el log del bridge).
 //
 //  CONFIG (lo empuja la APP por POST cuando cambia el perfil): meta diaria, déficit,
 //  TMB/TDEE y antropometría, para que la skill no hardcodee ~2.150 kcal:
@@ -202,24 +203,14 @@ function _totals(bridge, day) {
   return { totals: t, workoutsKcal: wk };
 }
 
-// Suma las `meals` de un día con ts > sinceTs: las que se registraron DESPUÉS del
-// snapshot y que, por tanto, el snapshot aún NO refleja (típicamente comidas
-// metidas por chat con la app cerrada). Devuelve totales + nombres, para
-// reconciliar un snapshot stale en `?totals=`. Las comidas con ts <= sinceTs ya
-// están contadas dentro del snapshot → no se recuentan (sin doble conteo).
-function _mealsSince(bridge, day, sinceTs) {
-  var t = { kcal: 0, protein: 0, carbs: 0, fat: 0, fiber: 0 };
+// Nombres de las `meals` de un día (el log real de comida del bridge), para
+// listar "qué comiste" en `?totals=` aunque la app no las tenga en su snapshot.
+function _mealNames(bridge, day) {
   var names = [];
-  var now = new Date().getTime();
   bridge.meals.forEach(function (m) {
-    if (!m || m.date !== day) return;
-    if (!(_entryTs(m, now) > sinceTs)) return;
-    t.kcal += Number(m.kcal) || 0; t.protein += Number(m.protein) || 0;
-    t.carbs += Number(m.carbs) || 0; t.fat += Number(m.fat) || 0;
-    t.fiber += Number(m.fiber) || 0;
-    if (m.name) names.push(m.name);
+    if (m && m.date === day && m.name) names.push(m.name);
   });
-  return { totals: t, names: names };
+  return names;
 }
 
 // ── Merge puro (sin I/O): aplica un payload sobre un bridge EN MEMORIA ────────
@@ -494,52 +485,53 @@ function doGet(e) {
   if (p.config)  return _json({ ok: true, config: _readCanonical().config || {} });
   if (p.totals) {
     var bR = _readCanonical();
-    var snap = bR.snapshots && bR.snapshots[p.totals];
+    var day = p.totals;
+    var snap = bR.snapshots && bR.snapshots[day];
+    var meal = _totals(bR, day);     // autoridad del log de comida: suma de meals[]
+    var mt = meal.totals;
     if (snap) {
       var tt = snap.totals || {};
-      // RECONCILIACIÓN: el snapshot es lo que la APP calculó y empujó. Si después
-      // se registraron comidas por chat (van a meals[] pero NO refrescan el
-      // snapshot hasta que la app se abra), el snapshot queda corto y el chat
-      // mostraría de menos (el bug del "0 con todo registrado"). Sumamos esas
-      // comidas posteriores (ts > snap.ts) ENCIMA del snapshot. Las que el
-      // snapshot ya refleja tienen ts <= snap.ts → no se recuentan.
-      var snapTs = Number(snap.ts) || 0;
-      var extra = _mealsSince(bR, p.totals, snapTs);
-      var stale = extra.names.length > 0;
-      var kcalIn = (Number(tt.kcalIn) || 0) + extra.totals.kcal;
-      var kcalBurned = Number(tt.kcalBurned) || 0;
-      var protein = (Number(tt.protein) || 0) + extra.totals.protein;
-      var carbs = (Number(tt.carbs) || 0) + extra.totals.carbs;
-      var fat = (Number(tt.fat) || 0) + extra.totals.fat;
-      var fiber = (Number(tt.fiber) || 0) + extra.totals.fiber;
+      // RECONCILIACIÓN: meals[] es la autoridad del log de comida (unión deduplicada
+      // de lo registrado por chat y por la app). El snapshot que empuja la app puede
+      // venir 0/desfasado si la app no tenía esas comidas en su estado local cuando
+      // empujó (el bug del "0 con todo registrado"). Tomamos el MAYOR por nutriente:
+      // así nunca mostramos de menos y, a la vez, conservamos lo que solo vive en el
+      // snapshot (plan fijo marcado en la app, que no se escribe a meals[]).
+      var kcalIn = Math.max(Number(tt.kcalIn) || 0, mt.kcal);
+      var kcalBurned = Math.max(Number(tt.kcalBurned) || 0, meal.workoutsKcal);
+      var protein = Math.max(Number(tt.protein) || 0, mt.protein);
+      var carbs = Math.max(Number(tt.carbs) || 0, mt.carbs);
+      var fat = Math.max(Number(tt.fat) || 0, mt.fat);
+      var fiber = Math.max(Number(tt.fiber) || 0, mt.fiber);
       var waterMl = Number(tt.waterMl) || 0;
-      var kcalNet = stale ? (kcalIn - kcalBurned) : (Number(tt.kcalNet) || (kcalIn - kcalBurned));
+      var kcalNet = kcalIn - kcalBurned;
+      var usedMeals = kcalIn > (Number(tt.kcalIn) || 0) || protein > (Number(tt.protein) || 0);
       var targets = snap.targets || {};
-      var remaining = snap.remaining || {};
-      if (stale) {
-        // recomputar lo restante contra las metas del snapshot al sumar las extras
-        remaining = {
-          kcal: (Number(targets.kcalMax) || 0) - kcalNet,
-          protein: (Number(targets.proteinMin) || 0) - protein,
-          carbs: (Number(targets.carbsTarget) || 0) - carbs,
-          fat: (Number(targets.fatTarget) || 0) - fat,
-          fiber: (Number(targets.fiberTarget) || 0) - fiber,
-          water: (Number(targets.waterTarget) || 0) - waterMl
-        };
-      }
+      // remaining: si meals[] mandó, recomputar contra metas; si no, dejar el del snapshot.
+      var remaining = usedMeals ? {
+        kcal: (Number(targets.kcalMax) || 0) - kcalNet,
+        protein: (Number(targets.proteinMin) || 0) - protein,
+        carbs: (Number(targets.carbsTarget) || 0) - carbs,
+        fat: (Number(targets.fatTarget) || 0) - fat,
+        fiber: (Number(targets.fiberTarget) || 0) - fiber,
+        water: (Number(targets.waterTarget) || 0) - waterMl
+      } : (snap.remaining || {});
+      // eaten: unión de lo que listó la app y los nombres del log de comida del bridge.
+      var eaten = (snap.eaten || []).slice();
+      _mealNames(bR, day).forEach(function (n) { if (eaten.indexOf(n) < 0) eaten.push(n); });
       return _json({
-        source: stale ? 'app+chat' : 'app', today: p.totals, ts: snap.ts || null,
+        source: usedMeals ? 'app+meals' : 'app', today: day, ts: snap.ts || null,
         totals: {
           kcal: kcalNet, kcalIn: kcalIn, kcalBurned: kcalBurned,
           protein: protein, carbs: carbs, fat: fat,
           fiber: fiber, waterMl: waterMl
         },
         targets: targets, remaining: remaining,
-        workoutsKcal: kcalBurned, eaten: (snap.eaten || []).concat(extra.names)
+        workoutsKcal: kcalBurned, eaten: eaten
       });
     }
-    var sum = _totals(bR, p.totals);
-    return _json({ source: 'bridge', today: p.totals, totals: sum.totals, workoutsKcal: sum.workoutsKcal });
+    // Sin snapshot: totales puros desde meals[].
+    return _json({ source: 'bridge', today: day, totals: mt, workoutsKcal: meal.workoutsKcal, eaten: _mealNames(bR, day) });
   }
   // Lectura principal de la app: AUTO-HEAL antes de servir, luego entrega el JSON.
   try { _absorbStrays(); } catch (err) { /* nunca falles la lectura por el heal */ }
