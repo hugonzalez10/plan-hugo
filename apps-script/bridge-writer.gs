@@ -47,7 +47,10 @@
 //  GET  /exec                        → lee y devuelve el JSON del canónico (la app).
 //                                       Antes de servir, AUTO-HEAL: absorbe y borra
 //                                       cualquier duplicado/upload suelto.
-//  GET  /exec?totals=YYYY-MM-DD      → devuelve solo los totales de ese día (rápido)
+//  GET  /exec?totals=YYYY-MM-DD      → devuelve solo los totales de ese día (rápido).
+//                                       Si hay snapshot de la app, lo RECONCILIA con
+//                                       las meals registradas después (por chat) para
+//                                       no mostrar de menos. Ver `_mealsSince`.
 //  GET  /exec?config=1               → devuelve solo el bloque `config` (la skill)
 //  GET  /exec?cleanup=1              → barre duplicados en todo Drive (mantención)
 //  GET  /exec?heal=1                 → fuerza el auto-heal y reporta cuántos absorbió
@@ -91,7 +94,8 @@
 //    { "op":"snapshot", "date":"2026-05-30",
 //      "totals":{kcalNet,kcalIn,kcalBurned,protein,carbs,fat,fiber,waterMl},
 //      "targets":{...}, "remaining":{...}, "eaten":[...] }
-//  Se guarda en `snapshots[date]`. GET ?totals=<date> lo devuelve con source:"app".
+//  Se guarda en `snapshots[date]`. GET ?totals=<date> lo devuelve con source:"app"
+//  (o "app+chat" si tuvo que sumarle comidas registradas por chat más nuevas que él).
 //
 //  CONFIG (lo empuja la APP por POST cuando cambia el perfil): meta diaria, déficit,
 //  TMB/TDEE y antropometría, para que la skill no hardcodee ~2.150 kcal:
@@ -185,16 +189,37 @@ function _prune(bridge) {
 
 // Totales del día = suma de `meals` (extras del bridge) con date = day.
 function _totals(bridge, day) {
-  var t = { kcal: 0, protein: 0, carbs: 0, fat: 0 };
+  var t = { kcal: 0, protein: 0, carbs: 0, fat: 0, fiber: 0 };
   bridge.meals.forEach(function (m) {
     if (m && m.date === day) {
       t.kcal += Number(m.kcal) || 0; t.protein += Number(m.protein) || 0;
       t.carbs += Number(m.carbs) || 0; t.fat += Number(m.fat) || 0;
+      t.fiber += Number(m.fiber) || 0;
     }
   });
   var wk = 0;
   bridge.workouts.forEach(function (w) { if (w && w.date === day) wk += Number(w.kcal) || 0; });
   return { totals: t, workoutsKcal: wk };
+}
+
+// Suma las `meals` de un día con ts > sinceTs: las que se registraron DESPUÉS del
+// snapshot y que, por tanto, el snapshot aún NO refleja (típicamente comidas
+// metidas por chat con la app cerrada). Devuelve totales + nombres, para
+// reconciliar un snapshot stale en `?totals=`. Las comidas con ts <= sinceTs ya
+// están contadas dentro del snapshot → no se recuentan (sin doble conteo).
+function _mealsSince(bridge, day, sinceTs) {
+  var t = { kcal: 0, protein: 0, carbs: 0, fat: 0, fiber: 0 };
+  var names = [];
+  var now = new Date().getTime();
+  bridge.meals.forEach(function (m) {
+    if (!m || m.date !== day) return;
+    if (!(_entryTs(m, now) > sinceTs)) return;
+    t.kcal += Number(m.kcal) || 0; t.protein += Number(m.protein) || 0;
+    t.carbs += Number(m.carbs) || 0; t.fat += Number(m.fat) || 0;
+    t.fiber += Number(m.fiber) || 0;
+    if (m.name) names.push(m.name);
+  });
+  return { totals: t, names: names };
 }
 
 // ── Merge puro (sin I/O): aplica un payload sobre un bridge EN MEMORIA ────────
@@ -472,16 +497,45 @@ function doGet(e) {
     var snap = bR.snapshots && bR.snapshots[p.totals];
     if (snap) {
       var tt = snap.totals || {};
+      // RECONCILIACIÓN: el snapshot es lo que la APP calculó y empujó. Si después
+      // se registraron comidas por chat (van a meals[] pero NO refrescan el
+      // snapshot hasta que la app se abra), el snapshot queda corto y el chat
+      // mostraría de menos (el bug del "0 con todo registrado"). Sumamos esas
+      // comidas posteriores (ts > snap.ts) ENCIMA del snapshot. Las que el
+      // snapshot ya refleja tienen ts <= snap.ts → no se recuentan.
+      var snapTs = Number(snap.ts) || 0;
+      var extra = _mealsSince(bR, p.totals, snapTs);
+      var stale = extra.names.length > 0;
+      var kcalIn = (Number(tt.kcalIn) || 0) + extra.totals.kcal;
+      var kcalBurned = Number(tt.kcalBurned) || 0;
+      var protein = (Number(tt.protein) || 0) + extra.totals.protein;
+      var carbs = (Number(tt.carbs) || 0) + extra.totals.carbs;
+      var fat = (Number(tt.fat) || 0) + extra.totals.fat;
+      var fiber = (Number(tt.fiber) || 0) + extra.totals.fiber;
+      var waterMl = Number(tt.waterMl) || 0;
+      var kcalNet = stale ? (kcalIn - kcalBurned) : (Number(tt.kcalNet) || (kcalIn - kcalBurned));
+      var targets = snap.targets || {};
+      var remaining = snap.remaining || {};
+      if (stale) {
+        // recomputar lo restante contra las metas del snapshot al sumar las extras
+        remaining = {
+          kcal: (Number(targets.kcalMax) || 0) - kcalNet,
+          protein: (Number(targets.proteinMin) || 0) - protein,
+          carbs: (Number(targets.carbsTarget) || 0) - carbs,
+          fat: (Number(targets.fatTarget) || 0) - fat,
+          fiber: (Number(targets.fiberTarget) || 0) - fiber,
+          water: (Number(targets.waterTarget) || 0) - waterMl
+        };
+      }
       return _json({
-        source: 'app', today: p.totals, ts: snap.ts || null,
+        source: stale ? 'app+chat' : 'app', today: p.totals, ts: snap.ts || null,
         totals: {
-          kcal: Number(tt.kcalNet) || 0, kcalIn: Number(tt.kcalIn) || 0,
-          kcalBurned: Number(tt.kcalBurned) || 0, protein: Number(tt.protein) || 0,
-          carbs: Number(tt.carbs) || 0, fat: Number(tt.fat) || 0,
-          fiber: Number(tt.fiber) || 0, waterMl: Number(tt.waterMl) || 0
+          kcal: kcalNet, kcalIn: kcalIn, kcalBurned: kcalBurned,
+          protein: protein, carbs: carbs, fat: fat,
+          fiber: fiber, waterMl: waterMl
         },
-        targets: snap.targets || {}, remaining: snap.remaining || {},
-        workoutsKcal: Number(tt.kcalBurned) || 0, eaten: snap.eaten || []
+        targets: targets, remaining: remaining,
+        workoutsKcal: kcalBurned, eaten: (snap.eaten || []).concat(extra.names)
       });
     }
     var sum = _totals(bR, p.totals);
