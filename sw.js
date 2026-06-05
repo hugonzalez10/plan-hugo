@@ -4,7 +4,7 @@
  * NO interceptamos llamadas a api.anthropic.com.
  */
 
-const CACHE_NAME = 'plan-hugo-v15-totales-aditivos';
+const CACHE_NAME = 'plan-hugo-v17-evolucion';
 const CORE_URLS = [
   './index.html',
   './app.js',
