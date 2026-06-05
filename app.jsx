@@ -804,6 +804,7 @@ function applyRemoteState(prev, remote, updatedAt) {
     syncGistId: prev.settings?.syncGistId ?? null,
     anthropicApiKey: prev.settings?.anthropicApiKey ?? null,
     bridgeUrl: prev.settings?.bridgeUrl ?? null,
+    bridgeToken: prev.settings?.bridgeToken ?? null,
     autoSync: prev.settings?.autoSync ?? true,
     lastRemoteUpdatedAt: updatedAt,
     lastSyncAt: new Date().toISOString(),
@@ -1215,6 +1216,7 @@ function buildSeed() {
       anthropicApiKey: null,
       saveImages: false,
       bridgeUrl: null,
+      bridgeToken: null,
       notifications: { enabled: false, almuerzo: '13:30', agua: '16:00', cena: '20:30' },
     },
     weights: [],
@@ -1302,6 +1304,7 @@ function migrateState(parsed) {
     syncGistId: next.settings.syncGistId ?? null,
     lastSyncAt: next.settings.lastSyncAt ?? null,
     bridgeUrl: next.settings.bridgeUrl ?? null,
+    bridgeToken: next.settings.bridgeToken ?? null,
     autoSync: next.settings.autoSync ?? true,
     lastPushedSig: next.settings.lastPushedSig ?? null,
     lastRemoteUpdatedAt: next.settings.lastRemoteUpdatedAt ?? null,
@@ -1429,11 +1432,24 @@ function saveState(state) {
 }
 
 // ─── Puente chat → app: lee el JSON que la skill deja en Drive vía Apps Script ───
-async function fetchBridge(url) {
+// Adjunta el token compartido (?k=) a una URL del bridge. El Apps Script lo exige en
+// CADA llamada (GET y POST) para que no cualquiera con la URL lea/escriba/borre datos.
+// El token vive en settings.bridgeToken, aparte de la URL.
+function withBridgeToken(url, token) {
+  if (!url || !token) return url;
   const sep = url.includes('?') ? '&' : '?';
-  const resp = await fetch(url + sep + 't=' + Date.now(), { redirect: 'follow' });
+  return url + sep + 'k=' + encodeURIComponent(token);
+}
+
+async function fetchBridge(url, token) {
+  const tokenized = withBridgeToken(url, token);
+  const sep = tokenized.includes('?') ? '&' : '?';
+  const resp = await fetch(tokenized + sep + 't=' + Date.now(), { redirect: 'follow' });
   if (!resp.ok) throw new Error('HTTP ' + resp.status);
   const data = await resp.json();
+  if (data && data.ok === false && data.reason === 'unauthorized') {
+    throw new Error('Token del bridge inválido (revisa Ajustes → Token del bridge).');
+  }
   return {
     meals: Array.isArray(data.meals) ? data.meals : [],
     weights: Array.isArray(data.weights) ? data.weights : [],
@@ -1548,8 +1564,9 @@ function mergeBridge(state, bridge) {
 async function runBridgeSync(state, setState) {
   const url = state.settings?.bridgeUrl;
   if (!url) return { ok: false, reason: 'no-url' };
+  const token = state.settings?.bridgeToken;
   let bridge;
-  try { bridge = await fetchBridge(url); }
+  try { bridge = await fetchBridge(url, token); }
   catch (e) { console.warn('Bridge sync falló', e); return { ok: false, reason: 'fetch', error: e.message }; }
   let added = { meals: 0, weights: 0, workouts: 0 };
   setState((prev) => {
@@ -1590,7 +1607,11 @@ function computeDayTotals(day, snackBank, proteinBank, targets, dessertBank, cus
 
   const extras = day?.extras || [];
   const exercise = day?.exercise || [];
-  const allEaten = [...eatenFixedItems, ...snackEaten, ...dinnerEaten, ...dessertAEaten, ...dessertCEaten, ...extras];
+  // Porción del PLAN (fijos + banco): lo que NO se empuja a meals[] del bridge. Los extras
+  // y el ejercicio sí van a meals[]/workouts[], así que el snapshot debe llevar solo esto
+  // para que el bridge sume sin solape (partición aditiva, no Math.max). Ver snapPayload.
+  const planEaten = [...eatenFixedItems, ...snackEaten, ...dinnerEaten, ...dessertAEaten, ...dessertCEaten];
+  const allEaten = [...planEaten, ...extras];
 
   const kcalIn = sumField(allEaten, 'kcal');
   const protein = sumField(allEaten, 'protein');
@@ -1601,8 +1622,16 @@ function computeDayTotals(day, snackBank, proteinBank, targets, dessertBank, cus
   const kcalNet = kcalIn - kcalBurned;
   const waterMl = Number(day?.water?.ml) || 0;
 
+  // Plan-only (sin extras ni ejercicio): la porción autoritativa del snapshot.
+  const planIn = sumField(planEaten, 'kcal');
+  const planProtein = sumField(planEaten, 'protein');
+  const planCarbs = sumField(planEaten, 'carbs');
+  const planFat = sumField(planEaten, 'fat');
+  const planFiber = sumField(planEaten, 'fiber');
+
   return {
     kcal: kcalNet, kcalIn, kcalBurned, kcalNet,
+    planIn, planProtein, planCarbs, planFat, planFiber,
     kcalRemaining: T.kcalMax - kcalNet,
     protein, proteinRemaining: T.proteinMin - protein,
     carbs, carbsRemaining: T.carbsTarget - carbs,
@@ -6579,19 +6608,25 @@ function SyncSection({ state, setState }) {
 
 function BridgeSyncSection({ state, setState }) {
   const [url, setUrl] = useState(state.settings?.bridgeUrl || '');
+  const [token, setToken] = useState(state.settings?.bridgeToken || '');
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState(null); // { type: 'ok'|'err', msg }
 
   const saveUrl = (val) => setState((prev) => ({
     ...prev, settings: { ...(prev.settings || {}), bridgeUrl: val.trim() || null },
   }));
+  const saveToken = (val) => setState((prev) => ({
+    ...prev, settings: { ...(prev.settings || {}), bridgeToken: val.trim() || null },
+  }));
 
   const doSync = async () => {
     const trimmed = url.trim();
     if (!trimmed) { setStatus({ type: 'err', msg: 'Pega la URL del Apps Script primero.' }); return; }
     saveUrl(trimmed);
+    const tok = token.trim();
+    saveToken(tok);
     setBusy(true); setStatus(null);
-    const res = await runBridgeSync({ settings: { bridgeUrl: trimmed } }, setState);
+    const res = await runBridgeSync({ settings: { bridgeUrl: trimmed, bridgeToken: tok } }, setState);
     setBusy(false);
     if (!res.ok) {
       setStatus({ type: 'err', msg: res.reason === 'fetch' ? ('No se pudo leer Drive: ' + (res.error || '')) : 'Configura la URL.' });
@@ -6619,6 +6654,12 @@ function BridgeSyncSection({ state, setState }) {
           {busy ? '…' : 'Sincronizar'}
         </button>
       </div>
+      <input type="password" value={token} onChange={(e) => setToken(e.target.value)} onBlur={(e) => saveToken(e.target.value)}
+        placeholder="Token del bridge (mismo que SHARED_TOKEN del Apps Script)" autoComplete="off"
+        className="w-full mt-2 px-3 py-2.5 rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-emerald-500 font-mono text-xs" />
+      <p className="text-[11px] text-gray-500 dark:text-gray-400 mt-1">
+        Secreto compartido obligatorio: sin él, cualquiera con la URL puede leer o borrar tus datos. Debe ser idéntico al de <code className="bento-mono">SHARED_TOKEN</code> en el Apps Script.
+      </p>
       {status && (
         <p className={`text-[11px] mt-1.5 ${status.type === 'err' ? 'text-amber-700 dark:text-amber-300' : 'text-emerald-700 dark:text-emerald-300'}`}>
           {status.type === 'ok' ? '✓ ' : '⚠️ '}{status.msg}
@@ -9067,14 +9108,16 @@ function App() {
 
   // Auto-sync del puente chat→app: al montar y cuando la PWA vuelve a primer plano.
   const bridgeUrl = state.settings?.bridgeUrl;
+  const bridgeToken = state.settings?.bridgeToken;
+  const bridgePost = bridgeUrl ? withBridgeToken(bridgeUrl, bridgeToken) : null;
   useEffect(() => {
     if (!bridgeUrl) return;
-    const sync = () => { runBridgeSync({ settings: { bridgeUrl } }, setState).catch(() => {}); };
+    const sync = () => { runBridgeSync({ settings: { bridgeUrl, bridgeToken } }, setState).catch(() => {}); };
     sync();
     const onVis = () => { if (document.visibilityState === 'visible') sync(); };
     document.addEventListener('visibilitychange', onVis);
     return () => document.removeEventListener('visibilitychange', onVis);
-  }, [bridgeUrl, setState]);
+  }, [bridgeUrl, bridgeToken, setState]);
 
   // Empuje app→bridge: manda al bridge el total REAL del día (lo que la app
   // calcula: plan fijo marcado + extras − ejercicio) para que el chat pueda
@@ -9086,9 +9129,15 @@ function App() {
       targets, state.dessertBank || [], state.antojoCustomItems || []);
     return {
       op: 'snapshot', date: snapDayKey, ts: Date.now(),
+      // planScope:'plan-only' marca la PARTICIÓN ADITIVA: `totals` lleva SOLO la porción
+      // del plan (fijos + banco) + agua, que no viaja a meals[]. El bridge SUMA esto con
+      // meals[]/workouts[] (no Math.max). Los snapshots sin este marcador son legacy
+      // (totales completos) y el bridge los trata con la regla vieja para no romper datos
+      // en vuelo. Subir el marcador si la semántica vuelve a cambiar.
+      planScope: 'plan-only',
       totals: {
-        kcalIn: t.kcalIn, kcalBurned: t.kcalBurned, kcalNet: t.kcalNet,
-        protein: t.protein, carbs: t.carbs, fat: t.fat, fiber: t.fiber, waterMl: t.waterMl,
+        kcalIn: t.planIn, kcalBurned: 0, kcalNet: t.planIn,
+        protein: t.planProtein, carbs: t.planCarbs, fat: t.planFat, fiber: t.planFiber, waterMl: t.waterMl,
       },
       targets: {
         kcalMax: targets.kcalMax, proteinMin: targets.proteinMin, carbsTarget: targets.carbsTarget,
@@ -9108,14 +9157,14 @@ function App() {
   useEffect(() => {
     if (!bridgeUrl) return;
     const id = setTimeout(() => {
-      fetch(bridgeUrl, {
+      fetch(bridgePost, {
         method: 'POST', mode: 'no-cors', keepalive: true,
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
         body: JSON.stringify({ ...JSON.parse(snapBody), ts: Date.now() }),
       }).catch(() => {});
     }, 1500);
     return () => clearTimeout(id);
-  }, [bridgeUrl, snapBody]);
+  }, [bridgePost, snapBody]);
 
   // Empuje app→bridge: manda el perfil + metas calculadas (meta diaria, déficit,
   // TMB/TDEE, antropometría) para que la skill food-tracker NO hardcodee ~2.150 y
@@ -9146,14 +9195,14 @@ function App() {
     const id = setTimeout(() => {
       const payload = JSON.parse(configBody);
       payload.config.updatedAt = new Date().toISOString();
-      fetch(bridgeUrl, {
+      fetch(bridgePost, {
         method: 'POST', mode: 'no-cors', keepalive: true,
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
         body: JSON.stringify(payload),
       }).catch(() => {});
     }, 1800);
     return () => clearTimeout(id);
-  }, [bridgeUrl, configBody]);
+  }, [bridgePost, configBody]);
 
   // Empuje app→bridge de entradas creadas en la app (extras, ejercicios, pesos) para que el
   // chat y el bridge las vean (bidireccional). El servidor reasigna el id y dedup por contenido,
@@ -9205,7 +9254,7 @@ function App() {
       const pushedNow = [];
       for (const it of items) {
         try {
-          await fetch(bridgeUrl, {
+          await fetch(bridgePost, {
             method: 'POST', mode: 'no-cors', keepalive: true,
             headers: { 'Content-Type': 'text/plain;charset=utf-8' },
             body: JSON.stringify({
@@ -9224,7 +9273,7 @@ function App() {
       }
     }, 2200);
     return () => clearTimeout(id);
-  }, [bridgeUrl, pushBody, setState]);
+  }, [bridgePost, pushBody, setState]);
 
   // Persist tab en hash + shortcuts
   useEffect(() => { history.replaceState(null, '', '#/' + tab); }, [tab]);

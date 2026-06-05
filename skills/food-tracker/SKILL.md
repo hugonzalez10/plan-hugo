@@ -56,6 +56,14 @@ actualízalo también en `apps-script/bridge-writer.gs`):
 |-----------|-------|
 | `FILE_ID` (canónico, lo maneja el Apps Script) | `1YN3F48EZoRWSpOabwDqoXzKrGkTqIa2t` |
 | `BRIDGE_URL` (Apps Script `/exec`) | `https://script.google.com/macros/s/AKfycbwcxEoa0nvjhMv6nrdfMcaHKS130PcXV0isbc7ajNj_CMfuBXCR6RhL63LHv-e1zW9W_w/exec` |
+| `BRIDGE_TOKEN` (secreto compartido, = `SHARED_TOKEN` del `.gs`) | `db52f16b62e5ada13150edc571c21b24010a582fe0ae18b4` |
+
+> **TOKEN OBLIGATORIO EN CADA LLAMADA.** El Apps Script exige `k=$BRIDGE_TOKEN` en
+> TODO GET y POST (lectura, `?totals=`, `?config=1`, `?w=add`, `?w=delete`, POST). Sin
+> él responde `{"ok":false,"reason":"unauthorized"}`. Como las URLs ya traen `?`, el
+> token va como **`&k=$BRIDGE_TOKEN`** al final de cada query (en la lectura desnuda y
+> en POST, como `?k=$BRIDGE_TOKEN`). Debe ser idéntico a `SHARED_TOKEN` en
+> `apps-script/bridge-writer.gs`. Define al inicio: `BRIDGE_TOKEN='db52f16b62e5ada13150edc571c21b24010a582fe0ae18b4'`.
 
 (El `PARENT_ID` del Shared Drive y el viejo `plan-hugo-bridge.upload.json` ya NO se
 usan: eran del flujo `create_file` + `?commit=` que fallaba en el Shared Drive.)
@@ -78,7 +86,7 @@ contenido (ventana ~5 min), poda entradas con `date` de más de 10 días y actua
 
 > **La meta diaria es PROGRAMABLE, no la hardcodees.** La app calcula la meta con
 > Mifflin-St Jeor (TMB × factor de actividad − déficit) desde el perfil de Hugo y la
-> empuja al bridge. Para el feedback, **lee la meta real**: GET `BRIDGE_URL?config=1`
+> empuja al bridge. Para el feedback, **lee la meta real**: GET `BRIDGE_URL?config=1&k=$BRIDGE_TOKEN`
 > → `{ ok, config:{ kcalTarget, kcalDeficit, goal, weightKg, …, targets:{ kcalMax,
 > proteinMin, carbsTarget, fatTarget, fiberTarget, waterTarget, bmr, tdee } } }`.
 > Usa `config.targets` para los objetivos (`kcalMax` = meta de calorías,
@@ -176,11 +184,11 @@ el registro.
 
 Solo necesitas leer en dos casos puntuales (siempre por `curl` al `BRIDGE_URL`, nunca
 por el conector de Drive ni por `web_fetch`):
-- **"cómo voy hoy" / "resumen del día":** `curl -sL "$BRIDGE_URL?totals=YYYY-MM-DD"`
+- **"cómo voy hoy" / "resumen del día":** `curl -sL "$BRIDGE_URL?totals=YYYY-MM-DD&k=$BRIDGE_TOKEN"`
   (ver detalle en la sección "Comando: cómo voy hoy" más abajo — la respuesta trae
   `source:"app"` con el número real, o `source:"bridge"` si la app no sincronizó
-  hoy). Para el detalle de comidas, `curl -sL "$BRIDGE_URL"` (el JSON completo).
-- **Inspección manual:** `curl -sL "$BRIDGE_URL"` (el doGet ya devuelve el JSON del
+  hoy). Para el detalle de comidas, `curl -sL "$BRIDGE_URL?k=$BRIDGE_TOKEN"` (el JSON completo).
+- **Inspección manual:** `curl -sL "$BRIDGE_URL?k=$BRIDGE_TOKEN"` (el doGet ya devuelve el JSON del
   bridge vía auto-heal). No uses `download_file_content`/`read_file_content` del
   conector.
 
@@ -237,7 +245,7 @@ curl -sL --data '{"op":"add","section":"meals","today":"2026-05-30","entries":[
   {"date":"2026-05-30","time":"20:48","mealSlot":"extra","name":"Empanada de pino",
    "kcal":290,"protein":12,"carbs":32,"fat":13,"fiber":2,"gi":"alto",
    "sat_fat_warning":true,"source":"skill-chat"}
-]}' "$BRIDGE_URL"
+]}' "$BRIDGE_URL?k=$BRIDGE_TOKEN"
 ```
 - **`--data` SIN `-X POST`** (el `/exec` responde con un 302 a
   `script.googleusercontent.com`; con `-X POST` reintenta el POST y da 405).
@@ -249,7 +257,7 @@ curl -sL --data '{"op":"add","section":"meals","today":"2026-05-30","entries":[
 ```bash
 curl -sL "$BRIDGE_URL?w=add&section=meals&date=2026-05-30&time=20:48\
 &name=Empanada%20de%20pino&kcal=290&protein=12&carbs=32&fat=13&fiber=2\
-&gi=alto&satfat=1&mealSlot=extra&notes=Carbo%20simple"
+&gi=alto&satfat=1&mealSlot=extra&notes=Carbo%20simple&k=$BRIDGE_TOKEN"
 ```
 - **Percent-encodea** valores con espacios o acentos (`espacio→%20`, `é→%C3%A9`).
   Si un valor trae `&`, omítelo o cámbialo por `y` para no romper la URL.
@@ -257,7 +265,7 @@ curl -sL "$BRIDGE_URL?w=add&section=meals&date=2026-05-30&time=20:48\
   - `meals`: `name,kcal,protein,carbs,fat,fiber,gi,satfat(0/1),mealSlot,time,notes`
   - `weights`: `weightKg,bodyFatPct,muscleKg,visceralFat,time`
   - `workouts`: `name,kcal,minutes,time` (una llamada por entrenamiento)
-- También puedes mandar el delta entero por GET: `BRIDGE_URL?delta=<json url-encoded>`.
+- También puedes mandar el delta entero por GET: `BRIDGE_URL?delta=<json url-encoded>&k=$BRIDGE_TOKEN`.
 
 Cualquiera de los dos responde con los totales del día ya sumados:
 ```json
@@ -285,11 +293,11 @@ Usa esos `totals` para el Paso 5 (no los recalcules).
 
 Si registraste algo mal (o Hugo pide borrarlo), elimínalo por `id`:
 ```bash
-curl -sL "$BRIDGE_URL?w=delete&section=meals&id=<id>"
+curl -sL "$BRIDGE_URL?w=delete&section=meals&id=<id>&k=$BRIDGE_TOKEN"
 # → { "ok": true, "deleted": 1, "section": "meals", "id": "<id>" }
 ```
 `section` ∈ `meals|weights|workouts|checks`. Para saber el `id`, lee primero el JSON
-completo (`curl -sL "$BRIDGE_URL"`) y ubica la entrada por nombre/fecha. `deleted: 0`
+completo (`curl -sL "$BRIDGE_URL?k=$BRIDGE_TOKEN"`) y ubica la entrada por nombre/fecha. `deleted: 0`
 significa que no había ninguna con ese id.
 
 ---
@@ -310,7 +318,7 @@ significa que no había ninguna con ese id.
 Barra de 10 bloques. Los totales vienen **directos en la respuesta del registro**
 (`totals.kcal`, `totals.protein`, …) — NO los recalcules ni vuelvas a bajar el
 bridge. Si por alguna razón la respuesta no trajo `totals`, recién ahí
-`curl -sL "$BRIDGE_URL?totals=<hoy>"`.
+`curl -sL "$BRIDGE_URL?totals=<hoy>&k=$BRIDGE_TOKEN"`.
 
 ### Peso
 ```
@@ -328,7 +336,7 @@ bridge. Si por alguna razón la respuesta no trajo `totals`, recién ahí
 
 ## Comando: "cómo voy hoy"
 
-`curl -sL "$BRIDGE_URL?totals=<hoy>"`. La respuesta trae un campo **`source`** que
+`curl -sL "$BRIDGE_URL?totals=<hoy>&k=$BRIDGE_TOKEN"`. La respuesta trae un campo **`source`** que
 decide cómo responder:
 
 - **`source:"app"`** → es el número REAL que ve Hugo en la app (todo lo del día
@@ -350,7 +358,7 @@ decide cómo responder:
   que registré por el chat; abre la app un segundo para que sincronice el total
   completo del día".
 
-Si Hugo pide el **detalle** de qué comió, `curl -sL "$BRIDGE_URL"` (el JSON completo)
+Si Hugo pide el **detalle** de qué comió, `curl -sL "$BRIDGE_URL?k=$BRIDGE_TOKEN"` (el JSON completo)
 y lista las comidas de hoy.
 
 ---

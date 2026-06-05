@@ -1,0 +1,9 @@
+{
+  "name": "plan-hugo",
+  "private": true,
+  "description": "App personal de seguimiento nutricional. Tests con node:test (sin dependencias).",
+  "scripts": {
+    "test": "node --test",
+    "build": "./build.sh"
+  }
+}
