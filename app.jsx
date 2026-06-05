@@ -1221,7 +1221,7 @@ function buildSeed() {
     },
     weights: [],
     recipeBank: [],
-    bridge: { lastSyncAt: null, importedIds: [], pushedIds: [] },
+    bridge: { lastSyncAt: null, importedIds: [], pushedIds: [], removedBridgeIds: [] },
     aiCache: { coach: {}, weekly: {}, patterns: null, lastSubstitution: null },
   };
 }
@@ -1314,6 +1314,13 @@ function migrateState(parsed) {
   next.bridge = (next.bridge && Array.isArray(next.bridge.importedIds))
     ? next.bridge
     : { lastSyncAt: next.bridge?.lastSyncAt || null, importedIds: [] };
+  // Sets auxiliares del sync (pueden faltar en estados viejos):
+  //  · pushedIds       → ya empujados app→bridge (no reenviar).
+  //  · removedBridgeIds → borrados a propósito en la app; el merge NO los reimporta
+  //    aunque sigan en el bridge (vive 10 días). Sin esto, volver importedIds "blando"
+  //    resucitaría lo borrado. Ver mergeBridge.
+  if (!Array.isArray(next.bridge.pushedIds)) next.bridge.pushedIds = [];
+  if (!Array.isArray(next.bridge.removedBridgeIds)) next.bridge.removedBridgeIds = [];
   next.snackBank = next.snackBank.map((s) => ({
     carbs: 0, fat: 0, fiber: 0, ...s,
   }));
@@ -1458,10 +1465,32 @@ async function fetchBridge(url, token) {
   };
 }
 
+// Propaga un borrado al bridge (fire-and-forget, mismo patrón no-cors/text-plain que el resto
+// de escrituras de la app). El `.gs` soporta op:'delete' en doPost. Idempotente: si la entrada
+// ya no está, devuelve deleted:0; por eso repetir el POST es inocuo. Sin esto, un ítem borrado
+// en la app reaparecería en el próximo sync (sigue en el bridge ~10 días) ahora que mergeBridge
+// reimporta lo ausente. El freno local complementario es state.bridge.removedBridgeIds.
+function postBridgeDelete(settings, section, id) {
+  const url = settings?.bridgeUrl;
+  if (!url || id == null) return;
+  try {
+    fetch(withBridgeToken(url, settings?.bridgeToken), {
+      method: 'POST', mode: 'no-cors', keepalive: true,
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ op: 'delete', section, id }),
+    }).catch(() => {});
+  } catch (e) { /* fire-and-forget */ }
+}
+
 // Merge idempotente: ignora ids ya importados (state.bridge.importedIds). Función pura.
 function mergeBridge(state, bridge) {
   const num = (v) => Number(v) || 0;
   const importedIds = new Set((state.bridge?.importedIds) || []);
+  // Borrados a propósito en la app: el bridge los conserva hasta 10 días, pero NO debemos
+  // reimportarlos. `importedIds` ya no basta como freno (ahora es solo optimización: un dato
+  // del bridge ausente localmente se reimporta aunque su id figure en importedIds), así que
+  // la intención de borrado vive aquí. Ver pushDelete / handlers de borrado.
+  const removedBridgeIds = new Set((state.bridge?.removedBridgeIds) || []);
   const days = { ...(state.days || {}) };
   const weights = Array.isArray(state.weights) ? [...state.weights] : [];
   const added = { meals: 0, weights: 0, workouts: 0, checks: 0 };
@@ -1478,11 +1507,12 @@ function mergeBridge(state, bridge) {
   // getMealItemTicks y sumaría kcal fantasma, por eso se excluyen.
   const BRIDGE_SLOT_DETECT = new Set(['colacion', 'cena']);
   for (const m of bridge.meals) {
-    if (m.id == null || importedIds.has(m.id)) continue;
+    if (m.id == null || removedBridgeIds.has(m.id)) continue;
     const slot = m.mealSlot || 'extra';
     const d = ensureDay(m.date || todayKey());
-    // Idempotencia a nivel id contra importedIds obsoleto (p.ej. tras un pull del Gist): si el
-    // día ya tiene un extra con este id, no lo re-agregues (pero sí dalo por importado).
+    // NO se corta por importedIds: si el dato está en el bridge pero falta localmente (estado
+    // perdido), se reimporta. El freno real es la presencia local (por id o por contenido) y
+    // removedBridgeIds (borrados deliberados, ya filtrados arriba).
     if (d.extras.some((x) => x.id === m.id)) { importedIds.add(m.id); continue; }
     // Dedup por contenido+ventana contra CUALQUIER extra ya presente ese día (no solo del chat):
     // así también se absorbe el eco del propio empuje app→bridge, que vuelve con id de servidor
@@ -1502,8 +1532,9 @@ function mergeBridge(state, bridge) {
   }
 
   for (const w of bridge.workouts) {
-    if (w.id == null || importedIds.has(w.id)) continue;
+    if (w.id == null || removedBridgeIds.has(w.id)) continue;
     const d = ensureDay(w.date || todayKey());
+    // No se corta por importedIds (ver meals): reimporta si falta localmente.
     if (d.exercise.some((x) => x.id === w.id)) { importedIds.add(w.id); continue; }
     // Dedup por contenido+ventana (nombre normalizado dentro del día): absorbe el eco del
     // empuje app→bridge, que vuelve con id de servidor distinto.
@@ -1518,24 +1549,41 @@ function mergeBridge(state, bridge) {
   }
 
   for (const wt of bridge.weights) {
-    if (wt.id == null || importedIds.has(wt.id)) continue;
+    if (wt.id == null || removedBridgeIds.has(wt.id)) continue;
     const date = wt.date || todayKey();
     const idx = weights.findIndex((x) => x.date === date);
     if (idx >= 0) {
-      // Auto-merge con la medición del mismo día (misma lógica que el modal de peso).
-      const merged = { ...weights[idx] };
-      for (const wf of WEIGHT_FIELDS) {
-        if (wt[wf.key] != null) merged[wf.key] = wt[wf.key];
+      // Ya hay medición local de ese día (dedup por fecha). Enriquecer campos UNA sola vez:
+      // si re-corriéramos el merge en cada sync, la nota se duplicaría (`nota · nota · …`).
+      // Por eso aquí sí se usa importedIds como freno del enriquecimiento; el id queda marcado
+      // y nunca se re-agrega.
+      if (!importedIds.has(wt.id)) {
+        const merged = { ...weights[idx] };
+        for (const wf of WEIGHT_FIELDS) {
+          if (wt[wf.key] != null) merged[wf.key] = wt[wf.key];
+        }
+        for (const sf of STRING_FIELDS) {
+          if (wt[sf.key] != null) merged[sf.key] = wt[sf.key];
+        }
+        for (const seg of SEGMENT_FIELDS) {
+          if (wt[seg.key] != null) merged[seg.key] = wt[seg.key];
+        }
+        if (wt.note) merged.note = merged.note ? `${merged.note} · ${wt.note}` : wt.note;
+        if (wt.rawExtracted) merged.rawExtracted = { ...(merged.rawExtracted || {}), ...wt.rawExtracted };
+        if (wt.time && !merged.time) merged.time = wt.time;
+        weights[idx] = merged;
+        added.weights++;
       }
-      if (wt.note) merged.note = merged.note ? `${merged.note} · ${wt.note}` : wt.note;
-      if (wt.rawExtracted) merged.rawExtracted = { ...(merged.rawExtracted || {}), ...wt.rawExtracted };
-      if (wt.time && !merged.time) merged.time = wt.time;
-      weights[idx] = merged;
-    } else {
-      const out = { id: wt.id, date, time: wt.time || null, note: wt.note || '', rawExtracted: wt.rawExtracted || {}, sourceImage: null };
-      for (const wf of WEIGHT_FIELDS) out[wf.key] = wt[wf.key] != null ? wt[wf.key] : null;
-      weights.push(out);
+      importedIds.add(wt.id);
+      continue;
     }
+    // No hay medición local de ese día → agregar. Reimporta aunque el id ya esté en importedIds
+    // (el dato se perdió del estado local); el freno de borrado es removedBridgeIds (arriba).
+    const out = { id: wt.id, date, time: wt.time || null, note: wt.note || '', rawExtracted: wt.rawExtracted || {}, sourceImage: null };
+    for (const wf of WEIGHT_FIELDS) out[wf.key] = wt[wf.key] != null ? wt[wf.key] : null;
+    for (const sf of STRING_FIELDS) out[sf.key] = wt[sf.key] != null ? wt[sf.key] : null;
+    for (const seg of SEGMENT_FIELDS) out[seg.key] = wt[seg.key] != null ? wt[seg.key] : null;
+    weights.push(out);
     importedIds.add(wt.id); added.weights++;
   }
 
@@ -1555,7 +1603,12 @@ function mergeBridge(state, bridge) {
 
   const nextState = {
     ...state, days, weights,
-    bridge: { ...(state.bridge || {}), lastSyncAt: new Date().toISOString(), importedIds: [...importedIds] },
+    bridge: {
+      ...(state.bridge || {}),
+      lastSyncAt: new Date().toISOString(),
+      lastSyncOk: true, lastSyncError: null, lastSyncAdded: added,
+      importedIds: [...importedIds],
+    },
   };
   return { state: nextState, added };
 }
@@ -1567,7 +1620,20 @@ async function runBridgeSync(state, setState) {
   const token = state.settings?.bridgeToken;
   let bridge;
   try { bridge = await fetchBridge(url, token); }
-  catch (e) { console.warn('Bridge sync falló', e); return { ok: false, reason: 'fetch', error: e.message }; }
+  catch (e) {
+    console.warn('Bridge sync falló', e);
+    // Registrar el fallo en el estado para que el indicador del header lo muestre (antes se
+    // tragaba en silencio y un sync roto era indistinguible de uno OK).
+    setState((prev) => ({
+      ...prev,
+      bridge: {
+        ...(prev.bridge || {}),
+        lastSyncAttemptAt: new Date().toISOString(),
+        lastSyncOk: false, lastSyncError: e.message || 'fetch',
+      },
+    }));
+    return { ok: false, reason: 'fetch', error: e.message };
+  }
   let added = { meals: 0, weights: 0, workouts: 0 };
   setState((prev) => {
     const res = mergeBridge(prev, bridge);
@@ -2221,6 +2287,79 @@ function computeTrendAnalysis(weights, days, snackBank, proteinBank, targets, de
   const deficitDiario = (promedioKcal != null && tdeeEstimado != null) ? tdeeEstimado - promedioKcal : null;
 
   return { last, prev, diasReal, deltaKg, promedioKcal, balanceDiario, tdeeEstimado, deficitDiario, daysCount };
+}
+
+// Métricas de composición para el análisis de evolución de largo plazo.
+// `better: 'down'` → bajar es mejor (en déficit); `'up'` → subir es mejor (músculo).
+// `eps` = cambio mínimo (en unidades de la métrica) para contar como movimiento;
+// por debajo se considera 'estable'. Un umbral relativo único no sirve porque las
+// bases difieren mucho (105 kg de peso vs 14 de visceral).
+const EVOLUTION_METRICS = [
+  { key: 'weightKg',         label: 'Peso',            unit: 'kg', better: 'down', decimals: 1, eps: 0.2 },
+  { key: 'bodyFatPct',       label: '% grasa',         unit: '%',  better: 'down', decimals: 1, eps: 0.2 },
+  { key: 'fatKg',            label: 'Grasa',           unit: 'kg', better: 'down', decimals: 1, eps: 0.2 },
+  { key: 'muscleKg',         label: 'Masa muscular',   unit: 'kg', better: 'up',   decimals: 1, eps: 0.2 },
+  { key: 'skeletalMuscleKg', label: 'Músculo esq.',    unit: 'kg', better: 'up',   decimals: 1, eps: 0.2 },
+  { key: 'visceralFat',      label: 'Grasa visceral',  unit: '',   better: 'down', decimals: 1, eps: 0.5 },
+  { key: 'subcutaneousFatKg',label: 'Grasa subcutánea',unit: 'kg', better: 'down', decimals: 1, eps: 0.2 },
+  { key: 'waistCm',          label: 'Cintura',         unit: 'cm', better: 'down', decimals: 1, eps: 0.5 },
+  { key: 'hipCm',            label: 'Cadera',          unit: 'cm', better: 'down', decimals: 1, eps: 0.5 },
+  { key: 'waistHipRatio',    label: 'Cintura-cadera',  unit: '',   better: 'down', decimals: 2, eps: 0.02 },
+  { key: 'bmi',              label: 'IMC',             unit: '',   better: 'down', decimals: 1, eps: 0.15 },
+  { key: 'fatFreeMassKg',    label: 'Masa libre grasa',unit: 'kg', better: 'up',   decimals: 1, eps: 0.2 },
+  { key: 'proteinKg',        label: 'Masa proteica',   unit: 'kg', better: 'up',   decimals: 1, eps: 0.2 },
+  { key: 'ffmi',             label: 'FFMI',            unit: '',   better: 'up',   decimals: 1, eps: 0.15 },
+];
+
+// Analiza la trayectoria completa (primer pesaje → último) de cada métrica de
+// composición. `goal` invierte la dirección deseada para objetivos de subir masa.
+function computeEvolution(weights, goal) {
+  const sorted = (weights || []).filter((w) => w.weightKg != null)
+    .slice().sort((a, b) => a.date.localeCompare(b.date));
+  if (sorted.length < 2) return null;
+
+  const gain = goal === 'gain';
+  const metrics = [];
+  for (const m of EVOLUTION_METRICS) {
+    const pts = sorted.filter((w) => w[m.key] != null);
+    if (pts.length < 2) continue;
+    const first = Number(pts[0][m.key]);
+    const last = Number(pts[pts.length - 1][m.key]);
+    const delta = Number((last - first).toFixed(2));
+    const pct = first !== 0 ? (delta / Math.abs(first)) * 100 : 0;
+    const d1 = new Date(pts[0].date + 'T12:00:00');
+    const d2 = new Date(pts[pts.length - 1].date + 'T12:00:00');
+    const days = Math.max(1, Math.round((d2 - d1) / 86400000));
+    const weekly = Number(((delta / days) * 7).toFixed(2));
+
+    // Dirección deseada: en 'gain' se invierte salvo el músculo, que siempre sube.
+    let better = m.better;
+    if (gain && m.key !== 'muscleKg' && m.key !== 'skeletalMuscleKg') {
+      better = m.better === 'down' ? 'up' : 'down';
+    }
+
+    // Zona muerta: cambio menor al eps de la métrica se considera estable.
+    let status;
+    if (Math.abs(delta) < (m.eps || 0.2)) status = 'estable';
+    else if (better === 'down') status = delta < 0 ? 'mejora' : 'empeora';
+    else status = delta > 0 ? 'mejora' : 'empeora';
+
+    metrics.push({ ...m, first, last, delta, pct, days, weekly, better, status });
+  }
+  if (metrics.length === 0) return null;
+
+  const firstW = sorted[0];
+  const lastW = sorted[sorted.length - 1];
+  const spanDays = Math.max(1, Math.round(
+    (new Date(lastW.date + 'T12:00:00') - new Date(firstW.date + 'T12:00:00')) / 86400000));
+
+  // Recomposición: baja grasa (peso o %grasa o grasa kg) sin perder músculo.
+  const fatDown = metrics.some((x) => (x.key === 'fatKg' || x.key === 'bodyFatPct' || x.key === 'weightKg') && x.delta < 0);
+  const muscle = metrics.find((x) => x.key === 'muscleKg' || x.key === 'skeletalMuscleKg');
+  const muscleKept = muscle && muscle.delta >= -0.2;
+  const recomp = fatDown && muscleKept;
+
+  return { metrics, count: sorted.length, firstDate: firstW.date, lastDate: lastW.date, spanDays, recomp };
 }
 
 function interpretTrend(data, targets) {
@@ -5006,7 +5145,27 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
   const dateInputRef = React.useRef(null);
 
   const updateDay = useCallback((patch) => {
-    setState((prev) => ({ ...prev, days: { ...prev.days, [today]: { ...(prev.days[today] || {}), ...patch } } }));
+    setState((prev) => {
+      const prevDay = prev.days[today] || {};
+      // Detectar extras/ejercicio que el patch ELIMINA, para (1) avisarle al bridge y (2)
+      // anotarlos en removedBridgeIds, así mergeBridge no los reimporta. POST idempotente.
+      const removed = [];
+      if (Array.isArray(patch.extras)) {
+        const keep = new Set(patch.extras.map((e) => e && e.id));
+        for (const e of (prevDay.extras || [])) if (e && e.id != null && !keep.has(e.id)) removed.push(['meals', e.id]);
+      }
+      if (Array.isArray(patch.exercise)) {
+        const keep = new Set(patch.exercise.map((e) => e && e.id));
+        for (const e of (prevDay.exercise || [])) if (e && e.id != null && !keep.has(e.id)) removed.push(['workouts', e.id]);
+      }
+      let bridge = prev.bridge;
+      if (removed.length) {
+        for (const [section, id] of removed) postBridgeDelete(prev.settings, section, id);
+        const rb = new Set([...(prev.bridge?.removedBridgeIds || []), ...removed.map((r) => r[1])]);
+        bridge = { ...(prev.bridge || {}), removedBridgeIds: [...rb] };
+      }
+      return { ...prev, bridge, days: { ...prev.days, [today]: { ...prevDay, ...patch } } };
+    });
   }, [setState, today]);
 
   // Alimentos registrados (bridge/captura) asignados a una sección del plan, para mostrarlos
@@ -7508,6 +7667,121 @@ function WeightEntryModal({ state, setState, editing, initialMode, onClose }) {
   );
 }
 
+// "+1.2", "−0.4", "0.0" — usa el signo menos tipográfico como en TrendAnalysis.
+function fmtDelta(v, decimals = 1) {
+  const s = Math.abs(v).toFixed(decimals);
+  if (v > 0) return `+${s}`;
+  if (v < 0) return `−${s}`;
+  return s;
+}
+
+function shortDate(key) {
+  // "2026-05-27" → "27/5"
+  const [, mm, dd] = (key || '').split('-');
+  return dd && mm ? `${Number(dd)}/${Number(mm)}` : key;
+}
+
+function EvolutionAnalysis({ state }) {
+  const ev = computeEvolution(state.weights || [], state.userProfile?.goal);
+  const total = (state.weights || []).filter((w) => w.weightKg != null).length;
+
+  if (!ev) {
+    return (
+      <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4">
+        <div className="flex items-center gap-2 mb-2">
+          <span className="text-base">📈</span>
+          <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Tu evolución</h3>
+        </div>
+        <p className="text-sm text-gray-500 dark:text-gray-400">
+          Necesitas al menos <span className="font-semibold">2 pesajes</span> para ver tu evolución.
+          {total === 1 && ' Te falta 1 medición más.'}
+          {total === 0 && ' Agrega tu primer pesaje arriba.'}
+        </p>
+      </div>
+    );
+  }
+
+  const mantener = ev.metrics.filter((m) => m.status === 'mejora');
+  const mejorar = ev.metrics.filter((m) => m.status === 'empeora');
+  const toneFor = (status) => status === 'mejora' ? COLOR_CLASSES.green.text
+    : status === 'empeora' ? COLOR_CLASSES.red.text : 'text-gray-500 dark:text-gray-400';
+
+  return (
+    <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <span className="text-base">📈</span>
+          <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Tu evolución</h3>
+        </div>
+        <span className="text-xs text-gray-500 dark:text-gray-400">
+          desde {shortDate(ev.firstDate)} · {ev.spanDays} {ev.spanDays === 1 ? 'día' : 'días'} · {ev.count} pesajes
+        </span>
+      </div>
+
+      {/* Cambio total por métrica */}
+      <div className="grid grid-cols-2 gap-3">
+        {ev.metrics.map((m) => (
+          <div key={m.key}>
+            <div className="text-[11px] text-gray-500 dark:text-gray-400">{m.label}</div>
+            <div className={`text-lg font-bold ${toneFor(m.status)}`}>
+              {fmtDelta(m.delta, m.decimals)}<span className="text-xs font-normal ml-0.5">{m.unit}</span>
+            </div>
+            <div className="text-[10px] text-gray-500 dark:text-gray-400">
+              {m.first.toFixed(m.decimals)} → {m.last.toFixed(m.decimals)}{m.unit ? ` ${m.unit}` : ''}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {ev.recomp && (
+        <div className={`flex items-start gap-2 px-3 py-2 rounded-xl ${COLOR_CLASSES.green.bg}`}>
+          <span className="text-base">💪</span>
+          <p className={`text-xs ${COLOR_CLASSES.green.text}`}>
+            <span className="font-semibold">Recomposición:</span> estás bajando grasa sin perder músculo. Justo lo que buscas.
+          </p>
+        </div>
+      )}
+
+      {/* Qué mantener */}
+      {mantener.length > 0 && (
+        <div className={`px-3 py-2.5 rounded-xl ${COLOR_CLASSES.green.bg}`}>
+          <div className={`text-[11px] font-semibold uppercase tracking-wide mb-1.5 ${COLOR_CLASSES.green.text}`}>✅ Qué mantener</div>
+          <ul className={`space-y-1 text-xs ${COLOR_CLASSES.green.text}`}>
+            {mantener.map((m) => (
+              <li key={m.key}>
+                <span className="font-semibold">{m.label}</span>{' '}
+                {m.better === 'down' ? 'bajando' : 'subiendo'} {Math.abs(m.weekly).toFixed(m.decimals)}{m.unit ? ` ${m.unit}` : ''}/sem — sigue así.
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Qué mejorar */}
+      {mejorar.length > 0 ? (
+        <div className={`px-3 py-2.5 rounded-xl ${COLOR_CLASSES.amber.bg}`}>
+          <div className={`text-[11px] font-semibold uppercase tracking-wide mb-1.5 ${COLOR_CLASSES.amber.text}`}>⚠️ Qué mejorar</div>
+          <ul className={`space-y-1 text-xs ${COLOR_CLASSES.amber.text}`}>
+            {mejorar.map((m) => (
+              <li key={m.key}>
+                <span className="font-semibold">{m.label}</span>{' '}
+                {m.better === 'down'
+                  ? `subió ${Math.abs(m.delta).toFixed(m.decimals)}${m.unit ? ` ${m.unit}` : ''} — apunta a bajarla.`
+                  : `bajó ${Math.abs(m.delta).toFixed(m.decimals)}${m.unit ? ` ${m.unit}` : ''} — cuídala con proteína y fuerza.`}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : (
+        <div className={`flex items-start gap-2 px-3 py-2 rounded-xl ${COLOR_CLASSES.green.bg}`}>
+          <span className="text-base">🎯</span>
+          <p className={`text-xs ${COLOR_CLASSES.green.text}`}>Nada que corregir: todas tus métricas van en la dirección correcta.</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function TrendAnalysis({ state, targets }) {
   const data = computeTrendAnalysis(state.weights || [], state.days || {}, state.snackBank || [], state.proteinBank || [], targets, state.dessertBank || [], state.antojoCustomItems || []);
   const total = (state.weights || []).filter((w) => w.weightKg != null).length;
@@ -7592,6 +7866,50 @@ const SEGMENT_TONE = {
   'Alto':       { bg: 'bg-amber-100 dark:bg-amber-900/30', text: 'text-amber-700 dark:text-amber-300' },
   'Muy alto':   { bg: 'bg-rose-100 dark:bg-rose-900/30',   text: 'text-rose-700 dark:text-rose-300' },
 };
+
+// Rangos de referencia (adulto; por defecto hombre, como Hugo) para clasificar cada
+// métrica tipo "semáforo" igual que Speediance (Bajo/Bien/Alto/Muy alto → SEGMENT_TONE).
+// Cada `bands` es una lista ordenada [maxExclusivo, label]; el último label aplica al
+// resto. Solo incluimos métricas con un estándar clínico claro y útil; las que no
+// tienen rango absoluto significativo (kg de grasa/músculo, peso) no llevan semáforo.
+// Umbrales de referencia general — ajustables si tu báscula usa otra escala.
+const REFERENCE_RANGES = {
+  bodyFatPct:    { M: [[8, 'Bajo'], [20, 'Bien'], [25, 'Alto'], [Infinity, 'Muy alto']],
+                   F: [[15, 'Bajo'], [28, 'Bien'], [33, 'Alto'], [Infinity, 'Muy alto']] },
+  visceralFat:   { both: [[10, 'Bien'], [15, 'Alto'], [Infinity, 'Muy alto']] },
+  bmi:           { both: [[18.5, 'Bajo'], [25, 'Bien'], [30, 'Alto'], [Infinity, 'Muy alto']] },
+  waistHipRatio: { M: [[0.90, 'Bien'], [1.0, 'Alto'], [Infinity, 'Muy alto']],
+                   F: [[0.80, 'Bien'], [0.85, 'Alto'], [Infinity, 'Muy alto']] },
+  ffmi:          { M: [[18, 'Bajo'], [22, 'Bien'], [25, 'Alto'], [Infinity, 'Muy alto']],
+                   F: [[15, 'Bajo'], [19, 'Bien'], [22, 'Alto'], [Infinity, 'Muy alto']] },
+  waterPct:      { M: [[50, 'Bajo'], [65, 'Bien'], [Infinity, 'Alto']],
+                   F: [[45, 'Bajo'], [60, 'Bien'], [Infinity, 'Alto']] },
+  proteinPct:    { both: [[16, 'Bajo'], [20, 'Bien'], [Infinity, 'Alto']] },
+  musclePct:     { M: [[40, 'Bajo'], [55, 'Bien'], [Infinity, 'Alto']],
+                   F: [[35, 'Bajo'], [50, 'Bien'], [Infinity, 'Alto']] },
+};
+
+// Devuelve el label de estado ('Bajo'|'Bien'|'Alto'|'Muy alto') para una métrica, o
+// null si no hay rango definido o el valor no es numérico.
+function evalMetric(key, value, profile) {
+  const def = REFERENCE_RANGES[key];
+  if (!def || value == null || value === '') return null;
+  const n = Number(value);
+  if (!isFinite(n)) return null;
+  const sex = profile?.sex === 'F' ? 'F' : 'M';
+  const bands = def.both || def[sex];
+  if (!bands) return null;
+  for (const [max, label] of bands) {
+    if (n < max) return label;
+  }
+  return bands[bands.length - 1][1];
+}
+
+function MetricStatusChip({ statusLabel }) {
+  if (!statusLabel) return null;
+  const tone = SEGMENT_TONE[statusLabel] || SEGMENT_TONE['Bien'];
+  return <span className={`inline-block px-1.5 py-0.5 rounded-full text-[9px] font-semibold align-middle ${tone.bg} ${tone.text}`}>{statusLabel}</span>;
+}
 
 function NotesHistory({ state }) {
   const today = todayKey();
@@ -8090,7 +8408,16 @@ function WeightView({ state, setState, targets }) {
 
   const remove = (id) => {
     if (!confirm('¿Eliminar esta medición?')) return;
-    setState((prev) => ({ ...prev, weights: (prev.weights || []).filter((w) => w.id !== id) }));
+    setState((prev) => {
+      // Propagar el borrado al bridge y anotarlo, para que mergeBridge no lo reimporte.
+      postBridgeDelete(prev.settings, 'weights', id);
+      const rb = new Set([...(prev.bridge?.removedBridgeIds || []), id]);
+      return {
+        ...prev,
+        weights: (prev.weights || []).filter((w) => w.id !== id),
+        bridge: { ...(prev.bridge || {}), removedBridgeIds: [...rb] },
+      };
+    });
   };
 
   return (
@@ -8114,12 +8441,18 @@ function WeightView({ state, setState, targets }) {
             </div>
           )}
           <div className="grid grid-cols-2 gap-3">
-            {WEIGHT_FIELDS.filter((wf) => last[wf.key] != null).map((wf) => (
-              <div key={wf.key}>
-                <div className="text-[11px] text-gray-500 dark:text-gray-400">{wf.label}</div>
-                <div className="text-base font-bold">{last[wf.key]}<span className="text-xs text-gray-500 dark:text-gray-400 font-normal ml-0.5">{wf.unit}</span></div>
-              </div>
-            ))}
+            {WEIGHT_FIELDS.filter((wf) => last[wf.key] != null).map((wf) => {
+              const status = evalMetric(wf.key, last[wf.key], state.userProfile);
+              return (
+                <div key={wf.key}>
+                  <div className="text-[11px] text-gray-500 dark:text-gray-400">{wf.label}</div>
+                  <div className="text-base font-bold flex items-center gap-1.5">
+                    <span>{last[wf.key]}<span className="text-xs text-gray-500 dark:text-gray-400 font-normal ml-0.5">{wf.unit}</span></span>
+                    <MetricStatusChip statusLabel={status} />
+                  </div>
+                </div>
+              );
+            })}
           </div>
           {last.note && <p className="mt-3 text-xs text-gray-500 dark:text-gray-400 italic">{last.note}</p>}
         </div>
@@ -8142,6 +8475,8 @@ function WeightView({ state, setState, targets }) {
         </div>
         <WeightChart weights={weights} metric={metric} />
       </div>
+
+      <EvolutionAnalysis state={state} />
 
       <SegmentAnalysis weight={last} />
 
@@ -8867,7 +9202,45 @@ function SyncIndicator({ sync, onClick, size = 36 }) {
   );
 }
 
-function BentoTopBar({ activeTab, onTabChange, onCmdK, onAddMeal, onOpenSettings, theme, onToggleTheme, dateLabel, sync }) {
+// Estado del sync del BRIDGE (chat↔app), distinto del Gist (backup en la nube). Deriva de
+// state.bridge, que runBridgeSync/mergeBridge actualizan (lastSyncOk/Error/At/Added).
+function bridgeSyncStatus(state) {
+  if (!state?.settings?.bridgeUrl) return null; // sin bridge configurado → no se muestra
+  const b = state.bridge || {};
+  if (b.lastSyncOk === false) {
+    return { color: '#ef4444', label: 'Error de sync (bridge)', detail: b.lastSyncError || null, at: b.lastSyncAttemptAt || b.lastSyncAt || null };
+  }
+  if (b.lastSyncAt) {
+    const a = b.lastSyncAdded || {};
+    const n = (a.meals || 0) + (a.weights || 0) + (a.workouts || 0);
+    return { color: '#22c55e', label: n > 0 ? `Bridge: +${n} ítem(s)` : 'Bridge sincronizado', detail: null, at: b.lastSyncAt };
+  }
+  return { color: '#9ca3af', label: 'Bridge: sin sincronizar aún', detail: null, at: null };
+}
+
+function BridgeSyncIndicator({ status, syncing, onSync, size = 36 }) {
+  if (!status) return null;
+  const ago = timeAgo(status.at);
+  const title = `${status.label}${ago ? ' · ' + ago : ''}${status.detail ? ' · ' + status.detail : ''} — toca para sincronizar ahora`;
+  const color = syncing ? '#3b82f6' : status.color;
+  return (
+    <button onClick={onSync} title={title} aria-label={title} style={{
+      width: size, height: size, borderRadius: 10, cursor: 'pointer',
+      border: '1px solid var(--bento-hairline)', background: 'var(--bento-card)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative',
+    }}>
+      <span style={{ fontSize: 12, lineHeight: 1, filter: 'grayscale(1)', opacity: 0.65 }}>🔗</span>
+      <span style={{
+        position: 'absolute', top: 6, right: 6,
+        width: 8, height: 8, borderRadius: '50%', background: color,
+        boxShadow: `0 0 0 2px var(--bento-card), 0 0 0 4px ${color}22`,
+        animation: syncing ? 'pulse 1s ease-in-out infinite' : 'none',
+      }} />
+    </button>
+  );
+}
+
+function BentoTopBar({ activeTab, onTabChange, onCmdK, onAddMeal, onOpenSettings, theme, onToggleTheme, dateLabel, sync, bridgeSync, onBridgeSync, bridgeSyncing }) {
   const isDark = theme === 'dark';
   return (
     <div className="bento-topbar-desktop" style={{
@@ -8894,6 +9267,7 @@ function BentoTopBar({ activeTab, onTabChange, onCmdK, onAddMeal, onOpenSettings
         ))}
       </div>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+        <BridgeSyncIndicator status={bridgeSync} syncing={bridgeSyncing} onSync={onBridgeSync} />
         <SyncIndicator sync={sync} onClick={onOpenSettings} />
         <button onClick={onCmdK} style={{
           padding: '8px 12px', borderRadius: 8, cursor: 'pointer',
@@ -8919,7 +9293,7 @@ function BentoTopBar({ activeTab, onTabChange, onCmdK, onAddMeal, onOpenSettings
   );
 }
 
-function BentoMobileTopBar({ activeTab, onCmdK, onOpenSettings, theme, onToggleTheme, dateLabel, sync }) {
+function BentoMobileTopBar({ activeTab, onCmdK, onOpenSettings, theme, onToggleTheme, dateLabel, sync, bridgeSync, onBridgeSync, bridgeSyncing }) {
   const tab = BENTO_TABS.find((t) => t.id === activeTab);
   const isDark = theme === 'dark';
   return (
@@ -8937,6 +9311,7 @@ function BentoMobileTopBar({ activeTab, onCmdK, onOpenSettings, theme, onToggleT
         </div>
       </div>
       <div style={{ display: 'flex', gap: 6 }}>
+        <BridgeSyncIndicator status={bridgeSync} syncing={bridgeSyncing} onSync={onBridgeSync} />
         <SyncIndicator sync={sync} onClick={onOpenSettings} />
         <button onClick={onCmdK} style={{
           width: 36, height: 36, borderRadius: 10, cursor: 'pointer',
@@ -9106,7 +9481,9 @@ function App() {
   // Scheduler de notificaciones (hook que vive mientras la app esté abierta)
   useNotificationScheduler(state.settings?.notifications);
 
-  // Auto-sync del puente chat→app: al montar y cuando la PWA vuelve a primer plano.
+  // Auto-sync del puente chat→app: al montar, al volver a primer plano, y cada 30s mientras
+  // la app está visible. El polling es lo que hace que los datos del OTRO dispositivo aparezcan
+  // sin tener que reabrir la app (antes solo sincronizaba en mount/visibilitychange).
   const bridgeUrl = state.settings?.bridgeUrl;
   const bridgeToken = state.settings?.bridgeToken;
   const bridgePost = bridgeUrl ? withBridgeToken(bridgeUrl, bridgeToken) : null;
@@ -9116,7 +9493,20 @@ function App() {
     sync();
     const onVis = () => { if (document.visibilityState === 'visible') sync(); };
     document.addEventListener('visibilitychange', onVis);
-    return () => document.removeEventListener('visibilitychange', onVis);
+    // Poll cada 30s, pero solo con la pestaña visible (no gastar red/batería en segundo plano).
+    const poll = setInterval(() => { if (document.visibilityState === 'visible') sync(); }, 30000);
+    return () => { document.removeEventListener('visibilitychange', onVis); clearInterval(poll); };
+  }, [bridgeUrl, bridgeToken, setState]);
+
+  // Sync manual del bridge (al tocar el indicador 🔗 del header). `bridgeSyncing` solo pulsa
+  // el punto en este disparo manual, no en el poll de 30s (evita parpadeo constante).
+  const [bridgeSyncing, setBridgeSyncing] = useState(false);
+  const bridgeSyncUi = bridgeSyncStatus(state);
+  const manualBridgeSync = useCallback(async () => {
+    if (!bridgeUrl) return;
+    setBridgeSyncing(true);
+    try { await runBridgeSync({ settings: { bridgeUrl, bridgeToken } }, setState); }
+    finally { setBridgeSyncing(false); }
   }, [bridgeUrl, bridgeToken, setState]);
 
   // Empuje app→bridge: manda al bridge el total REAL del día (lo que la app
@@ -9319,9 +9709,11 @@ function App() {
     <div className="bento-app min-h-screen pb-24" style={{ background: 'var(--bento-bg)', color: 'var(--bento-ink)' }}>
       <BentoTopBar activeTab={tab} onTabChange={setTab} onCmdK={() => setCmdkOpen(true)}
         onAddMeal={() => setShowMealCapture(true)} onOpenSettings={() => setShowSettings(true)}
-        theme={effectiveTheme} onToggleTheme={toggleTheme} dateLabel={dateLabel} sync={sync} />
+        theme={effectiveTheme} onToggleTheme={toggleTheme} dateLabel={dateLabel} sync={sync}
+        bridgeSync={bridgeSyncUi} onBridgeSync={manualBridgeSync} bridgeSyncing={bridgeSyncing} />
       <BentoMobileTopBar activeTab={tab} onCmdK={() => setCmdkOpen(true)}
-        onOpenSettings={() => setShowSettings(true)} theme={effectiveTheme} onToggleTheme={toggleTheme} dateLabel={dateLabel} sync={sync} />
+        onOpenSettings={() => setShowSettings(true)} theme={effectiveTheme} onToggleTheme={toggleTheme} dateLabel={dateLabel} sync={sync}
+        bridgeSync={bridgeSyncUi} onBridgeSync={manualBridgeSync} bridgeSyncing={bridgeSyncing} />
 
       {saveError && (
         <div className="mx-3 mt-2 rounded-xl px-3 py-2 text-sm font-medium bg-red-50 text-red-700 border border-red-200 dark:bg-red-900/30 dark:text-red-300 dark:border-red-800">

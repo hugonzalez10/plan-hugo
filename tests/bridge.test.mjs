@@ -74,6 +74,28 @@ test('_contentUnion weights: una medición por día, mergea composición', () =>
   assert.equal(b.weights[0].bodyFatPct, 18);
 });
 
+// El merge del mismo día debe conservar TODOS los campos de composición, no solo los
+// cuatro clásicos: si Speediance reparte los datos en varias pantallas/llamadas, no se
+// pueden perder grasa subcutánea, segmentos, bodyType, etc. (frente "que se llenen todos").
+test('_contentUnion weights: el merge conserva campos extendidos y segmentos', () => {
+  const b = emptyBridge();
+  _contentUnion(b, 'weights', [{ date: '2026-06-05', weightKg: 105.4, bodyFatPct: 33 }], false);
+  _contentUnion(b, 'weights', [{
+    date: '2026-06-05',
+    subcutaneousFatKg: 24.8, waterKg: 51.8, proteinKg: 14.1, ffmi: 21.7,
+    waistHipRatio: 0.93, referenceWeightKg: 71, bodyType: 'Obesidad',
+    fatSegTorso: 'Alto', muscleSegTorso: 'Bien',
+  }], false);
+  assert.equal(b.weights.length, 1);
+  const w = b.weights[0];
+  assert.equal(w.weightKg, 105.4);
+  assert.equal(w.subcutaneousFatKg, 24.8);
+  assert.equal(w.waterKg, 51.8);
+  assert.equal(w.bodyType, 'Obesidad');
+  assert.equal(w.fatSegTorso, 'Alto');
+  assert.equal(w.muscleSegTorso, 'Bien');
+});
+
 // ── _contentUnion checks: idempotente por (meal|fecha) ───────────────────────────
 test('_contentUnion checks: idempotente', () => {
   const b = emptyBridge();

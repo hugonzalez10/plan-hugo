@@ -155,15 +155,32 @@ Eres nutricionista experto. Analiza esta comida. Responde SOLO JSON sin markdown
 Con texto: inferir macros desde la descripción.
 
 ### Peso / composición
+
+Speediance reparte los datos en **varias pantallas** (Componentes clave, Control del
+peso, Grasa, Músculo, Componente, Análisis de segmentos, Circunferencia). Si Hugo manda
+varias capturas, **combínalas en UN solo objeto**. Extrae **TODAS** las claves legibles
+— no te limites a peso/grasa/músculo/visceral; la app guarda los ~30 parámetros.
+
 ```
-Lee esta captura de báscula/composición corporal. Responde SOLO JSON sin markdown.
-Incluye solo las claves legibles, valores numéricos sin unidades:
+Lee esta(s) captura(s) de báscula/composición corporal. Si hay varias, combina todo en
+UN objeto. Responde SOLO JSON sin markdown. Incluye TODAS las claves legibles (omite las
+que no aparezcan), valores numéricos sin unidades:
 {
-  "weightKg": número, "bodyFatPct": número, "muscleKg": número,
-  "skeletalMuscleKg": número, "fatFreeMassKg": número, "boneKg": número,
+  "weightKg": número, "bodyFatPct": número, "score": número,
+  "fatKg": número, "subcutaneousFatKg": número, "muscleKg": número,
+  "skeletalMuscleKg": número, "fatFreeMassKg": número, "waterKg": número,
+  "proteinKg": número, "boneKg": número,
   "musclePct": número, "waterPct": número, "proteinPct": número,
   "bmi": número, "ffmi": número, "metabolicAge": número, "visceralFat": número,
-  "basalMetabolismKcal": número, "waistCm": número, "time": "HH:MM"
+  "basalMetabolismKcal": número, "waistHipRatio": número, "referenceWeightKg": número,
+  "bodyType": "Bajo peso|Normal|Sobrepeso|Obesidad",
+  "neckCm": número, "chestCm": número, "waistCm": número, "hipCm": número,
+  "bicepCm": número, "thighCm": número,
+  "fatSegUpperL": "Bajo|Bien|Alto|Muy alto", "fatSegUpperR": "...", "fatSegTorso": "...",
+  "fatSegLowerL": "...", "fatSegLowerR": "...",
+  "muscleSegUpperL": "...", "muscleSegUpperR": "...", "muscleSegTorso": "...",
+  "muscleSegLowerL": "...", "muscleSegLowerR": "...",
+  "time": "HH:MM"
 }
 ```
 
@@ -217,11 +234,18 @@ Reglas comunes para TODA entrada:
 }
 ```
 
-**Peso** → push a `weights` (solo las claves legibles + date/time/source):
+**Peso** → push a `weights`. Empuja **TODAS** las claves que leíste en la(s) captura(s),
+no solo estas cuatro — la app guarda los ~30 parámetros y el semáforo/evolución usan
+grasa subcutánea, agua, proteína, IMC, FFMI, cintura-cadera, segmentos, etc. (ejemplo con
+muchos campos; incluye solo los que de verdad aparezcan):
 ```json
 {
   "date": "2026-05-28", "time": "07:00",
-  "weightKg": 78.2, "bodyFatPct": 18.0, "muscleKg": 60.1, "visceralFat": 15,
+  "weightKg": 105.4, "bodyFatPct": 33.0, "fatKg": 34.8, "subcutaneousFatKg": 24.8,
+  "muscleKg": 65.9, "skeletalMuscleKg": 40.6, "fatFreeMassKg": 70.7, "ffmi": 21.7,
+  "waterKg": 51.8, "proteinKg": 14.1, "boneKg": 4.7, "visceralFat": 14,
+  "bmi": 32.5, "basalMetabolismKcal": 1896, "waistHipRatio": 0.93,
+  "referenceWeightKg": 71, "bodyType": "Obesidad",
   "source": "skill-chat"
 }
 ```
@@ -263,7 +287,7 @@ curl -sL "$BRIDGE_URL?w=add&section=meals&date=2026-05-30&time=20:48\
   Si un valor trae `&`, omítelo o cámbialo por `y` para no romper la URL.
 - Campos por sección:
   - `meals`: `name,kcal,protein,carbs,fat,fiber,gi,satfat(0/1),mealSlot,time,notes`
-  - `weights`: `weightKg,bodyFatPct,muscleKg,visceralFat,time`
+  - `weights` (manda TODAS las legibles, no solo estas): `weightKg,bodyFatPct,fatKg,subcutaneousFatKg,muscleKg,skeletalMuscleKg,fatFreeMassKg,ffmi,waterKg,proteinKg,boneKg,visceralFat,bmi,basalMetabolismKcal,waistHipRatio,referenceWeightKg,bodyType,waistCm,hipCm,time` (el POST del delta es mejor que el GET para tantos campos)
   - `workouts`: `name,kcal,minutes,time` (una llamada por entrenamiento)
 - También puedes mandar el delta entero por GET: `BRIDGE_URL?delta=<json url-encoded>&k=$BRIDGE_TOKEN`.
 

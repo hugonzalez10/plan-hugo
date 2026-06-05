@@ -144,9 +144,21 @@ var PRUNE_DAYS   = 10;
 var SECTIONS     = ['meals', 'weights', 'workouts', 'checks'];
 var WINDOW_MS    = 5 * 60 * 1000; // ventana de dedup por contenido (meals/workouts)
 // Campos de composición que se mergean sobre la medición del día (no duplica peso).
-var WEIGHT_MERGE_FIELDS = ['weightKg', 'bodyFatPct', 'muscleKg', 'visceralFat', 'time', 'note',
-  'skeletalMuscleKg', 'fatFreeMassKg', 'boneKg', 'musclePct', 'waterPct', 'proteinPct',
-  'bmi', 'ffmi', 'metabolicAge', 'basalMetabolismKcal', 'waistCm', 'rawExtracted'];
+// Lista COMPLETA alineada con WEIGHT_FIELDS + STRING_FIELDS + SEGMENT_FIELDS de app.jsx:
+// si llega una segunda captura del mismo día (otra pantalla de Speediance), conserva
+// todos sus campos. Mantener en sync con la app o se pierden datos en el merge.
+var WEIGHT_MERGE_FIELDS = [
+  'weightKg', 'bodyFatPct', 'score',
+  'fatKg', 'subcutaneousFatKg', 'muscleKg', 'skeletalMuscleKg', 'fatFreeMassKg',
+  'waterKg', 'proteinKg', 'boneKg',
+  'musclePct', 'waterPct', 'proteinPct',
+  'bmi', 'ffmi', 'metabolicAge', 'visceralFat', 'basalMetabolismKcal',
+  'waistHipRatio', 'referenceWeightKg', 'bodyType',
+  'heightCm', 'neckCm', 'chestCm', 'waistCm', 'hipCm', 'bicepCm', 'armCm',
+  'forearmCm', 'thighCm', 'calfCm',
+  'fatSegUpperL', 'fatSegUpperR', 'fatSegTorso', 'fatSegLowerL', 'fatSegLowerR',
+  'muscleSegUpperL', 'muscleSegUpperR', 'muscleSegTorso', 'muscleSegLowerL', 'muscleSegLowerR',
+  'time', 'note', 'rawExtracted'];
 
 function _json(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj))
@@ -555,9 +567,20 @@ function _entryFromParams(p) {
   ['date', 'time', 'name', 'mealSlot', 'meal', 'gi', 'notes'].forEach(function (k) {
     if (p[k] != null && p[k] !== '') entry[k] = p[k];
   });
-  ['kcal', 'protein', 'carbs', 'fat', 'fiber', 'minutes', 'ts', 'weightKg', 'bodyFatPct',
-   'muscleKg', 'visceralFat'].forEach(function (k) {
+  ['kcal', 'protein', 'carbs', 'fat', 'fiber', 'minutes', 'ts',
+   'weightKg', 'bodyFatPct', 'score', 'fatKg', 'subcutaneousFatKg', 'muscleKg',
+   'skeletalMuscleKg', 'fatFreeMassKg', 'waterKg', 'proteinKg', 'boneKg',
+   'musclePct', 'waterPct', 'proteinPct', 'bmi', 'ffmi', 'metabolicAge', 'visceralFat',
+   'basalMetabolismKcal', 'waistHipRatio', 'referenceWeightKg',
+   'heightCm', 'neckCm', 'chestCm', 'waistCm', 'hipCm', 'bicepCm', 'armCm',
+   'forearmCm', 'thighCm', 'calfCm'].forEach(function (k) {
     if (p[k] != null && p[k] !== '') entry[k] = Number(p[k]);
+  });
+  // Strings de composición (tipo de cuerpo + segmentales) pasan tal cual.
+  ['bodyType', 'fatSegUpperL', 'fatSegUpperR', 'fatSegTorso', 'fatSegLowerL', 'fatSegLowerR',
+   'muscleSegUpperL', 'muscleSegUpperR', 'muscleSegTorso', 'muscleSegLowerL', 'muscleSegLowerR']
+  .forEach(function (k) {
+    if (p[k] != null && p[k] !== '') entry[k] = p[k];
   });
   // El id del cliente es opcional: en `op:add` el servidor lo reasigna (autoridad).
   // Se conserva solo como pista para derivar el ts si no viene `ts`/`time`.
