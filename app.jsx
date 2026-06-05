@@ -1620,12 +1620,14 @@ function normalizeName(name) {
   return (name || '').toLowerCase().trim().replace(/\s+/g, ' ');
 }
 
-// Cubeta de despliegue de un extra según su mealSlot. Solo colación/cena se muestran dentro
-// de su sección; todo lo demás (incluido mealSlot ausente o 'desayuno'/'almuerzo'/'antojo')
-// cae en 'extra' → lista "Extras del día".
+// Cubeta de despliegue de un extra según su mealSlot. Las comidas con slot de una
+// sección del plan (desayuno/almuerzo/colacion/cena/antojo) se muestran DENTRO de esa
+// sección con "📝 Registrado"; el resto (mealSlot ausente o desconocido) cae en 'extra'
+// → lista "Extras del día".
+const PLAN_SLOTS = new Set(['desayuno', 'almuerzo', 'colacion', 'cena', 'antojo']);
 function extraSlotBucket(x) {
   const s = x?.mealSlot;
-  return (s === 'colacion' || s === 'cena') ? s : 'extra';
+  return PLAN_SLOTS.has(s) ? s : 'extra';
 }
 
 // ---------- Reglas personales ----------
@@ -4978,18 +4980,24 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
     setState((prev) => ({ ...prev, days: { ...prev.days, [today]: { ...(prev.days[today] || {}), ...patch } } }));
   }, [setState, today]);
 
-  // Alimentos registrados (bridge/captura) asignados a colación/cena, para mostrarlos dentro
-  // de su sección. Quitar uno lo borra de day.extras y, si no queda ninguno ni hay pick de
-  // banco, vuelve a marcar el slot como pendiente.
+  // Alimentos registrados (bridge/captura) asignados a una sección del plan, para mostrarlos
+  // dentro de su sección con "📝 Registrado". Quitar uno lo borra de day.extras.
   const dayExtras = day.extras || [];
+  const desayunoExtras = dayExtras.filter((x) => extraSlotBucket(x) === 'desayuno');
+  const almuerzoExtras = dayExtras.filter((x) => extraSlotBucket(x) === 'almuerzo');
   const colacionExtras = dayExtras.filter((x) => extraSlotBucket(x) === 'colacion');
   const cenaExtras = dayExtras.filter((x) => extraSlotBucket(x) === 'cena');
+  const antojoExtras = dayExtras.filter((x) => extraSlotBucket(x) === 'antojo');
   const removeSlotExtra = (slot, id) => {
     const nextExtras = dayExtras.filter((e) => e.id !== id);
-    const stillHasSlot = nextExtras.some((e) => extraSlotBucket(e) === slot);
-    const bankPick = slot === 'colacion' ? day.snackId : day.proteinId;
     const patch = { extras: nextExtras };
-    if (!stillHasSlot && !bankPick) patch.eaten = { ...(day.eaten || {}), [slot]: false };
+    // Solo colación/cena marcan el slot como cumplido vía eaten; al quedar vacío y sin pick
+    // de banco, se vuelve a marcar pendiente. Desayuno/almuerzo/antojo no tocan eaten.
+    if (slot === 'colacion' || slot === 'cena') {
+      const stillHasSlot = nextExtras.some((e) => extraSlotBucket(e) === slot);
+      const bankPick = slot === 'colacion' ? day.snackId : day.proteinId;
+      if (!stillHasSlot && !bankPick) patch.eaten = { ...(day.eaten || {}), [slot]: false };
+    }
     updateDay(patch);
   };
 
@@ -5295,14 +5303,20 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
 
         <WaterTracker day={day} onUpdate={updateDay} target={targets?.waterTarget || 3000} />
 
-        <MealCard meal={desayuno} day={day} skipped={skippedSet.has('desayuno')}
-          onToggleItem={(itemId) => toggleMealItem('desayuno', itemId)}
-          onMarkAll={(value) => markAllMealItems('desayuno', value)}
-          onSkipToggle={() => toggleSkipped('desayuno')} targets={targets} />
-        <MealCard meal={almuerzo} day={day} skipped={skippedSet.has('almuerzo')}
-          onToggleItem={(itemId) => toggleMealItem('almuerzo', itemId)}
-          onMarkAll={(value) => markAllMealItems('almuerzo', value)}
-          onSkipToggle={() => toggleSkipped('almuerzo')} targets={targets} />
+        <div>
+          <MealCard meal={desayuno} day={day} skipped={skippedSet.has('desayuno')}
+            onToggleItem={(itemId) => toggleMealItem('desayuno', itemId)}
+            onMarkAll={(value) => markAllMealItems('desayuno', value)}
+            onSkipToggle={() => toggleSkipped('desayuno')} targets={targets} />
+          <SlotLoggedItems items={desayunoExtras} onRemove={(id) => removeSlotExtra('desayuno', id)} />
+        </div>
+        <div>
+          <MealCard meal={almuerzo} day={day} skipped={skippedSet.has('almuerzo')}
+            onToggleItem={(itemId) => toggleMealItem('almuerzo', itemId)}
+            onMarkAll={(value) => markAllMealItems('almuerzo', value)}
+            onSkipToggle={() => toggleSkipped('almuerzo')} targets={targets} />
+          <SlotLoggedItems items={almuerzoExtras} onRemove={(id) => removeSlotExtra('almuerzo', id)} />
+        </div>
         <DessertSection meal="almuerzo" dessertBank={state.dessertBank} day={day} eaten={eaten}
           onSelect={selectDessert} onToggleEaten={toggleDessertEaten} targets={targets}
           onSuggest={() => setSuggestSlot('dessert_almuerzo')} />
@@ -5383,14 +5397,17 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
               onSuggest={() => setSuggestSlot('dessert_cena')} />
           )}
         </div>
-        <MealCard meal={antojo} day={day} skipped={skippedSet.has('antojo')}
-          customAntojoItems={state.antojoCustomItems || []}
-          onToggleItem={(itemId) => toggleMealItem('antojo', itemId)}
-          onMarkAll={(value) => markAllMealItems('antojo', value)}
-          onSkipToggle={() => toggleSkipped('antojo')}
-          onAddItem={addAntojoItem}
-          onRemoveItem={removeAntojoItem}
-          targets={targets} />
+        <div>
+          <MealCard meal={antojo} day={day} skipped={skippedSet.has('antojo')}
+            customAntojoItems={state.antojoCustomItems || []}
+            onToggleItem={(itemId) => toggleMealItem('antojo', itemId)}
+            onMarkAll={(value) => markAllMealItems('antojo', value)}
+            onSkipToggle={() => toggleSkipped('antojo')}
+            onAddItem={addAntojoItem}
+            onRemoveItem={removeAntojoItem}
+            targets={targets} />
+          <SlotLoggedItems items={antojoExtras} onRemove={(id) => removeSlotExtra('antojo', id)} />
+        </div>
         <ExtrasSection day={day} onUpdate={updateDay} apiKey={state.settings?.anthropicApiKey} tryWithRules={tryWithRules} />
         <ExerciseSection day={day} onUpdate={updateDay} apiKey={state.settings?.anthropicApiKey} userWeightKg={state.userProfile?.weightKg} />
         <DailyNotesCard day={day} onUpdate={updateDay} />

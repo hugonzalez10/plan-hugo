@@ -106,9 +106,11 @@ Grasa visceral índice 15 → marcador crítico. Penalizar carbos simples y gras
 Antes de procesar, decide qué es:
 
 - **Comida** → plato, alimento, etiqueta nutricional, o texto tipo "comí…".
-  Toda comida se registra como una entrada en `meals` (ver Paso 3). Hugo NO tiene un
-  plan de comidas fijo, solo metas de macros: no intentes mapear el alimento a un
-  "plan del día".
+  Toda comida se registra como una entrada en `meals` (ver Paso 3). **Asigna siempre
+  el `mealSlot` correcto según la hora** (ver tabla): la app muestra cada comida
+  DENTRO de su sección (Desayuno/Almuerzo/Colación/Cena/Antojo) con sus macros tal
+  como los estimaste. Reserva `mealSlot: "extra"` solo para comida fuera de plan o no
+  clasificable por hora.
 - **Peso / composición** → captura de báscula o app de composición corporal
   (Withings, Speediance, etc.): peso, % grasa, músculo, IMC, etc. → sección `weights`.
 - **Ejercicio** → captura de entrenamiento (Apple Fitness, Strava, anillos):
@@ -117,12 +119,11 @@ Antes de procesar, decide qué es:
 
 Si hay ambigüedad, pregunta en una línea.
 
-> **Dedup automático (ya no clasificas "plan fijo vs extra").** Hugo no tiene un plan
-> de comidas definido, solo metas de macros. Registra siempre la comida como entrada
-> en `meals` (Paso 3). El servidor dedup por contenido (nombre + `mealSlot` + `date` +
-> ventana de ~5 min), así que registrar el mismo plato dos veces, o que Hugo lo
-> registre también en la app, NO lo duplica. El `mealSlot` es solo una etiqueta de
-> horario (ver tabla más abajo).
+> **Dedup automático.** Registra siempre la comida como entrada en `meals` (Paso 3)
+> con el `mealSlot` correcto por hora (ver tabla más abajo). El servidor dedup por
+> contenido (nombre + `mealSlot` + `date` + ventana de ~5 min), así que registrar el
+> mismo plato dos veces, o que Hugo lo registre también en la app, NO lo duplica. El
+> `mealSlot` ubica la comida en su sección del plan en la app.
 
 ---
 
@@ -193,9 +194,10 @@ Reglas comunes para TODA entrada:
   manda `time` (`HH:MM`) o `ts` (ms).
 - `date`: `YYYY-MM-DD` del registro (o de la captura si la muestra).
 - `source`: `"skill-chat"`.
-- `mealSlot` (solo comida): etiqueta de horario según la hora (ver tabla). La app
-  usa `desayuno|almuerzo|colacion|cena|antojo|extra`. Toda comida entra como entrada
-  de `meals`.
+- `mealSlot` (solo comida): sección del plan según la hora (ver tabla). La app usa
+  `desayuno|almuerzo|colacion|cena|antojo|extra` y muestra la comida dentro de esa
+  sección. Toda comida entra como entrada de `meals`; usa `extra` solo si no calza
+  por hora o es claramente fuera de plan.
 
 **Comida** → push a `meals`:
 ```json
@@ -363,11 +365,12 @@ coincidan siempre:
 | antes de 11:00 | desayuno |
 | 11:00–14:59 | almuerzo |
 | 15:00–18:59 | colacion |
-| 19:00 en adelante | cena |
+| 19:00–21:29 | cena |
+| 21:30 en adelante | antojo |
 
-(El `mealSlot` es solo una etiqueta de horario del EXTRA; no hay franja "extra"
-por hora. La app solo despliega colación/cena dentro de su sección; el resto cae
-en "EXTRAS DEL DÍA".)
+(La app despliega cada `mealSlot` del plan —desayuno/almuerzo/colacion/cena/antojo—
+DENTRO de su sección, con "📝 Registrado" y los macros que estimaste. Solo lo que no
+calza por hora o es fuera de plan va a `extra` → "EXTRAS DEL DÍA".)
 
 ---
 
