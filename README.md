@@ -40,6 +40,19 @@ de estado en la barra superior (verde = sincronizado, ámbar = pendiente/conflic
 error). Cada dispositivo tiene su copia; el respaldo en la nube es la fuente de verdad
 compartida.
 
+## Tests
+
+Lógica pura del bridge (dedup por contenido, ventana de 5 min, merge de pesos, suma de
+totales, adopción de snapshot/config, auth por token) y el acoplamiento app↔bridge
+(`normalizeName` debe coincidir con `_norm` del `.gs`):
+
+```sh
+npm test          # = node --test (nativo, sin dependencias)
+```
+
+Los tests en `tests/` cargan `apps-script/bridge-writer.gs` con los globals de Apps
+Script stubeados — no despliegan nada.
+
 ## Stack
 
 React 18 (UMD, versión fija + SRI) + Tailwind vía CDN. App en `app.jsx`, precompilada a

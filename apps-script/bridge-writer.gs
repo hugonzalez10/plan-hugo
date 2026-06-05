@@ -47,7 +47,11 @@
 //  GET  /exec                        → lee y devuelve el JSON del canónico (la app).
 //                                       Antes de servir, AUTO-HEAL: absorbe y borra
 //                                       cualquier duplicado/upload suelto.
-//  GET  /exec?totals=YYYY-MM-DD      → devuelve solo los totales de ese día (rápido)
+//  GET  /exec?totals=YYYY-MM-DD      → devuelve solo los totales de ese día (rápido).
+//                                       meals[] es la autoridad del log de comida; si
+//                                       hay snapshot de la app toma el MAYOR por
+//                                       nutriente (nunca muestra de menos, conserva el
+//                                       plan fijo del snapshot). Ver el branch p.totals.
 //  GET  /exec?config=1               → devuelve solo el bloque `config` (la skill)
 //  GET  /exec?cleanup=1              → barre duplicados en todo Drive (mantención)
 //  GET  /exec?heal=1                 → fuerza el auto-heal y reporta cuántos absorbió
@@ -91,7 +95,8 @@
 //    { "op":"snapshot", "date":"2026-05-30",
 //      "totals":{kcalNet,kcalIn,kcalBurned,protein,carbs,fat,fiber,waterMl},
 //      "targets":{...}, "remaining":{...}, "eaten":[...] }
-//  Se guarda en `snapshots[date]`. GET ?totals=<date> lo devuelve con source:"app".
+//  Se guarda en `snapshots[date]`. GET ?totals=<date> lo devuelve con source:"app"
+//  (o "app+meals" si meals[] tenía más que el snapshot y mandó el log del bridge).
 //
 //  CONFIG (lo empuja la APP por POST cuando cambia el perfil): meta diaria, déficit,
 //  TMB/TDEE y antropometría, para que la skill no hardcodee ~2.150 kcal:
@@ -113,6 +118,24 @@
 // ── Mantenimiento ────────────────────────────────────────────────────────────
 //  Si algún día se recrea el archivo, actualiza CANONICAL_ID aquí Y en
 //  food-tracker/SKILL.md (constante FILE_ID). Deben coincidir siempre.
+
+// ── AUTENTICACIÓN ────────────────────────────────────────────────────────────
+// El web app está desplegado como "Cualquier usuario": sin esto, quien tenga la URL
+// /exec puede leer, escribir y BORRAR tus datos. SHARED_TOKEN es un secreto compartido
+// obligatorio: cada GET/POST debe traer ?k=<token> (Apps Script expone `e.parameter`
+// también en POST, así un solo guard cubre lectura y escritura). El mismo valor va en
+// la app (Ajustes → Token del bridge) y en la skill food-tracker (constante BRIDGE_TOKEN).
+//   · Si SHARED_TOKEN queda en '' (vacío) → auth DESACTIVADA (compat / despliegue gradual).
+//   · En cuanto le pongas un valor, se exige en TODA llamada.
+// Despliegue sin lockout: pon el token primero en la app y la skill (la app ya manda
+// ?k= aunque el .gs aún no lo exija), y recién después fija SHARED_TOKEN aquí y redeploy.
+var SHARED_TOKEN = 'db52f16b62e5ada13150edc571c21b24010a582fe0ae18b4';
+
+function _authed(e) {
+  if (!SHARED_TOKEN) return true; // auth desactivada mientras el token esté vacío
+  var got = (e && e.parameter && e.parameter.k) || '';
+  return got === SHARED_TOKEN;
+}
 
 var CANONICAL_ID = '1YN3F48EZoRWSpOabwDqoXzKrGkTqIa2t';
 var BRIDGE_TITLE = 'plan-hugo-bridge.json';
@@ -185,16 +208,102 @@ function _prune(bridge) {
 
 // Totales del día = suma de `meals` (extras del bridge) con date = day.
 function _totals(bridge, day) {
-  var t = { kcal: 0, protein: 0, carbs: 0, fat: 0 };
+  var t = { kcal: 0, protein: 0, carbs: 0, fat: 0, fiber: 0 };
   bridge.meals.forEach(function (m) {
     if (m && m.date === day) {
       t.kcal += Number(m.kcal) || 0; t.protein += Number(m.protein) || 0;
       t.carbs += Number(m.carbs) || 0; t.fat += Number(m.fat) || 0;
+      t.fiber += Number(m.fiber) || 0;
     }
   });
   var wk = 0;
   bridge.workouts.forEach(function (w) { if (w && w.date === day) wk += Number(w.kcal) || 0; });
   return { totals: t, workoutsKcal: wk };
+}
+
+// Nombres de las `meals` de un día (el log real de comida del bridge), para
+// listar "qué comiste" en `?totals=` aunque la app no las tenga en su snapshot.
+function _mealNames(bridge, day) {
+  var names = [];
+  bridge.meals.forEach(function (m) {
+    if (m && m.date === day && m.name) names.push(m.name);
+  });
+  return names;
+}
+
+// ── Reconciliación de totales del día (PURA, sin I/O) ────────────────────────
+// Combina el log de comida del bridge (meals[]/workouts[], `meal`) con el snapshot
+// que empuja la app (`snap`). DOS regímenes según el marcador `snap.planScope`:
+//
+//  · 'plan-only' (PARTICIÓN ADITIVA, el camino nuevo): el snapshot trae SOLO la porción
+//    del plan (fijos + banco) + agua, que NO viaja a meals[]. Los extras y el ejercicio
+//    SÍ están en meals[]/workouts[]. Como los conjuntos son disjuntos, SE SUMAN. Esto
+//    refleja correcciones hacia abajo: borrar un extra encoge meals[]; destildar un fijo
+//    encoge el snapshot → el total baja. (El viejo Math.max nunca bajaba: un trinquete.)
+//
+//  · sin marcador (LEGACY): snapshots viejos en vuelo traían el total COMPLETO (incl.
+//    extras), que se solapa con meals[]. Para no doblar ni romper, se reconcilia con el
+//    MAYOR por nutriente, como antes. Se autolimpia: la app reescribe el snapshot del día
+//    marcado en cuanto se abre, así que este branch solo cubre la ventana de migración.
+//
+// `meal` = { totals:{kcal,protein,carbs,fat,fiber}, workoutsKcal }; `mealNames` = string[].
+function _reconcile(day, snap, meal, mealNames) {
+  var mt = meal.totals;
+  var names = mealNames || [];
+  if (!snap) {
+    return { source: 'bridge', today: day, totals: mt, workoutsKcal: meal.workoutsKcal, eaten: names };
+  }
+  var tt = snap.totals || {};
+  var targets = snap.targets || {};
+  var num = function (v) { return Number(v) || 0; };
+  var kcalIn, kcalBurned, protein, carbs, fat, fiber, source, recompute;
+  var waterMl = num(tt.waterMl);
+
+  if (snap.planScope === 'plan-only') {
+    // ADITIVO: plan (snapshot) + log (meals[]/workouts[]).
+    kcalIn = num(tt.kcalIn) + mt.kcal;
+    kcalBurned = meal.workoutsKcal + num(tt.kcalBurned);
+    protein = num(tt.protein) + mt.protein;
+    carbs = num(tt.carbs) + mt.carbs;
+    fat = num(tt.fat) + mt.fat;
+    fiber = num(tt.fiber) + mt.fiber;
+    source = 'app+meals';
+    recompute = true; // remaining siempre contra metas (el snapshot.remaining era del total viejo)
+  } else {
+    // LEGACY: MAYOR por nutriente (no doblar el solape).
+    kcalIn = Math.max(num(tt.kcalIn), mt.kcal);
+    kcalBurned = Math.max(num(tt.kcalBurned), meal.workoutsKcal);
+    protein = Math.max(num(tt.protein), mt.protein);
+    carbs = Math.max(num(tt.carbs), mt.carbs);
+    fat = Math.max(num(tt.fat), mt.fat);
+    fiber = Math.max(num(tt.fiber), mt.fiber);
+    var usedMeals = kcalIn > num(tt.kcalIn) || protein > num(tt.protein);
+    source = usedMeals ? 'app+meals' : 'app';
+    recompute = usedMeals;
+  }
+
+  var kcalNet = kcalIn - kcalBurned;
+  var remaining = recompute ? {
+    kcal: num(targets.kcalMax) - kcalNet,
+    protein: num(targets.proteinMin) - protein,
+    carbs: num(targets.carbsTarget) - carbs,
+    fat: num(targets.fatTarget) - fat,
+    fiber: num(targets.fiberTarget) - fiber,
+    water: num(targets.waterTarget) - waterMl
+  } : (snap.remaining || {});
+
+  var eaten = (snap.eaten || []).slice();
+  names.forEach(function (n) { if (eaten.indexOf(n) < 0) eaten.push(n); });
+
+  return {
+    source: source, today: day, ts: snap.ts || null,
+    totals: {
+      kcal: kcalNet, kcalIn: kcalIn, kcalBurned: kcalBurned,
+      protein: protein, carbs: carbs, fat: fat, fiber: fiber, waterMl: waterMl
+    },
+    targets: targets, remaining: remaining,
+    workoutsKcal: kcalBurned, eaten: eaten
+  };
 }
 
 // ── Merge puro (sin I/O): aplica un payload sobre un bridge EN MEMORIA ────────
@@ -208,6 +317,10 @@ function _mergeInto(bridge, payload, day) {
   if (payload.op === 'snapshot' && payload.date) {
     bridge.snapshots[payload.date] = {
       date: payload.date,
+      // planScope:'plan-only' → la app mandó SOLO la porción del plan (fijos+banco)+agua;
+      // ?totals= la SUMA con meals[]/workouts[] (partición aditiva). Ausente = legacy
+      // (totales completos), se reconcilia con Math.max para no romper datos en vuelo.
+      planScope: payload.planScope || null,
       totals: payload.totals || {},
       targets: payload.targets || {},
       remaining: payload.remaining || {},
@@ -455,6 +568,7 @@ function _entryFromParams(p) {
 
 // ── LECTURA (la app) + TOTALES + COMMIT/HEAL por GET ─────────────────────────
 function doGet(e) {
+  if (!_authed(e)) return _json({ ok: false, reason: 'unauthorized' });
   var p = (e && e.parameter) || {};
   if (p.w === 'add' && p.section) {
     return _json(_apply({ op: 'add', section: p.section, today: (p.date || p.today), entries: [_entryFromParams(p)] }));
@@ -469,23 +583,10 @@ function doGet(e) {
   if (p.config)  return _json({ ok: true, config: _readCanonical().config || {} });
   if (p.totals) {
     var bR = _readCanonical();
-    var snap = bR.snapshots && bR.snapshots[p.totals];
-    if (snap) {
-      var tt = snap.totals || {};
-      return _json({
-        source: 'app', today: p.totals, ts: snap.ts || null,
-        totals: {
-          kcal: Number(tt.kcalNet) || 0, kcalIn: Number(tt.kcalIn) || 0,
-          kcalBurned: Number(tt.kcalBurned) || 0, protein: Number(tt.protein) || 0,
-          carbs: Number(tt.carbs) || 0, fat: Number(tt.fat) || 0,
-          fiber: Number(tt.fiber) || 0, waterMl: Number(tt.waterMl) || 0
-        },
-        targets: snap.targets || {}, remaining: snap.remaining || {},
-        workoutsKcal: Number(tt.kcalBurned) || 0, eaten: snap.eaten || []
-      });
-    }
-    var sum = _totals(bR, p.totals);
-    return _json({ source: 'bridge', today: p.totals, totals: sum.totals, workoutsKcal: sum.workoutsKcal });
+    var day = p.totals;
+    var snap = bR.snapshots && bR.snapshots[day];
+    var meal = _totals(bR, day);     // autoridad del log de comida: suma de meals[]
+    return _json(_reconcile(day, snap, meal, _mealNames(bR, day)));
   }
   // Lectura principal de la app: AUTO-HEAL antes de servir, luego entrega el JSON.
   try { _absorbStrays(); } catch (err) { /* nunca falles la lectura por el heal */ }
@@ -495,6 +596,7 @@ function doGet(e) {
 
 // ── COMMIT por POST (runtime que sí pueda postear el JSON directo) ───────────
 function doPost(e) {
+  if (!_authed(e)) return _json({ ok: false, reason: 'unauthorized' });
   var content = (e && e.postData) ? e.postData.contents : '';
   if (!content) return _json({ ok: false, reason: 'empty' });
   var payload = JSON.parse(content);
