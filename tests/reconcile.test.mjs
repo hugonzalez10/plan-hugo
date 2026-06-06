@@ -8,16 +8,22 @@ import { gs } from './load-gs.mjs';
 
 const { _reconcile } = gs;
 
-const meal = (totals, workoutsKcal = 0) => ({ totals, workoutsKcal });
+// `waterMl` = agua registrada por chat (suma del section water[], la trae _totals).
+const meal = (totals, workoutsKcal = 0, waterMl = 0) => ({ totals, workoutsKcal, waterMl });
 const mt = (kcal, protein = 0, carbs = 0, fat = 0, fiber = 0) => ({ kcal, protein, carbs, fat, fiber });
 
 // ── Sin snapshot: totales puros desde meals[] ────────────────────────────────────
 test('_reconcile sin snapshot: refleja meals[] tal cual', () => {
   const r = _reconcile('2026-06-05', null, meal(mt(500, 40), 200), ['Pan', 'Pollo']);
   assert.equal(r.source, 'bridge');
-  assert.deepEqual(r.totals, mt(500, 40));
+  assert.deepEqual(r.totals, { ...mt(500, 40), waterMl: 0 });
   assert.equal(r.workoutsKcal, 200);
   assert.deepEqual(r.eaten, ['Pan', 'Pollo']);
+});
+
+test('_reconcile sin snapshot: incluye el agua del chat (water[])', () => {
+  const r = _reconcile('2026-06-05', null, meal(mt(500, 40), 0, 750), []);
+  assert.equal(r.totals.waterMl, 750);          // agua del section water[], sin snapshot
 });
 
 // ── ADITIVO (plan-only): plan + meals[] se SUMAN, sin solape ──────────────────────
@@ -28,8 +34,9 @@ test('_reconcile aditivo: suma plan (snapshot) + log (meals[])', () => {
     targets: { kcalMax: 2000, proteinMin: 180, carbsTarget: 200, fatTarget: 60, fiberTarget: 30, waterTarget: 3000 },
     ts: 42,
   };
-  // meals[] = extras + comidas del chat: 300 kcal, 25 prot; workouts[] = 150 kcal
-  const r = _reconcile('2026-06-05', snap, meal(mt(300, 25, 20, 10, 4), 150), ['Empanada']);
+  // meals[] = extras + comidas del chat: 300 kcal, 25 prot; workouts[] = 150 kcal;
+  // water[] del chat = 600 ml (lo trae _totals como meal.waterMl).
+  const r = _reconcile('2026-06-05', snap, meal(mt(300, 25, 20, 10, 4), 150, 600), ['Empanada']);
   assert.equal(r.source, 'app+meals');
   assert.equal(r.totals.kcalIn, 1300);          // 1000 + 300, NO max(1000,300)=1000
   assert.equal(r.totals.protein, 105);          // 80 + 25
@@ -37,7 +44,7 @@ test('_reconcile aditivo: suma plan (snapshot) + log (meals[])', () => {
   assert.equal(r.totals.fat, 40);               // 30 + 10
   assert.equal(r.totals.fiber, 14);             // 10 + 4
   assert.equal(r.totals.kcalBurned, 150);       // workouts[] (el snapshot aporta 0)
-  assert.equal(r.totals.waterMl, 1500);         // agua vive solo en el snapshot
+  assert.equal(r.totals.waterMl, 2100);         // 1500 (snapshot/app) + 600 (water[]/chat)
   assert.equal(r.totals.kcal, 1150);            // neto: 1300 - 150
 });
 

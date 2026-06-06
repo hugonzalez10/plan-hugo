@@ -1,7 +1,7 @@
 ---
 name: food-tracker
 description: >
-  Registra alimentación, peso y ejercicio diarios del Dr. Hugo González con
+  Registra alimentación, peso, ejercicio y agua diarios del Dr. Hugo González con
   fotos o texto, estima calorías/macros/composición con visión IA, y escribe un
   JSON depurado en Google Drive (plan-hugo-bridge.json) para que la app "Plan
   Hugo" lo consuma directo sin llamar a la API. USAR SIEMPRE que Hugo mande una
@@ -9,7 +9,9 @@ description: >
   músculo), o una captura de entrenamiento (Apple Fitness, Strava, etc.), o diga
   "comí X", "registra esto", "anota esta comida", "cuántas calorías tiene esto",
   "pésame esto", "registra mi peso", "anota este entrenamiento", "registra este
-  ejercicio", o cualquier variación de registro de comida, peso o actividad.
+  ejercicio", "registra X de agua", "tomé X vasos", "anota un vaso de agua",
+  "me tomé una botella/un litro", o cualquier variación de registro de comida,
+  peso, actividad o agua/hidratación.
   También activar con "cómo voy hoy", "cuánto llevo", "resumen del día".
 ---
 
@@ -17,7 +19,7 @@ description: >
 
 La skill hace TODO el trabajo con IA. La app solo lee el JSON desde Drive y lo
 mergea a su estado local. **Un solo archivo en Drive: `plan-hugo-bridge.json`**
-con cuatro secciones (`meals`, `weights`, `workouts`, `checks`).
+con cinco secciones (`meals`, `weights`, `workouts`, `checks`, `water`).
 
 ## Persistencia — registro por `curl`/Bash al Apps Script (LEER ANTES DE GUARDAR)
 
@@ -77,7 +79,7 @@ Forma del `delta` (lo que postea la skill):
 ```json
 { "op": "add", "section": "meals", "today": "2026-05-30", "entries": [ { ...entrada... } ] }
 ```
-`section` ∈ `meals` | `weights` | `workouts` | `checks`. `entries` admite una o
+`section` ∈ `meals` | `weights` | `workouts` | `checks` | `water`. `entries` admite una o
 varias (p. ej. dos workouts de una foto). El Apps Script asigna el `id` y dedup por
 contenido (ventana ~5 min), poda entradas con `date` de más de 10 días y actualiza
 `updated_at` solo.
@@ -124,6 +126,10 @@ Antes de procesar, decide qué es:
 - **Ejercicio** → captura de entrenamiento (Apple Fitness, Strava, anillos):
   duración, kcal, FC. → sección `workouts`. **Si una sola foto trae varios
   entrenamientos (p.ej. bici + fuerza), registra UNA entrada por cada uno.**
+- **Agua / hidratación** → "registra X de agua", "tomé X vasos/botellas", "X ml de
+  agua", "me tomé un litro", "anota un vaso de agua" → sección `water`. Convierte a
+  **ml**: vaso ≈ 250 ml, botella ≈ 500 ml, litro/jarro = 1000 ml. Si la cantidad es
+  ambigua, pregunta en una línea cuántos ml/vasos.
 
 Si hay ambigüedad, pregunta en una línea.
 
@@ -256,6 +262,13 @@ muchos campos; incluye solo los que de verdad aparezcan):
 { "date": "2026-05-28", "time": "08:05", "name": "Entrenamiento de fuerza", "kcal": 319, "minutes": 35, "source": "skill-chat" }
 ```
 
+**Agua** → push a `water` (campo `ml`). Es **append-only**: el servidor SUMA cada
+registro al agua del día (no dedup), así que registrar dos vasos seguidos suma los dos.
+Convierte vasos/botellas a ml en el Paso 0 antes de armar la entrada.
+```json
+{ "date": "2026-05-28", "time": "17:10", "ml": 500, "source": "skill-chat" }
+```
+
 ---
 
 ## Paso 4 — Registrar con `curl`/Bash al Apps Script (sin tocar Drive)
@@ -274,7 +287,7 @@ curl -sL --data '{"op":"add","section":"meals","today":"2026-05-30","entries":[
 - **`--data` SIN `-X POST`** (el `/exec` responde con un 302 a
   `script.googleusercontent.com`; con `-X POST` reintenta el POST y da 405).
 - **`-L` obligatorio** para seguir ese redirect y leer la respuesta.
-- `section` ∈ `meals|weights|workouts|checks`. `entries` admite varias (p. ej. dos
+- `section` ∈ `meals|weights|workouts|checks|water`. `entries` admite varias (p. ej. dos
   workouts de una foto). El servidor asigna el `id` y dedup por contenido.
 
 **Alternativa — GET inline (`?w=add`, una entrada por llamada):**
@@ -289,6 +302,8 @@ curl -sL "$BRIDGE_URL?w=add&section=meals&date=2026-05-30&time=20:48\
   - `meals`: `name,kcal,protein,carbs,fat,fiber,gi,satfat(0/1),mealSlot,time,notes`
   - `weights` (manda TODAS las legibles, no solo estas): `weightKg,bodyFatPct,fatKg,subcutaneousFatKg,muscleKg,skeletalMuscleKg,fatFreeMassKg,ffmi,waterKg,proteinKg,boneKg,visceralFat,bmi,basalMetabolismKcal,waistHipRatio,referenceWeightKg,bodyType,waistCm,hipCm,time` (el POST del delta es mejor que el GET para tantos campos)
   - `workouts`: `name,kcal,minutes,time` (una llamada por entrenamiento)
+  - `water`: `ml` (+ `date`, opcional `time`). **Append-only: cada registro SUMA** al
+    agua del día — nunca reemplaza ni se colapsa. Ej. "tomé 500 ml" → `?w=add&section=water&date=2026-06-05&ml=500&source=skill-chat`. El `waterMl` del día sale en la respuesta y en `?totals=`.
 - También puedes mandar el delta entero por GET: `BRIDGE_URL?delta=<json url-encoded>&k=$BRIDGE_TOKEN`.
 
 Cualquiera de los dos responde con los totales del día ya sumados:
@@ -320,7 +335,7 @@ Si registraste algo mal (o Hugo pide borrarlo), elimínalo por `id`:
 curl -sL "$BRIDGE_URL?w=delete&section=meals&id=<id>&k=$BRIDGE_TOKEN"
 # → { "ok": true, "deleted": 1, "section": "meals", "id": "<id>" }
 ```
-`section` ∈ `meals|weights|workouts|checks`. Para saber el `id`, lee primero el JSON
+`section` ∈ `meals|weights|workouts|checks|water`. Para saber el `id`, lee primero el JSON
 completo (`curl -sL "$BRIDGE_URL?k=$BRIDGE_TOKEN"`) y ubica la entrada por nombre/fecha. `deleted: 0`
 significa que no había ninguna con ese id.
 
@@ -355,6 +370,12 @@ bridge. Si por alguna razón la respuesta no trajo `totals`, recién ahí
 🔥 Registrado: [name] — [kcal] kcal, [minutes] min
 [si hay varios: una línea por cada uno + total quemado del día]
 ```
+
+### Agua
+```
+💧 Agua: +[ml registrados] ml → [waterMl total]/[meta waterTarget] ml hoy
+```
+Usa el `waterMl` que devuelve la respuesta del registro (o `?totals=`); no recalcules.
 
 ---
 

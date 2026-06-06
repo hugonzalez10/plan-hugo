@@ -147,9 +147,11 @@ test('_mergeInto add: agrega entradas a la sección', () => {
 });
 
 // ── _authed: el guard de seguridad del bridge ────────────────────────────────────
-test('_authed: exige el token correcto', () => {
-  assert.equal(_authed({ parameter: { k: 'db52f16b62e5ada13150edc571c21b24010a582fe0ae18b4' } }), true);
-  assert.equal(_authed({ parameter: { k: 'malo' } }), false);
-  assert.equal(_authed({ parameter: {} }), false);
-  assert.equal(_authed({}), false);
+// Token DESACTIVADO (SHARED_TOKEN === '', deploy v13): el guard deja pasar TODO, con o
+// sin ?k=. Rompía el registro por chat; la URL /exec ya es secreta. Si algún día se
+// reactiva (SHARED_TOKEN con valor), volver a exigir el token aquí.
+test('_authed: token desactivado → deja pasar todo', () => {
+  assert.equal(_authed({ parameter: { k: 'lo-que-sea' } }), true);
+  assert.equal(_authed({ parameter: {} }), true);
+  assert.equal(_authed({}), true);
 });
