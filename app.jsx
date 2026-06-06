@@ -1462,6 +1462,7 @@ async function fetchBridge(url, token) {
     weights: Array.isArray(data.weights) ? data.weights : [],
     workouts: Array.isArray(data.workouts) ? data.workouts : [],
     checks: Array.isArray(data.checks) ? data.checks : [],
+    water: Array.isArray(data.water) ? data.water : [],
   };
 }
 
@@ -1493,7 +1494,7 @@ function mergeBridge(state, bridge) {
   const removedBridgeIds = new Set((state.bridge?.removedBridgeIds) || []);
   const days = { ...(state.days || {}) };
   const weights = Array.isArray(state.weights) ? [...state.weights] : [];
-  const added = { meals: 0, weights: 0, workouts: 0, checks: 0 };
+  const added = { meals: 0, weights: 0, workouts: 0, checks: 0, water: 0 };
 
   const ensureDay = (dk) => {
     const base = days[dk] || { eaten: {}, snackId: null, proteinId: null, water: { ml: 0 }, skipped: [], nudgesDismissed: [], dessertAlmuerzoId: null, dessertCenaId: null, notes: null };
@@ -1585,6 +1586,22 @@ function mergeBridge(state, bridge) {
     for (const seg of SEGMENT_FIELDS) out[seg.key] = wt[seg.key] != null ? wt[seg.key] : null;
     weights.push(out);
     importedIds.add(wt.id); added.weights++;
+  }
+
+  // Agua registrada por chat (section `water`, append-only, cada entrada es un `ml`).
+  // Se acumula en `day.water.bridgeMl` — SEPARADO de `day.water.ml` (el agua que Hugo
+  // marca en la app) — para que el snapshot siga empujando solo SU agua y el bridge no
+  // la doble-cuente en ?totals (que ya suma el water[] del servidor). importedIds es
+  // freno DURO aquí (a diferencia de meals): el agua es una suma corriente, reimportar
+  // un id ausente la inflaría. El bridge solo lo escribe el chat, así que no hay eco propio.
+  if (Array.isArray(bridge.water)) {
+    for (const wd of bridge.water) {
+      if (wd == null || wd.id == null || removedBridgeIds.has(wd.id) || importedIds.has(wd.id)) continue;
+      const d = ensureDay(wd.date || todayKey());
+      const cur = d.water || { ml: 0 };
+      d.water = { ...cur, bridgeMl: (Number(cur.bridgeMl) || 0) + (Number(wd.ml) || 0) };
+      importedIds.add(wd.id); added.water++;
+    }
   }
 
   // Marca secciones FIJAS del plan como comidas (sin duplicar). Backward-compatible:
@@ -1686,7 +1703,10 @@ function computeDayTotals(day, snackBank, proteinBank, targets, dessertBank, cus
   const fiber = sumField(allEaten, 'fiber');
   const kcalBurned = sumField(exercise, 'kcal');
   const kcalNet = kcalIn - kcalBurned;
-  const waterMl = Number(day?.water?.ml) || 0;
+  // Agua total para MOSTRAR = la que Hugo marca en la app (water.ml) + la registrada por
+  // chat e importada del bridge (water.bridgeMl). El snapshot empuja SOLO water.ml (ver
+  // snapPayload) para que el bridge no doble-cuente el water[] del servidor en ?totals.
+  const waterMl = (Number(day?.water?.ml) || 0) + (Number(day?.water?.bridgeMl) || 0);
 
   // Plan-only (sin extras ni ejercicio): la porción autoritativa del snapshot.
   const planIn = sumField(planEaten, 'kcal');
@@ -4213,7 +4233,7 @@ Reglas:
       setState((prev) => {
         const days = { ...(prev.days || {}) };
         const d = { ...(days[dateKey] || {}) };
-        d.water = { ml: (Number(d.water?.ml) || 0) + ml };
+        d.water = { ...(d.water || {}), ml: (Number(d.water?.ml) || 0) + ml };
         days[dateKey] = d;
         return { ...prev, days };
       });
@@ -4560,11 +4580,13 @@ function DailyNotesCard({ day, onUpdate }) {
 }
 
 function WaterTracker({ day, onUpdate, target }) {
-  const ml = Number(day?.water?.ml) || 0;
+  const ml = Number(day?.water?.ml) || 0;            // agua que Hugo marca en la app (editable con +/-)
+  const bridgeMl = Number(day?.water?.bridgeMl) || 0; // agua registrada por chat (section water[])
+  const totalMl = ml + bridgeMl;                      // lo que se MUESTRA y cuenta para la meta
   const targetMl = target || 3000;
-  const adjust = (delta) => onUpdate({ water: { ml: Math.max(0, ml + delta) } });
-  const pct = Math.max(0, Math.min(100, Math.round((ml / targetMl) * 100)));
-  const reached = ml >= targetMl;
+  const adjust = (delta) => onUpdate({ water: { ...(day?.water || {}), ml: Math.max(0, ml + delta) } });
+  const pct = Math.max(0, Math.min(100, Math.round((totalMl / targetMl) * 100)));
+  const reached = totalMl >= targetMl;
 
   return (
     <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 overflow-hidden">
@@ -4575,9 +4597,12 @@ function WaterTracker({ day, onUpdate, target }) {
           <span className={`text-[11px] font-bold ${reached ? 'text-emerald-600 dark:text-emerald-400' : 'text-sky-600 dark:text-sky-400'}`}>
             {pct}%
           </span>
+          {bridgeMl > 0 && (
+            <span className="text-[10px] text-sky-500 dark:text-sky-400" title="Registrada por chat">💬 {bridgeMl} ml</span>
+          )}
         </div>
         <span className={`text-xs font-semibold ${reached ? 'text-emerald-600 dark:text-emerald-400' : 'text-gray-700 dark:text-gray-300'}`}>
-          {ml} / {targetMl} ml
+          {totalMl} / {targetMl} ml
         </span>
       </div>
       <div className="px-4">
@@ -5009,7 +5034,7 @@ function HabitNudge({ day, totals, targets, isToday, onUpdate }) {
       icon: '💧',
       text: `Vas ${totals.waterMl} de ${T.waterTarget} ml de agua. Hidrátate.`,
       action: '+500 ml',
-      onAction: () => onUpdate({ water: { ml: (day?.water?.ml || 0) + 500 } }),
+      onAction: () => onUpdate({ water: { ...(day?.water || {}), ml: (day?.water?.ml || 0) + 500 } }),
     });
   }
   if (timeMin >= 20 * 60 && totals.proteinRemaining > 40 && !skippedSet.has('cena')) {
@@ -9588,7 +9613,11 @@ function App() {
       planScope: 'plan-only',
       totals: {
         kcalIn: t.planIn, kcalBurned: 0, kcalNet: t.planIn,
-        protein: t.planProtein, carbs: t.planCarbs, fat: t.planFat, fiber: t.planFiber, waterMl: t.waterMl,
+        protein: t.planProtein, carbs: t.planCarbs, fat: t.planFat, fiber: t.planFiber,
+        // SOLO el agua propia de la app (water.ml). El agua del chat vive en water[] del
+        // bridge y se suma en ?totals allá; si la empujáramos aquí (t.waterMl la incluye)
+        // se doble-contaría. Ver computeDayTotals y mergeBridge (water.bridgeMl).
+        waterMl: Number((state.days || {})[snapDayKey]?.water?.ml) || 0,
       },
       targets: {
         kcalMax: targets.kcalMax, proteinMin: targets.proteinMin, carbsTarget: targets.carbsTarget,
@@ -9759,7 +9788,7 @@ function App() {
       setState((prev) => {
         const days = { ...(prev.days || {}) };
         const d = { ...(days[selectedDate] || {}) };
-        d.water = { ml: (Number(d.water?.ml) || 0) + action.ml };
+        d.water = { ...(d.water || {}), ml: (Number(d.water?.ml) || 0) + action.ml };
         days[selectedDate] = d;
         return { ...prev, days };
       });
