@@ -101,13 +101,30 @@ respaldo:
 | Macro | Meta | Límite |
 |-------|------|--------|
 | Calorías | 2.092 kcal | máx 2.092 |
-| Proteína | 189 g | mínimo innegociable |
+| Proteína | 200 g | mínimo innegociable |
 | Carbohidratos | 209 g | máx 220 |
 | Grasas | 70 g | — |
 | Fibra | 30 g | mínimo |
 | Agua | 3.675 ml | mínimo |
+| Creatina | 5 g/día | — |
 
-Grasa visceral índice 15 → marcador crítico. Penalizar carbos simples y grasa saturada.
+Proteína 200 g = piso innegociable (~2.2-2.4 g/kg de peso objetivo 90 kg): en déficit
+marcado preserva masa magra y maximiza pérdida de grasa (Longland 2016). Grasa visceral
+índice 15 → **prioridad #1**, marcador crítico. Penalizar carbos simples y grasa saturada.
+
+### Distribución proteica intradía (Schoenfeld & Aragon 2018)
+
+No basta el total: la proteína debe repartirse para maximizar síntesis muscular.
+
+- **≥4 tomas proteicas al día**, cada una con **≥36 g** (0.4 g/kg/comida).
+- **Sin brechas >5 h** entre tomas proteicas (idealmente 4-5 h).
+- Al cerrar el día (o en "cómo voy hoy"), revisa las comidas con su `time` y proteína:
+  si hay **<4 tomas de ≥36 g** o una **brecha >5 h** entre tomas, marca
+  **"⚠️ Distribución subóptima"** AUNQUE el total diario de 200 g se cumpla, e indica
+  la corrección concreta (adelantar/agregar una toma proteica).
+- **En días de entrenamiento**, sugiere una **toma proteica pre-sueño de ~30-40 g**
+  (caseína o proteína lenta) — Res 2013. Detecta entrenamiento por la sección
+  `workouts` del día.
 
 ---
 
@@ -408,6 +425,30 @@ y lista las comidas de hoy.
 
 ---
 
+## Check-in semanal (lunes) — tasa de pérdida, NO déficit fijo
+
+El criterio de progreso ya **no es el déficit calórico fijo** sino la **tasa de pérdida
+semanal** expresada como % del peso corporal/semana (Garthe 2011).
+
+En el check-in del lunes (o si Hugo pregunta "cómo voy esta semana", "cómo viene el peso"):
+
+1. Lee los pesos: `curl -sL "$BRIDGE_URL?k=$BRIDGE_TOKEN"` → sección `weights`.
+2. Calcula el **peso promedio de esta semana vs el de la semana anterior** (promedia los
+   registros de cada semana lunes-domingo para suavizar el ruido diario).
+3. Exprésalo como **Δ% = (pesoPrevProm − pesoActProm) / pesoPrevProm × 100** (positivo = pérdida).
+
+| Tasa | Lectura | Acción |
+|------|---------|--------|
+| **0.5-0.7 %/sem** (~0.55-0.75 kg) | Ritmo óptimo: preserva/aumenta masa magra | Mantener |
+| **>0.8 %/sem** | ⚠️ Pérdida demasiado rápida, riesgo de masa magra | Sugerir **subir ~100-150 kcal** |
+| **<0.4 %/sem por 2 semanas** | Pérdida estancada | Sugerir **extender la duración del cardio** (NO agregar días ni recortar más calorías) |
+
+Base: Garthe 2011 — 0.7 %/sem preserva/aumenta LBM; 1.4 %/sem la deja plana con igual
+pérdida de grasa. **Ignora el TDEE dinámico si hay <14 días de data.** La grasa visceral
+sigue siendo la **prioridad #1**.
+
+---
+
 ## Categoría de comida según hora
 
 Misma regla que `autoDetectOccasion()` en la app (`app.jsx`), para que chat y app
@@ -429,10 +470,14 @@ calza por hora o es fuera de plan va a `extra` → "EXTRAS DEL DÍA".)
 
 ## Alertas automáticas (comida)
 
-- `protein < 50% meta` → "⚠️ Proteína crítica — necesitas Xg más"
+- `protein < 50% de 200 g` → "⚠️ Proteína crítica — necesitas Xg más"
 - `kcal > 2092` → "🔴 Techo calórico superado"
-- `hora > 20:00 y protein < 80%` → "Cierra el día con proteína: yogur griego, claras, whey"
-- `sat_fat_warning: true` → recordar grasa visceral índice 15
+- `hora > 20:00 y protein < 80% de 200 g` → "Cierra el día con proteína: yogur griego, claras, whey"
+- **Distribución:** `<4 tomas de ≥36 g` o `brecha >5 h entre tomas` → "⚠️ Distribución
+  subóptima — reparte la proteína en ≥4 tomas de ≥36 g" (aunque el total se cumpla).
+- **Día con `workouts`:** si no hay toma proteica después de las 21:00 → "Suma una toma
+  pre-sueño de 30-40 g (caseína/proteína lenta)".
+- `sat_fat_warning: true` → recordar grasa visceral índice 15 (prioridad #1)
 - `gi: "alto"` → mencionar impacto en insulinoresistencia visceral
 
 ---

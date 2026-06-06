@@ -1022,6 +1022,16 @@ const DAY_SHORT = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
 
 const DEFAULT_TARGETS = { kcalMin: 2200, kcalMax: 2400, kcalRed: 2500, proteinMin: 160, proteinYellow: 140, carbsTarget: 240, fatTarget: 75, fiberTarget: 30, waterTarget: 3000 };
 
+// Piso innegociable de proteína diaria en déficit (goal 'lose'): 200 g (~2.2-2.4 g/kg de
+// peso objetivo 90 kg). Preserva masa magra y maximiza pérdida de grasa (Longland 2016).
+const PROTEIN_FLOOR_LOSE = 200;
+// Distribución proteica intradía (Schoenfeld & Aragon 2018): ≥4 tomas, ≥36 g por toma
+// (0.4 g/kg/comida), sin brechas >5 h entre tomas proteicas.
+const PROTEIN_DIST = { minTomas: 4, minPerToma: 36, maxGapHours: 5 };
+// Tasa de pérdida semanal objetivo como % del peso corporal/sem (Garthe 2011): 0.5-0.7%
+// preserva/aumenta LBM. >0.8% = demasiado rápido (riesgo masa magra). <0.4% = lento.
+const WEEKLY_LOSS = { minPct: 0.5, maxPct: 0.7, fastPct: 0.8, slowPct: 0.4 };
+
 const ACTIVITY_FACTORS = {
   sedentary: 1.2,
   light: 1.375,
@@ -1060,10 +1070,14 @@ function calcTargets(profile) {
   } else {
     kcalTarget = 2300;
   }
+  // Proteína: en déficit calórico marcado el piso es INNEGOCIABLE (200 g/día, ~2.2-2.4
+  // g/kg de peso objetivo 90 kg) para preservar masa magra y maximizar pérdida de grasa
+  // (Longland 2016). El piso pisa incluso un proteinTarget manual más bajo.
   const proteinPerKg = profile.goal === 'gain' ? 2.0 : 1.8;
-  const proteinTarget = profile.proteinTarget != null
+  let proteinTarget = profile.proteinTarget != null
     ? profile.proteinTarget
     : Math.round((profile.weightKg || 80) * proteinPerKg);
+  if (profile.goal === 'lose') proteinTarget = Math.max(proteinTarget, PROTEIN_FLOOR_LOSE);
   const carbsTarget = profile.carbsTarget != null
     ? profile.carbsTarget
     : Math.round((kcalTarget * 0.40) / 4);
@@ -1763,6 +1777,35 @@ function getRuleWeekKeys(refDate = new Date()) {
   return keys;
 }
 
+// Peso promedio de una semana (lunes-domingo que contiene refDate). null si no hay datos.
+function weekAvgWeight(weights, refDate) {
+  const keys = new Set(getRuleWeekKeys(refDate));
+  const vals = (weights || []).filter((w) => w && w.weightKg != null && keys.has(w.date)).map((w) => Number(w.weightKg));
+  if (!vals.length) return null;
+  return vals.reduce((s, v) => s + v, 0) / vals.length;
+}
+
+// Tasa de pérdida semanal: compara el peso promedio de la semana que contiene `refDateKey`
+// (cualquier fecha YYYY-MM-DD de esa semana) con el de la semana anterior y la expresa como
+// % del peso corporal/semana (Garthe 2011).
+// Devuelve { deltaKg, pctPerWeek, curr, prev, status } o null si falta una de las semanas.
+// status: 'fast' (>0.8%, riesgo masa magra) | 'ok' (0.5-0.7%) | 'slow' (<0.4%) | 'mid'.
+function computeWeeklyLossRate(weights, refDateKey) {
+  const ref = refDateKey ? new Date(refDateKey + 'T12:00:00') : new Date();
+  const curr = weekAvgWeight(weights, ref);
+  const prevRef = new Date(ref);
+  prevRef.setDate(prevRef.getDate() - 7);
+  const prev = weekAvgWeight(weights, prevRef);
+  if (curr == null || prev == null || prev === 0) return null;
+  const deltaKg = curr - prev; // negativo = bajó
+  const pctPerWeek = (-deltaKg / prev) * 100; // positivo = pérdida
+  let status = 'mid';
+  if (pctPerWeek > WEEKLY_LOSS.fastPct) status = 'fast';
+  else if (pctPerWeek >= WEEKLY_LOSS.minPct && pctPerWeek <= WEEKLY_LOSS.maxPct) status = 'ok';
+  else if (pctPerWeek < WEEKLY_LOSS.slowPct) status = 'slow';
+  return { deltaKg, pctPerWeek, curr, prev, status };
+}
+
 // ¿Un item de un slot dado cuenta como 'dulce'?
 function isItemDulce(item, slot) {
   if (!item) return false;
@@ -2008,16 +2051,19 @@ function daysBetween(aKey, bKey) {
   return Math.round((b - a) / 86400000);
 }
 
-// Computa sugerencia de ajuste basada en progreso real vs esperado
+// Computa sugerencia de ajuste según la TASA DE PÉRDIDA SEMANAL (% del peso corporal/sem),
+// NO según un déficit fijo esperado (Garthe 2011). Objetivo 0.5-0.7 %/sem.
+// - >0.8 %/sem → pérdida demasiado rápida (riesgo masa magra) → subir ~100-150 kcal.
+// - <0.4 %/sem (con ≥14 días de data ≈ 2 semanas) → extender duración del cardio,
+//   NO recortar más calorías ni agregar días.
+// - 0.4-0.8 %/sem → sin banner.
 function computePlanAdjustment(state, refDate = todayKey(), options = {}) {
   const {
-    minDays = 10,         // gap mínimo entre primera y última medición
+    minDays = 14,         // ignora la evaluación dinámica con <14 días de data
     windowDays = 28,      // mirar hasta los últimos 28 días
-    tolerance = 0.30,     // ±30% del esperado
-    stepKcal = 100,       // magnitud de ajuste por iteración
+    stepKcal = 125,       // ~100-150 kcal por ajuste
     cooldownDays = 14,    // mínimo entre ajustes
-    minDeficit = 200,
-    maxDeficit = 800,
+    minDeficit = 100,
   } = options;
 
   const profile = state?.userProfile;
@@ -2049,50 +2095,43 @@ function computePlanAdjustment(state, refDate = todayKey(), options = {}) {
   const first = inWindow[0];
   const last = inWindow[inWindow.length - 1];
   const days = daysBetween(first.date, last.date);
-  if (days < minDays) return null;
+  if (days < minDays) return null;       // <14 días: no evaluar (ignora TDEE dinámico)
+  if (!first.weightKg) return null;
 
   const realDeltaKg = Number((last.weightKg - first.weightKg).toFixed(2));
+  const weeklyKg = (realDeltaKg / days) * 7;              // negativo = pérdida
+  const pctPerWeek = (-weeklyKg / first.weightKg) * 100;  // positivo = pérdida
   const currentDeficit = Number.isFinite(profile.kcalDeficit) ? profile.kcalDeficit : 400;
-  const expectedDeltaKg = -(currentDeficit * days) / KCAL_PER_KG_FAT;
 
-  // Magnitud relativa al esperado
-  const expectedAbs = Math.abs(expectedDeltaKg);
-  if (expectedAbs < 0.05) return null; // déficit demasiado bajo o pocos días — sin sentido evaluar
-
-  const deviation = (realDeltaKg - expectedDeltaKg) / expectedAbs;
-  // deviation > 0 → bajó MENOS de lo esperado (real menos negativo)
-  // deviation < 0 → bajó MÁS de lo esperado (real más negativo)
-
-  let decision = null;
-  let suggestedDeficit = currentDeficit;
-  if (deviation > tolerance) {
-    decision = 'increase_deficit';
-    suggestedDeficit = Math.min(maxDeficit, currentDeficit + stepKcal);
-  } else if (deviation < -tolerance) {
-    decision = 'decrease_deficit';
-    suggestedDeficit = Math.max(minDeficit, currentDeficit - stepKcal);
-  } else {
-    return null; // en rango: maintain → no banner
+  if (pctPerWeek > WEEKLY_LOSS.fastPct) {
+    // Demasiado rápido → riesgo de masa magra → comer ~100-150 kcal MÁS (bajar déficit).
+    const suggestedDeficit = Math.max(minDeficit, currentDeficit - stepKcal);
+    if (suggestedDeficit === currentDeficit) return null; // ya en el piso
+    return {
+      kind: 'too_fast',
+      decision: 'decrease_deficit',
+      pctPerWeek: Number(pctPerWeek.toFixed(2)),
+      weeklyKg: Number(weeklyKg.toFixed(2)),
+      days, currentDeficit, suggestedDeficit,
+      delta: suggestedDeficit - currentDeficit,
+      message: `En ${days} días vas a ${pctPerWeek.toFixed(2)} %/sem (${Math.abs(weeklyKg).toFixed(2)} kg/sem). Sobre 0,8 %/sem hay riesgo de perder masa magra.`,
+    };
   }
 
-  // Si el ajuste no cambia el déficit (estaba en cap), no muestra banner
-  if (suggestedDeficit === currentDeficit) return null;
+  if (pctPerWeek < WEEKLY_LOSS.slowPct) {
+    // Lento (≥2 sem) → extender la DURACIÓN del cardio. NO recortar calorías ni sumar días.
+    const verb = pctPerWeek >= 0 ? 'bajando' : 'subiendo';
+    return {
+      kind: 'too_slow',
+      decision: 'extend_cardio',
+      pctPerWeek: Number(pctPerWeek.toFixed(2)),
+      weeklyKg: Number(weeklyKg.toFixed(2)),
+      days, currentDeficit,
+      message: `En ${days} días vas ${verb} ${Math.abs(pctPerWeek).toFixed(2)} %/sem (objetivo 0,5-0,7 %). Extiende la duración del cardio; no recortes más calorías ni agregues días.`,
+    };
+  }
 
-  const realRounded = Number(realDeltaKg.toFixed(2));
-  const expectedRounded = Number(expectedDeltaKg.toFixed(2));
-  const direction = decision === 'increase_deficit' ? 'menos' : 'más';
-  const message = `En ${days} días bajaste ${Math.abs(realRounded)} kg, esperabas ${Math.abs(expectedRounded)} kg. Bajaste ${direction} de lo planeado.`;
-
-  return {
-    decision,
-    realDeltaKg: realRounded,
-    expectedDeltaKg: expectedRounded,
-    days,
-    currentDeficit,
-    suggestedDeficit,
-    delta: suggestedDeficit - currentDeficit,
-    message,
-  };
+  return null; // 0.4-0.8 %/sem (incluye el óptimo 0.5-0.7): sin banner
 }
 
 // Formatea la lista como texto plano para compartir
@@ -5632,17 +5671,25 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
 function WeeklyAnalysisCard({ state, setState, weekKey, rows, targets }) {
   const apiKey = state.settings?.anthropicApiKey;
   const cached = state.aiCache?.weekly?.[weekKey];
-  const sig = useMemo(() => hashSig(rows.map((r) => ({
-    k: r.key,
-    kcal: Math.round(r.totals.kcal),
-    p: Math.round(r.totals.protein),
-    c: Math.round(r.totals.carbs),
-    f: Math.round(r.totals.fat),
-    fi: Math.round(r.totals.fiber),
-    w: Math.round(r.totals.waterMl),
-    burn: Math.round(r.totals.kcalBurned),
-    eaten: !!r.totals.eatenAny,
-  }))), [rows]);
+  const weekRefKey = rows[0]?.key;
+  const lossSig = useMemo(() => {
+    const lr = computeWeeklyLossRate(state.weights || [], weekRefKey);
+    return lr ? lr.pctPerWeek.toFixed(2) : 'na';
+  }, [state.weights, weekRefKey]);
+  const sig = useMemo(() => hashSig({
+    rows: rows.map((r) => ({
+      k: r.key,
+      kcal: Math.round(r.totals.kcal),
+      p: Math.round(r.totals.protein),
+      c: Math.round(r.totals.carbs),
+      f: Math.round(r.totals.fat),
+      fi: Math.round(r.totals.fiber),
+      w: Math.round(r.totals.waterMl),
+      burn: Math.round(r.totals.kcalBurned),
+      eaten: !!r.totals.eatenAny,
+    })),
+    loss: lossSig,
+  }), [rows, lossSig]);
   const isStale = cached && cached.sig !== sig;
 
   const [loading, setLoading] = useState(false);
@@ -5671,13 +5718,24 @@ function WeeklyAnalysisCard({ state, setState, weekKey, rows, targets }) {
         registrado: r.totals.eatenAny,
       }));
 
+      const lossRate = computeWeeklyLossRate(state.weights || [], weekRefKey);
+      const lossLine = lossRate
+        ? `TASA DE PÉRDIDA SEMANAL (peso prom. esta semana ${lossRate.curr.toFixed(1)} kg vs semana anterior ${lossRate.prev.toFixed(1)} kg): ${lossRate.deltaKg <= 0 ? '−' : '+'}${Math.abs(lossRate.deltaKg).toFixed(2)} kg = ${lossRate.pctPerWeek.toFixed(2)} %/sem.`
+        : 'TASA DE PÉRDIDA SEMANAL: sin datos de peso en ambas semanas para calcularla.';
+
       const prompt = `Eres el coach nutricional de Hugo (geriatra chileno). Analiza su SEMANA de lunes a sábado. Sé directo, sin alarmismo. USA TUTEO CHILENO (tú, tienes). NO uses voseo argentino.
 
 METAS DIARIAS:
 - Calorías: ${T.kcalMin}-${T.kcalMax} kcal (rojo sobre ${T.kcalRed})
-- Proteína: ≥ ${T.proteinMin} g
+- Proteína: ≥ ${T.proteinMin} g (piso innegociable en déficit)
 - Carbos: ${T.carbsTarget} g · Grasas: ${T.fatTarget} g · Fibra: ${T.fiberTarget} g
 - Agua: ${T.waterTarget} ml
+- Distribución proteica: ≥${PROTEIN_DIST.minTomas} tomas/día de ≥${PROTEIN_DIST.minPerToma} g c/u, sin brechas >${PROTEIN_DIST.maxGapHours} h. En días de entrenamiento, toma pre-sueño de 30-40 g (caseína/proteína lenta).
+
+PROGRESO POR TASA DE PÉRDIDA SEMANAL (no por déficit fijo). Rango objetivo: ${WEEKLY_LOSS.minPct}-${WEEKLY_LOSS.maxPct} %/sem (~0.55-0.75 kg/sem):
+- >${WEEKLY_LOSS.fastPct} %/sem → "pérdida demasiado rápida, riesgo de masa magra": sugiere SUBIR ~100-150 kcal.
+- <${WEEKLY_LOSS.slowPct} %/sem por 2 semanas → sugiere EXTENDER la duración del cardio (NO agregar días ni recortar más calorías).
+${lossLine}
 
 SEMANA:
 ${JSON.stringify(compactRows, null, 2)}
@@ -5685,9 +5743,9 @@ ${JSON.stringify(compactRows, null, 2)}
 ${weights.length ? `PESOS DE LA SEMANA: ${JSON.stringify(weights.map(w => ({ fecha: w.date, kg: w.weightKg })))}` : 'Sin mediciones de peso esta semana.'}
 
 Devuelve un análisis en PROSA (texto corrido, no JSON), de 3 a 4 párrafos:
-1. Cumplimiento general (kcal, proteína, agua) — qué se cumplió, qué no.
+1. Cumplimiento general (kcal, proteína ≥${T.proteinMin} g, agua) — qué se cumplió, qué no.
 2. Patrones de la semana: día(s) que se desviaron, día(s) que cumpliste mejor.
-3. Tendencia de peso si hay datos suficientes.
+3. Tasa de pérdida semanal: ubícala en el rango ${WEEKLY_LOSS.minPct}-${WEEKLY_LOSS.maxPct} %/sem y aplica la recomendación correspondiente (subir kcal si >${WEEKLY_LOSS.fastPct} %, extender cardio si lenta). Grasa visceral es la prioridad #1.
 4. 1-2 recomendaciones concretas para la próxima semana.
 
 Tono: conversado, cercano, sin culpa. Máximo ~250 palabras totales. No uses listas ni viñetas, prosa fluida.`;
@@ -8049,41 +8107,62 @@ function PlanAdjustmentBanner({ state, setState }) {
   const adjustment = useMemo(() => computePlanAdjustment(state), [state]);
   if (!adjustment) return null;
 
-  const isIncrease = adjustment.decision === 'increase_deficit';
-  const arrow = isIncrease ? '↓' : '↑';
-  const arrowDesc = isIncrease ? 'bajar' : 'subir';
-  const newKcalDirection = isIncrease ? 'menos' : 'más';
-
-  const applyAdjustment = (newDeficit, newLastAdjustmentDate) => {
+  const stampAdjustment = (newDeficit, newLastAdjustmentDate) => {
     setState((prev) => ({
       ...prev,
       userProfile: {
         ...(prev.userProfile || {}),
-        kcalDeficit: newDeficit,
+        ...(newDeficit != null ? { kcalDeficit: newDeficit } : {}),
         lastAdjustmentDate: newLastAdjustmentDate,
         updatedAt: new Date().toISOString(),
       },
     }));
   };
 
-  const onApply = () => {
-    applyAdjustment(adjustment.suggestedDeficit, todayKey());
-  };
   const onPostpone7 = () => {
-    // Mantener el deficit, marcar lastAdjustmentDate como hace 7 días → vuelve a evaluar en 7 días
+    // Mantener todo, marcar lastAdjustmentDate como hace 7 días → vuelve a evaluar en 7 días
     const d = new Date(); d.setDate(d.getDate() - 7);
-    applyAdjustment(adjustment.currentDeficit, todayKey(d));
+    stampAdjustment(null, todayKey(d));
   };
-  const onDismiss = () => {
-    applyAdjustment(adjustment.currentDeficit, todayKey());
-  };
+  const onDismiss = () => stampAdjustment(null, todayKey());
 
+  // CASO LENTO (<0.4 %/sem por ≥2 sem): extender duración del cardio. No tocar calorías.
+  if (adjustment.kind === 'too_slow') {
+    const onAck = () => stampAdjustment(null, todayKey());
+    return (
+      <div className="rounded-2xl border-2 border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20 p-4 space-y-3">
+        <div className="flex items-start gap-3">
+          <span className="text-2xl shrink-0">🐢</span>
+          <div className="flex-1 min-w-0">
+            <h3 className="text-sm font-bold text-amber-900 dark:text-amber-100">Pérdida lenta — extiende el cardio</h3>
+            <p className="text-xs text-amber-800 dark:text-amber-200 mt-1">{adjustment.message}</p>
+          </div>
+        </div>
+        <p className="text-[11px] text-amber-700 dark:text-amber-300">
+          Alarga la <strong>duración</strong> de tus sesiones de cardio. No agregues días ni recortes más calorías: la meta calórica (máx 2.092 kcal) se mantiene.
+        </p>
+        <div className="grid grid-cols-2 gap-2">
+          <button onClick={onAck}
+            className="py-2.5 rounded-xl bg-emerald-500 text-white text-xs font-semibold hover:bg-emerald-600">
+            ✓ Entendido
+          </button>
+          <button onClick={onPostpone7}
+            className="py-2.5 rounded-xl border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 text-xs font-medium hover:bg-gray-50 dark:hover:bg-gray-800">
+            ⏰ 7 días
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // CASO RÁPIDO (>0.8 %/sem): riesgo de masa magra → subir ~100-150 kcal (bajar déficit).
+  const onApply = () => stampAdjustment(adjustment.suggestedDeficit, todayKey());
   return (
     <div className="rounded-2xl border-2 border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20 p-4 space-y-3">
       <div className="flex items-start gap-3">
-        <span className="text-2xl shrink-0">📊</span>
+        <span className="text-2xl shrink-0">⚠️</span>
         <div className="flex-1 min-w-0">
-          <h3 className="text-sm font-bold text-amber-900 dark:text-amber-100">Tu plan necesita ajuste</h3>
+          <h3 className="text-sm font-bold text-amber-900 dark:text-amber-100">Pérdida demasiado rápida</h3>
           <p className="text-xs text-amber-800 dark:text-amber-200 mt-1">{adjustment.message}</p>
         </div>
       </div>
@@ -8094,13 +8173,13 @@ function PlanAdjustmentBanner({ state, setState }) {
           <div className="text-lg font-bold text-gray-700 dark:text-gray-200">{adjustment.currentDeficit} <span className="text-xs font-normal">kcal/día</span></div>
         </div>
         <div className="rounded-xl bg-emerald-50 dark:bg-emerald-900/30 border border-emerald-300 dark:border-emerald-700 p-2.5">
-          <div className="text-[10px] uppercase tracking-wide text-emerald-700 dark:text-emerald-300 font-semibold">Sugerencia {arrow}</div>
+          <div className="text-[10px] uppercase tracking-wide text-emerald-700 dark:text-emerald-300 font-semibold">Sugerencia ↑</div>
           <div className="text-lg font-bold text-emerald-800 dark:text-emerald-200">{adjustment.suggestedDeficit} <span className="text-xs font-normal">kcal/día</span></div>
         </div>
       </div>
 
       <p className="text-[11px] text-amber-700 dark:text-amber-300">
-        Esto se traduce en comer ~{Math.abs(adjustment.delta)} kcal {newKcalDirection} por día. La meta diaria se recalcula automáticamente.
+        Esto se traduce en comer ~{Math.abs(adjustment.delta)} kcal más por día para preservar masa magra. La meta diaria se recalcula automáticamente.
       </p>
 
       <div className="grid grid-cols-3 gap-2">
