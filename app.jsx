@@ -7176,6 +7176,21 @@ const SMA_METRICS = new Set([
 
 function WeightChart({ weights, metric }) {
   const m = CHART_METRICS.find((x) => x.key === metric) || CHART_METRICS[0];
+  // Mide el ancho real del contenedor para que el viewBox sea 1:1 con los píxeles:
+  // sin esto (preserveAspectRatio none) el SVG se estira y deforma puntos y trazos.
+  const wrapRef = React.useRef(null);
+  const [W, setW] = useState(600);
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect?.width;
+      if (w && w > 0) setW(Math.round(w));
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
   const points = weights
     .filter((w) => w[m.key] != null)
     .map((w) => ({ x: new Date(w.date + 'T' + (w.time || '12:00')).getTime(), y: Number(w[m.key]) }))
@@ -7183,7 +7198,7 @@ function WeightChart({ weights, metric }) {
 
   if (points.length === 0) {
     return (
-      <div className="h-48 flex items-center justify-center text-sm text-gray-500 dark:text-gray-400 italic">
+      <div ref={wrapRef} className="h-48 flex items-center justify-center text-sm text-gray-500 dark:text-gray-400 italic">
         Sin datos de {m.label.toLowerCase()} aún
       </div>
     );
@@ -7192,20 +7207,26 @@ function WeightChart({ weights, metric }) {
   const useSMA = SMA_METRICS.has(m.key) && points.length >= 3;
   const sma = useSMA ? computeSMA(points, 7) : [];
 
-  const W = 600, H = 200, padL = 40, padR = 12, padT = 16, padB = 28;
+  const H = 224, padL = 38, padR = 16, padT = 22, padB = 26;
   const xs = points.map((p) => p.x);
   const allY = useSMA ? [...points.map((p) => p.y), ...sma.map((p) => p.y)] : points.map((p) => p.y);
   const minX = Math.min(...xs), maxX = Math.max(...xs);
   let minY = Math.min(...allY), maxY = Math.max(...allY);
   const spanY = maxY - minY || 1;
-  minY -= spanY * 0.1; maxY += spanY * 0.1;
+  minY -= spanY * 0.12; maxY += spanY * 0.12;
   const spanX = maxX - minX || 1;
 
   const sx = (x) => padL + ((x - minX) / spanX) * (W - padL - padR);
   const sy = (y) => H - padB - ((y - minY) / (maxY - minY || 1)) * (H - padT - padB);
+  const baseY = H - padB;
 
+  // Línea principal: la media móvil cuando aplica, si no la serie cruda.
+  const mainPts = useSMA ? sma : points;
+  const linePath = mainPts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${sx(p.x).toFixed(1)} ${sy(p.y).toFixed(1)}`).join(' ');
+  const areaPath = mainPts.length
+    ? `${linePath} L ${sx(mainPts[mainPts.length - 1].x).toFixed(1)} ${baseY.toFixed(1)} L ${sx(mainPts[0].x).toFixed(1)} ${baseY.toFixed(1)} Z`
+    : '';
   const rawPath = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${sx(p.x).toFixed(1)} ${sy(p.y).toFixed(1)}`).join(' ');
-  const smaPath = sma.map((p, i) => `${i === 0 ? 'M' : 'L'} ${sx(p.x).toFixed(1)} ${sy(p.y).toFixed(1)}`).join(' ');
 
   const spansMultipleYears = points.length > 1
     && new Date(points[0].x).getFullYear() !== new Date(points[points.length - 1].x).getFullYear();
@@ -7215,50 +7236,90 @@ function WeightChart({ weights, metric }) {
     const base = `${d.getDate()}/${d.getMonth() + 1}`;
     return withYear ? `${base}/${String(d.getFullYear()).slice(-2)}` : base;
   };
+  const dec = spanY < 5 ? 1 : 0;
   const yTicks = 4;
   const yTickVals = Array.from({ length: yTicks + 1 }, (_, i) => minY + ((maxY - minY) * i) / yTicks);
 
+  const last = points[points.length - 1];
+  const lastX = sx(last.x), lastY = sy(last.y);
+  const lastLabel = `${last.y.toFixed(dec)}${m.unit ? ' ' + m.unit : ''}`;
+  const labelAnchor = lastX > W - 60 ? 'end' : 'middle';
+  const labelY = Math.max(padT - 6, lastY - 14);
+  const gradId = `wchart-grad-${m.key}`;
+
   return (
-    <div>
-      <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-48 sm:h-56" preserveAspectRatio="none">
+    <div ref={wrapRef} className="w-full">
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full block" style={{ height: H }}>
+        <defs>
+          <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor={m.color} stopOpacity="0.28" />
+            <stop offset="92%" stopColor={m.color} stopOpacity="0" />
+          </linearGradient>
+        </defs>
+
         {yTickVals.map((v, i) => (
           <g key={i}>
-            <line x1={padL} y1={sy(v)} x2={W - padR} y2={sy(v)} stroke="currentColor" className="text-gray-200 dark:text-gray-800" strokeWidth="1" />
-            <text x={padL - 6} y={sy(v) + 4} textAnchor="end" className="fill-gray-500 dark:fill-gray-400" fontSize="11">
-              {v.toFixed(spanY < 5 ? 1 : 0)}
+            <line x1={padL} y1={sy(v)} x2={W - padR} y2={sy(v)} stroke="currentColor"
+              className="text-gray-200/70 dark:text-gray-700/50" strokeWidth="1"
+              strokeDasharray={i === 0 ? '0' : '3 5'} strokeLinecap="round" />
+            <text x={padL - 8} y={sy(v) + 3.5} textAnchor="end" className="fill-gray-400 dark:fill-gray-500" fontSize="10.5">
+              {v.toFixed(dec)}
             </text>
           </g>
         ))}
+
+        {areaPath && <path d={areaPath} fill={`url(#${gradId})`} stroke="none" />}
+
+        {/* Serie cruda tenue detrás de la media móvil */}
+        {useSMA && (
+          <path d={rawPath} fill="none" stroke={m.color} strokeWidth="1.5" strokeOpacity="0.22" strokeLinejoin="round" strokeLinecap="round" />
+        )}
+
+        {/* Línea principal */}
+        <path d={linePath} fill="none" stroke={m.color} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
+
         {points.map((p, i) => {
           const skipLabel = points.length > 6 && i % Math.ceil(points.length / 6) !== 0 && i !== points.length - 1;
           const anchor = spansMultipleYears
             ? (i === 0 ? 'start' : (i === points.length - 1 ? 'end' : 'middle'))
             : 'middle';
           return !skipLabel && (
-            <text key={`x${i}`} x={sx(p.x)} y={H - 8} textAnchor={anchor} className="fill-gray-500 dark:fill-gray-400" fontSize="11">
+            <text key={`x${i}`} x={sx(p.x)} y={H - 7} textAnchor={anchor} className="fill-gray-400 dark:fill-gray-500" fontSize="10.5">
               {fmtDate(p.x, spansMultipleYears)}
             </text>
           );
         })}
-        <path d={rawPath} fill="none" stroke={m.color} strokeWidth={useSMA ? '1.5' : '2.5'} strokeOpacity={useSMA ? '0.3' : '1'} strokeLinejoin="round" strokeLinecap="round" />
-        {useSMA && (
-          <path d={smaPath} fill="none" stroke={m.color} strokeWidth="3" strokeLinejoin="round" strokeLinecap="round" />
-        )}
-        {points.map((p, i) => (
-          <g key={`pt${i}`}>
-            <circle cx={sx(p.x)} cy={sy(p.y)} r={useSMA ? '3' : '4'} fill="white" stroke={m.color} strokeWidth="2" opacity={useSMA ? '0.6' : '1'} />
+
+        {/* Puntos crudos discretos (cuando hay media móvil) */}
+        {useSMA && points.map((p, i) => (
+          <circle key={`pt${i}`} cx={sx(p.x)} cy={sy(p.y)} r="2.5" fill={m.color} fillOpacity="0.35">
             <title>{`${fmtDate(p.x, true)}: ${p.y.toFixed(1)}${m.unit ? ' ' + m.unit : ''}`}</title>
-          </g>
+          </circle>
         ))}
+        {!useSMA && points.map((p, i) => (
+          <circle key={`pt${i}`} cx={sx(p.x)} cy={sy(p.y)} r="3.5" fill="currentColor"
+            className="text-white dark:text-gray-900" stroke={m.color} strokeWidth="2.5">
+            <title>{`${fmtDate(p.x, true)}: ${p.y.toFixed(1)}${m.unit ? ' ' + m.unit : ''}`}</title>
+          </circle>
+        ))}
+
+        {/* Último punto destacado + valor actual */}
+        <circle cx={lastX} cy={lastY} r="9" fill={m.color} fillOpacity="0.16" />
+        <circle cx={lastX} cy={lastY} r="4.5" fill={m.color} stroke="currentColor" className="text-white dark:text-gray-900" strokeWidth="2" />
+        <text x={lastX} y={labelY} textAnchor={labelAnchor} fontSize="12.5" fontWeight="700" fill={m.color}>
+          {lastLabel}
+          <title>{`${fmtDate(last.x, true)}: ${lastLabel}`}</title>
+        </text>
       </svg>
+
       {useSMA && (
-        <div className="flex items-center gap-3 text-[11px] text-gray-500 dark:text-gray-400 px-1 mt-1">
+        <div className="flex items-center gap-3 text-[11px] text-gray-500 dark:text-gray-400 px-1 mt-1.5">
           <span className="flex items-center gap-1">
             <span className="inline-block w-3 h-0.5 rounded-full" style={{ background: m.color, opacity: 0.3 }}></span>
             valores crudos
           </span>
           <span className="flex items-center gap-1">
-            <span className="inline-block w-3 h-1 rounded-full" style={{ background: m.color }}></span>
+            <span className="inline-block w-3.5 h-1 rounded-full" style={{ background: m.color }}></span>
             media móvil 7d
           </span>
         </div>
