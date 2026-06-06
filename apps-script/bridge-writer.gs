@@ -129,7 +129,7 @@
 //   · En cuanto le pongas un valor, se exige en TODA llamada.
 // Despliegue sin lockout: pon el token primero en la app y la skill (la app ya manda
 // ?k= aunque el .gs aún no lo exija), y recién después fija SHARED_TOKEN aquí y redeploy.
-var SHARED_TOKEN = 'db52f16b62e5ada13150edc571c21b24010a582fe0ae18b4';
+var SHARED_TOKEN = ''; // candado DESACTIVADO (2026-06-05): rompía el registro por chat. La URL /exec ya es secreta.
 
 function _authed(e) {
   if (!SHARED_TOKEN) return true; // auth desactivada mientras el token esté vacío
@@ -141,7 +141,7 @@ var CANONICAL_ID = '1YN3F48EZoRWSpOabwDqoXzKrGkTqIa2t';
 var BRIDGE_TITLE = 'plan-hugo-bridge.json';
 var UPLOAD_TITLE = 'plan-hugo-bridge.upload.json';
 var PRUNE_DAYS   = 10;
-var SECTIONS     = ['meals', 'weights', 'workouts', 'checks'];
+var SECTIONS     = ['meals', 'weights', 'workouts', 'checks', 'water'];
 var WINDOW_MS    = 5 * 60 * 1000; // ventana de dedup por contenido (meals/workouts)
 // Campos de composición que se mergean sobre la medición del día (no duplica peso).
 // Lista COMPLETA alineada con WEIGHT_FIELDS + STRING_FIELDS + SEGMENT_FIELDS de app.jsx:
@@ -230,7 +230,9 @@ function _totals(bridge, day) {
   });
   var wk = 0;
   bridge.workouts.forEach(function (w) { if (w && w.date === day) wk += Number(w.kcal) || 0; });
-  return { totals: t, workoutsKcal: wk };
+  var waterMl = 0;
+  (bridge.water || []).forEach(function (w) { if (w && w.date === day) waterMl += Number(w.ml) || 0; });
+  return { totals: t, workoutsKcal: wk, waterMl: waterMl };
 }
 
 // Nombres de las `meals` de un día (el log real de comida del bridge), para
@@ -262,14 +264,19 @@ function _mealNames(bridge, day) {
 function _reconcile(day, snap, meal, mealNames) {
   var mt = meal.totals;
   var names = mealNames || [];
+  var bridgeWater = Number(meal.waterMl) || 0; // agua registrada por chat (section water)
   if (!snap) {
-    return { source: 'bridge', today: day, totals: mt, workoutsKcal: meal.workoutsKcal, eaten: names };
+    return {
+      source: 'bridge', today: day,
+      totals: { kcal: mt.kcal, protein: mt.protein, carbs: mt.carbs, fat: mt.fat, fiber: mt.fiber, waterMl: bridgeWater },
+      workoutsKcal: meal.workoutsKcal, eaten: names
+    };
   }
   var tt = snap.totals || {};
   var targets = snap.targets || {};
   var num = function (v) { return Number(v) || 0; };
   var kcalIn, kcalBurned, protein, carbs, fat, fiber, source, recompute;
-  var waterMl = num(tt.waterMl);
+  var waterMl = num(tt.waterMl) + bridgeWater; // agua de la app (snapshot) + agua del chat
 
   if (snap.planScope === 'plan-only') {
     // ADITIVO: plan (snapshot) + log (meals[]/workouts[]).
@@ -437,7 +444,9 @@ function _contentUnion(bridge, sec, entries, assignId) {
     var sig = _sig(sec, e);
     var ets = _entryTs(e, nowMs);
     var hitIdx = -1;
-    for (var i = 0; i < bridge[sec].length; i++) {
+    // sig == null (p.ej. water) → sin firma de contenido = SIEMPRE nueva: append-only,
+    // cada registro de agua SUMA y nunca se colapsa con otro del mismo día.
+    if (sig != null) for (var i = 0; i < bridge[sec].length; i++) {
       var x = bridge[sec][i];
       if (!x || _sig(sec, x) !== sig) continue;
       if (sec === 'meals' || sec === 'workouts') {
@@ -503,7 +512,7 @@ function _apply(payload) {
     if (payload.op === 'snapshot') return { ok: true, snapshot: true, today: payload.date };
     if (payload.op === 'config')   return { ok: true, config: true };
     var sum = _totals(bridge, day);
-    return { ok: true, added: added, today: day, totals: sum.totals, workoutsKcal: sum.workoutsKcal };
+    return { ok: true, added: added, today: day, totals: sum.totals, workoutsKcal: sum.workoutsKcal, waterMl: sum.waterMl };
   } finally {
     lock.releaseLock();
   }
@@ -567,7 +576,7 @@ function _entryFromParams(p) {
   ['date', 'time', 'name', 'mealSlot', 'meal', 'gi', 'notes'].forEach(function (k) {
     if (p[k] != null && p[k] !== '') entry[k] = p[k];
   });
-  ['kcal', 'protein', 'carbs', 'fat', 'fiber', 'minutes', 'ts',
+  ['kcal', 'protein', 'carbs', 'fat', 'fiber', 'minutes', 'ts', 'ml',
    'weightKg', 'bodyFatPct', 'score', 'fatKg', 'subcutaneousFatKg', 'muscleKg',
    'skeletalMuscleKg', 'fatFreeMassKg', 'waterKg', 'proteinKg', 'boneKg',
    'musclePct', 'waterPct', 'proteinPct', 'bmi', 'ffmi', 'metabolicAge', 'visceralFat',
