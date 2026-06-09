@@ -1546,6 +1546,29 @@ function mergeBridge(state, bridge) {
     importedIds.add(m.id); added.meals++;
   }
 
+  // Reconciliación: poda extras del chat que el bridge ya no tiene. Cada extra con
+  // source 'skill-chat' nació de un meal del bridge y conserva su id de servidor. Si ese id
+  // desapareció de bridge.meals (anulado, borrado vía ?w=delete, o re-dedupeado/movido de
+  // fecha en el servidor), el extra local quedó HUÉRFANO. Sin esto el merge solo AGREGA y
+  // nunca quita, así que una corrección del chat (p.ej. anular una comida de fecha errónea)
+  // neteaba en el bridge pero seguía inflando el total local —el bug de divergencia app↔bridge.
+  // Solo se reconcilian días que el bridge cubre (≥1 meal): si bridge.meals viene vacío o el
+  // día ya se podó por antigüedad (PRUNE_DAYS), no se toca nada (a prueba de fallos de fetch).
+  // Los extras de la app (manual/photo/repeat/...) llevan otro source y uuid local: intactos.
+  const bridgeMealIds = new Set();
+  const bridgeMealDates = new Set();
+  for (const m of bridge.meals) {
+    if (m == null || m.id == null) continue;
+    bridgeMealDates.add(m.date || todayKey());
+    if (!removedBridgeIds.has(m.id)) bridgeMealIds.add(m.id);
+  }
+  for (const dk of bridgeMealDates) {
+    const d = days[dk];
+    if (!d || !Array.isArray(d.extras)) continue;
+    const kept = d.extras.filter((x) => x?.source !== 'skill-chat' || bridgeMealIds.has(x.id));
+    if (kept.length !== d.extras.length) days[dk] = { ...d, extras: kept };
+  }
+
   for (const w of bridge.workouts) {
     if (w.id == null || removedBridgeIds.has(w.id)) continue;
     const d = ensureDay(w.date || todayKey());
@@ -3399,7 +3422,134 @@ function QuickAddForm({ title, fields, initial, onSave, onCancel }) {
   );
 }
 
-function DayItemList({ title, icon, items, onAdd, onRemove, addLabel, emptyHint, renderMeta, iconForItem, headerExtra, totalLabel }) {
+// Modal para editar una comida YA registrada. Trae un multiplicador de porción que
+// escala todos los macros desde un snapshot base (½ / ×1 / ×1.5 / ×2), o se editan a mano.
+function LoggedItemModal({ initial, onSave, onCancel }) {
+  const baseRef = React.useRef({
+    kcal: Number(initial?.kcal) || 0,
+    protein: Number(initial?.protein) || 0,
+    carbs: Number(initial?.carbs) || 0,
+    fat: Number(initial?.fat) || 0,
+    fiber: Number(initial?.fiber) || 0,
+  });
+  const [name, setName] = useState(initial?.name || '');
+  const [vals, setVals] = useState({ ...baseRef.current });
+  const [mult, setMult] = useState(1);
+
+  const applyMult = (f) => {
+    const b = baseRef.current;
+    setMult(f);
+    setVals({
+      kcal: Math.round(b.kcal * f),
+      protein: Math.round(b.protein * f),
+      carbs: Math.round(b.carbs * f),
+      fat: Math.round(b.fat * f),
+      fiber: Math.round(b.fiber * f),
+    });
+  };
+  const setField = (k, raw) => { setMult(null); setVals((v) => ({ ...v, [k]: raw })); };
+
+  const submit = (e) => {
+    e.preventDefault();
+    const nm = name.trim();
+    const kcal = Number(vals.kcal);
+    if (!nm || !Number.isFinite(kcal) || kcal < 0) return;
+    onSave({
+      name: nm,
+      kcal: Math.round(kcal),
+      protein: Math.max(0, Math.round(Number(vals.protein) || 0)),
+      carbs: Math.max(0, Math.round(Number(vals.carbs) || 0)),
+      fat: Math.max(0, Math.round(Number(vals.fat) || 0)),
+      fiber: Math.max(0, Math.round(Number(vals.fiber) || 0)),
+    });
+  };
+
+  const MACROS = [
+    { k: 'kcal', label: 'Calorías' },
+    { k: 'protein', label: 'Proteína (g)' },
+    { k: 'carbs', label: 'Carbos (g)' },
+    { k: 'fat', label: 'Grasa (g)' },
+    { k: 'fiber', label: 'Fibra (g)' },
+  ];
+  const PORTIONS = [0.5, 1, 1.5, 2];
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 p-4">
+      <form onSubmit={submit} className="w-full max-w-md bg-white dark:bg-gray-900 rounded-2xl shadow-xl border border-gray-200 dark:border-gray-800 p-5 space-y-4 max-h-[90vh] overflow-y-auto">
+        <h2 className="text-lg font-bold">Editar comida</h2>
+        <label className="block">
+          <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Nombre</span>
+          <input value={name} onChange={(e) => setName(e.target.value)}
+            className="mt-1 w-full px-3 py-2.5 rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-emerald-500" />
+        </label>
+        <div>
+          <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Porción</span>
+          <div className="mt-1 flex gap-2">
+            {PORTIONS.map((f) => (
+              <button key={f} type="button" onClick={() => applyMult(f)}
+                className={`flex-1 py-2 rounded-xl text-sm font-semibold border ${mult === f ? 'bg-emerald-500 text-white border-emerald-500' : 'border-gray-300 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:border-emerald-400'}`}>
+                {f === 0.5 ? '½' : f === 1 ? '×1' : '×' + f}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          {MACROS.map((m) => (
+            <label key={m.k} className={m.k === 'kcal' ? 'col-span-2 block' : 'block'}>
+              <span className="text-xs font-medium text-gray-600 dark:text-gray-400">{m.label}</span>
+              <input type="number" inputMode="numeric" min="0" value={vals[m.k]}
+                onChange={(e) => setField(m.k, e.target.value)}
+                className="mt-1 w-full px-3 py-2.5 rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-emerald-500" />
+            </label>
+          ))}
+        </div>
+        <div className="flex gap-2 pt-2">
+          <button type="button" onClick={onCancel} className="flex-1 py-2.5 rounded-xl border border-gray-300 dark:border-gray-700 font-medium">Cancelar</button>
+          <button type="submit" className="flex-1 py-2.5 rounded-xl bg-emerald-500 text-white font-semibold hover:bg-emerald-600">Guardar</button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+// Modal para repetir las comidas registradas de un día anterior. Un tap copia todos los
+// extras de ese día a hoy (ids/ts nuevos, source 'repeat').
+function RepeatDayModal({ days, todayKeyStr, onAdd, onCancel }) {
+  const prior = useMemo(() => (
+    Object.entries(days || {})
+      .filter(([k, d]) => k !== todayKeyStr && Array.isArray(d?.extras) && d.extras.length > 0)
+      .sort((a, b) => (a[0] < b[0] ? 1 : -1))
+      .slice(0, 14)
+      .map(([k, d]) => ({
+        key: k,
+        items: d.extras,
+        kcal: d.extras.reduce((s, e) => s + (Number(e.kcal) || 0), 0),
+      }))
+  ), [days, todayKeyStr]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 p-4">
+      <div className="w-full max-w-md bg-white dark:bg-gray-900 rounded-2xl shadow-xl border border-gray-200 dark:border-gray-800 p-5 space-y-3 max-h-[85vh] overflow-y-auto">
+        <h2 className="text-lg font-bold">Repetir un día</h2>
+        {prior.length === 0 ? (
+          <p className="text-sm text-gray-500 dark:text-gray-400">No hay días anteriores con comidas registradas.</p>
+        ) : prior.map((d) => (
+          <button key={d.key} onClick={() => onAdd(d.items)}
+            className="w-full text-left px-4 py-3 rounded-xl border border-gray-200 dark:border-gray-800 hover:border-emerald-400 active:scale-[0.99]">
+            <div className="flex items-center justify-between">
+              <span className="font-semibold text-sm">{formatDateLabel(d.key, todayKeyStr)}</span>
+              <span className="text-xs text-gray-500 dark:text-gray-400">{d.items.length} {d.items.length === 1 ? 'ítem' : 'ítems'} · {Math.round(d.kcal)} kcal</span>
+            </div>
+            <div className="mt-1 text-xs text-gray-500 dark:text-gray-400 truncate">{d.items.map((e) => e.name).join(', ')}</div>
+          </button>
+        ))}
+        <button onClick={onCancel} className="w-full py-2.5 rounded-xl border border-gray-300 dark:border-gray-700 font-medium">Cerrar</button>
+      </div>
+    </div>
+  );
+}
+
+function DayItemList({ title, icon, items, onAdd, onRemove, onEdit, addLabel, emptyHint, renderMeta, iconForItem, headerExtra, totalLabel }) {
   return (
     <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 overflow-hidden">
       <div className="px-4 pt-3.5 pb-2 flex items-center justify-between">
@@ -3423,10 +3573,17 @@ function DayItemList({ title, icon, items, onAdd, onRemove, addLabel, emptyHint,
           {items.map((item, i) => (
             <div key={item.id} className={`flex items-center gap-3 px-4 py-2.5 ${i === 0 && !headerExtra ? '' : 'border-t border-gray-100 dark:border-gray-800'}`}>
               {iconForItem && <span className="text-xl shrink-0 leading-none">{iconForItem(item)}</span>}
-              <div className="flex-1 min-w-0">
-                <div className="font-medium text-sm truncate">{item.name}</div>
-                <div className="text-xs text-gray-500 dark:text-gray-400">{renderMeta(item)}</div>
-              </div>
+              {onEdit ? (
+                <button type="button" onClick={() => onEdit(item)} className="flex-1 min-w-0 text-left">
+                  <div className="font-medium text-sm truncate">{item.name}</div>
+                  <div className="text-xs text-gray-500 dark:text-gray-400">{renderMeta(item)}</div>
+                </button>
+              ) : (
+                <div className="flex-1 min-w-0">
+                  <div className="font-medium text-sm truncate">{item.name}</div>
+                  <div className="text-xs text-gray-500 dark:text-gray-400">{renderMeta(item)}</div>
+                </div>
+              )}
               <button onClick={() => onRemove(item.id)} aria-label="Borrar"
                 className="shrink-0 w-9 h-9 rounded-full bg-rose-50 dark:bg-rose-900/30 text-rose-600 dark:text-rose-300 flex items-center justify-center text-base hover:bg-rose-100 dark:hover:bg-rose-900/50">✕</button>
             </div>
@@ -3834,24 +3991,34 @@ function AddExtraModal({ apiKey, onCancel, onSave }) {
 
 // Lista compacta de alimentos registrados (vía WhatsApp/bridge o captura) asignados a un slot
 // del plan (colación/cena), para mostrarlos DENTRO de su sección en vez de en "Extras del día".
-function SlotLoggedItems({ items, onRemove }) {
+function SlotLoggedItems({ items, onRemove, onEdit }) {
   if (!items || items.length === 0) return null;
+  const meta = (item) => (
+    <>
+      <span className="font-semibold text-gray-700 dark:text-gray-300">{item.kcal}</span> kcal
+      {item.protein > 0 && <> · P <span className="font-semibold text-gray-700 dark:text-gray-300">{item.protein}g</span></>}
+      {item.carbs > 0 && <> · C {Math.round(item.carbs)}g</>}
+      {item.fat > 0 && <> · G {Math.round(item.fat)}g</>}
+      {item.fiber > 0 && <> · F {Number(item.fiber).toFixed(0)}g</>}
+    </>
+  );
   return (
     <div className="mt-2.5 rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 overflow-hidden">
       <div className="px-4 pt-3 pb-1.5 text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">📝 Registrado</div>
       {items.map((item) => (
         <div key={item.id} className="flex items-center gap-3 px-4 py-2.5 border-t border-gray-100 dark:border-gray-800">
           <span className="text-xl shrink-0 leading-none">{emojiForFood(item.name)}</span>
-          <div className="flex-1 min-w-0">
-            <div className="font-medium text-sm truncate">{item.name}</div>
-            <div className="text-xs text-gray-500 dark:text-gray-400">
-              <span className="font-semibold text-gray-700 dark:text-gray-300">{item.kcal}</span> kcal
-              {item.protein > 0 && <> · P <span className="font-semibold text-gray-700 dark:text-gray-300">{item.protein}g</span></>}
-              {item.carbs > 0 && <> · C {Math.round(item.carbs)}g</>}
-              {item.fat > 0 && <> · G {Math.round(item.fat)}g</>}
-              {item.fiber > 0 && <> · F {Number(item.fiber).toFixed(0)}g</>}
+          {onEdit ? (
+            <button type="button" onClick={() => onEdit(item)} className="flex-1 min-w-0 text-left">
+              <div className="font-medium text-sm truncate">{item.name}</div>
+              <div className="text-xs text-gray-500 dark:text-gray-400">{meta(item)}</div>
+            </button>
+          ) : (
+            <div className="flex-1 min-w-0">
+              <div className="font-medium text-sm truncate">{item.name}</div>
+              <div className="text-xs text-gray-500 dark:text-gray-400">{meta(item)}</div>
             </div>
-          </div>
+          )}
           <button onClick={() => onRemove(item.id)} aria-label="Borrar"
             className="shrink-0 w-9 h-9 rounded-full bg-rose-50 dark:bg-rose-900/30 text-rose-600 dark:text-rose-300 flex items-center justify-center text-base hover:bg-rose-100 dark:hover:bg-rose-900/50">✕</button>
         </div>
@@ -3860,7 +4027,7 @@ function SlotLoggedItems({ items, onRemove }) {
   );
 }
 
-function ExtrasSection({ day, onUpdate, apiKey, tryWithRules }) {
+function ExtrasSection({ day, onUpdate, apiKey, tryWithRules, onRemoveExtra, onEditExtra }) {
   const [adding, setAdding] = useState(false);
   const allItems = day.extras || [];
   // Solo la cubeta 'extra' se lista aquí; colación/cena se muestran dentro de sus secciones.
@@ -3885,13 +4052,13 @@ function ExtrasSection({ day, onUpdate, apiKey, tryWithRules }) {
       doSave();
     }
   };
-  const handleRemove = (id) => { onUpdate({ extras: allItems.filter((e) => e.id !== id) }); };
+  const handleRemove = onRemoveExtra || ((id) => { onUpdate({ extras: allItems.filter((e) => e.id !== id) }); });
 
   return (
     <>
       <DayItemList title="Extras del día" icon="🍪" items={items}
         iconForItem={(item) => emojiForFood(item.name)}
-        onAdd={() => setAdding(true)} onRemove={handleRemove}
+        onAdd={() => setAdding(true)} onRemove={handleRemove} onEdit={onEditExtra}
         addLabel="Agregar extra" emptyHint="Sin extras hoy"
         renderMeta={(item) => (
           <>
@@ -5241,6 +5408,7 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
   const cenaExtras = dayExtras.filter((x) => extraSlotBucket(x) === 'cena');
   const antojoExtras = dayExtras.filter((x) => extraSlotBucket(x) === 'antojo');
   const removeSlotExtra = (slot, id) => {
+    const target = dayExtras.find((e) => e.id === id);
     const nextExtras = dayExtras.filter((e) => e.id !== id);
     const patch = { extras: nextExtras };
     // Solo colación/cena marcan el slot como cumplido vía eaten; al quedar vacío y sin pick
@@ -5251,6 +5419,32 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
       if (!stillHasSlot && !bankPick) patch.eaten = { ...(day.eaten || {}), [slot]: false };
     }
     updateDay(patch);
+    if (target) setUndoItem({ ...target });
+  };
+
+  // Edita una comida ya registrada en su sitio (mismo slot/source, nuevos macros/nombre).
+  const editExtra = (id, patch) => {
+    const cur = day.extras || [];
+    updateDay({ extras: cur.map((e) => (e.id === id ? { ...e, ...patch } : e)) });
+  };
+
+  // Restaura el último extra borrado (id nuevo). Reinstaura el eaten de colación/cena.
+  const restoreUndo = () => {
+    if (!undoItem) return;
+    const { id, ...rest } = undoItem;
+    const slot = extraSlotBucket(rest);
+    const cur = day.extras || [];
+    const patch = { extras: [...cur, { ...rest, id: uuid() }] };
+    if (slot === 'colacion' || slot === 'cena') patch.eaten = { ...(day.eaten || {}), [slot]: true };
+    updateDay(patch);
+    setUndoItem(null);
+  };
+
+  // Copia todos los extras de un día anterior a hoy (ids/ts nuevos).
+  const repeatItems = (items) => {
+    const cloned = (items || []).map((e) => ({ ...e, id: uuid(), ts: Date.now(), source: 'repeat' }));
+    if (!cloned.length) return;
+    updateDay({ extras: [...(day.extras || []), ...cloned] });
   };
 
   // Enforcement de reglas: acumula violaciones, muestra modal único si hay
@@ -5451,6 +5645,16 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
   );
 
   const [showStreakModal, setShowStreakModal] = useState(false);
+  const [editTarget, setEditTarget] = useState(null); // extra en edición | null
+  const [showRepeat, setShowRepeat] = useState(false);
+  const [undoItem, setUndoItem] = useState(null); // último extra borrado, para deshacer
+
+  // El toast de "deshacer" se autodescarta a los 6s.
+  useEffect(() => {
+    if (!undoItem) return;
+    const t = setTimeout(() => setUndoItem(null), 6000);
+    return () => clearTimeout(t);
+  }, [undoItem]);
 
   const addRecent = (r) => {
     const cur = day.extras || [];
@@ -5485,6 +5689,25 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
           onSelect={handleSuggestionSelected}
           onClose={() => setSuggestSlot(null)}
         />
+      )}
+      {editTarget && (
+        <LoggedItemModal initial={editTarget}
+          onCancel={() => setEditTarget(null)}
+          onSave={(patch) => { editExtra(editTarget.id, patch); setEditTarget(null); }} />
+      )}
+      {showRepeat && (
+        <RepeatDayModal days={state.days} todayKeyStr={today}
+          onCancel={() => setShowRepeat(false)}
+          onAdd={(items) => { repeatItems(items); setShowRepeat(false); }} />
+      )}
+      {undoItem && (
+        <div className="fixed inset-x-0 bottom-4 z-50 flex justify-center px-4 pointer-events-none">
+          <div className="pointer-events-auto flex items-center gap-3 px-4 py-3 rounded-2xl bg-gray-900 dark:bg-gray-800 text-white shadow-xl border border-gray-700 max-w-md w-full">
+            <span className="text-sm flex-1 truncate">Borraste «{undoItem.name}»</span>
+            <button onClick={restoreUndo} className="shrink-0 text-sm font-bold text-emerald-400 hover:text-emerald-300">Deshacer</button>
+            <button onClick={() => setUndoItem(null)} aria-label="Cerrar" className="shrink-0 text-gray-400 hover:text-white">✕</button>
+          </div>
+        </div>
       )}
       <div className="px-4 py-4 space-y-4">
         <div className="flex items-center gap-2 px-1">
@@ -5549,6 +5772,12 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
 
         <RecentsRow recents={recents} onPick={addRecent} />
 
+        <button onClick={() => setShowRepeat(true)}
+          className="w-full py-2.5 rounded-2xl bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 text-gray-600 dark:text-gray-300 font-semibold text-sm hover:border-emerald-400 flex items-center justify-center gap-2">
+          <span>🔁</span>
+          <span>Repetir un día</span>
+        </button>
+
         <ComparisonCard comparison={comparison} />
 
         <RuleChips state={state} dateKey={today} targets={targets} />
@@ -5560,14 +5789,14 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
             onToggleItem={(itemId) => toggleMealItem('desayuno', itemId)}
             onMarkAll={(value) => markAllMealItems('desayuno', value)}
             onSkipToggle={() => toggleSkipped('desayuno')} targets={targets} />
-          <SlotLoggedItems items={desayunoExtras} onRemove={(id) => removeSlotExtra('desayuno', id)} />
+          <SlotLoggedItems items={desayunoExtras} onRemove={(id) => removeSlotExtra('desayuno', id)} onEdit={setEditTarget} />
         </div>
         <div>
           <MealCard meal={almuerzo} day={day} skipped={skippedSet.has('almuerzo')}
             onToggleItem={(itemId) => toggleMealItem('almuerzo', itemId)}
             onMarkAll={(value) => markAllMealItems('almuerzo', value)}
             onSkipToggle={() => toggleSkipped('almuerzo')} targets={targets} />
-          <SlotLoggedItems items={almuerzoExtras} onRemove={(id) => removeSlotExtra('almuerzo', id)} />
+          <SlotLoggedItems items={almuerzoExtras} onRemove={(id) => removeSlotExtra('almuerzo', id)} onEdit={setEditTarget} />
         </div>
         <DessertSection meal="almuerzo" dessertBank={state.dessertBank} day={day} eaten={eaten}
           onSelect={selectDessert} onToggleEaten={toggleDessertEaten} targets={targets}
@@ -5605,7 +5834,7 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
             </div>
           )}
           {!skippedSet.has('colacion') && (
-            <SlotLoggedItems items={colacionExtras} onRemove={(id) => removeSlotExtra('colacion', id)} />
+            <SlotLoggedItems items={colacionExtras} onRemove={(id) => removeSlotExtra('colacion', id)} onEdit={setEditTarget} />
           )}
         </div>
         <div>
@@ -5641,7 +5870,7 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
             </div>
           )}
           {!skippedSet.has('cena') && (
-            <SlotLoggedItems items={cenaExtras} onRemove={(id) => removeSlotExtra('cena', id)} />
+            <SlotLoggedItems items={cenaExtras} onRemove={(id) => removeSlotExtra('cena', id)} onEdit={setEditTarget} />
           )}
           {!skippedSet.has('cena') && (
             <DessertSection meal="cena" dessertBank={state.dessertBank} day={day} eaten={eaten}
@@ -5658,9 +5887,10 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
             onAddItem={addAntojoItem}
             onRemoveItem={removeAntojoItem}
             targets={targets} />
-          <SlotLoggedItems items={antojoExtras} onRemove={(id) => removeSlotExtra('antojo', id)} />
+          <SlotLoggedItems items={antojoExtras} onRemove={(id) => removeSlotExtra('antojo', id)} onEdit={setEditTarget} />
         </div>
-        <ExtrasSection day={day} onUpdate={updateDay} apiKey={state.settings?.anthropicApiKey} tryWithRules={tryWithRules} />
+        <ExtrasSection day={day} onUpdate={updateDay} apiKey={state.settings?.anthropicApiKey} tryWithRules={tryWithRules}
+          onRemoveExtra={(id) => removeSlotExtra('extra', id)} onEditExtra={setEditTarget} />
         <ExerciseSection day={day} onUpdate={updateDay} apiKey={state.settings?.anthropicApiKey} userWeightKg={state.userProfile?.weightKg} />
         <DailyNotesCard day={day} onUpdate={updateDay} />
       </div>

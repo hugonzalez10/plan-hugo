@@ -224,10 +224,11 @@ el registro.
 
 Solo necesitas leer en dos casos puntuales (siempre por `curl` al `BRIDGE_URL`, nunca
 por el conector de Drive ni por `web_fetch`):
-- **"cómo voy hoy" / "resumen del día":** `curl -sL "$BRIDGE_URL?totals=YYYY-MM-DD&k=$BRIDGE_TOKEN"`
-  (ver detalle en la sección "Comando: cómo voy hoy" más abajo — la respuesta trae
-  `source:"app"` con el número real, o `source:"bridge"` si la app no sincronizó
-  hoy). Para el detalle de comidas, `curl -sL "$BRIDGE_URL?k=$BRIDGE_TOKEN"` (el JSON completo).
+- **"cómo voy" / "cómo voy hoy" / "resumen del día":** NO respondas con texto/tabla —
+  **renderiza el dashboard HTML inline** (bloques A-E). Trae toda la data con el gatherer
+  de la sección "Comando: cómo voy hoy → DASHBOARD HTML INTERACTIVO" más abajo (un solo
+  `curl`-loop al `BRIDGE_URL`; el bridge hoy no exige token). La respuesta de `?totals=`
+  trae `source:"app"` con el número real, o `source:"bridge"` si la app no sincronizó hoy.
 - **Inspección manual:** `curl -sL "$BRIDGE_URL?k=$BRIDGE_TOKEN"` (el doGet ya devuelve el JSON del
   bridge vía auto-heal). No uses `download_file_content`/`read_file_content` del
   conector.
@@ -396,32 +397,191 @@ Usa el `waterMl` que devuelve la respuesta del registro (o `?totals=`); no recal
 
 ---
 
-## Comando: "cómo voy hoy"
+## Comando: "cómo voy hoy" → DASHBOARD HTML INTERACTIVO
 
-`curl -sL "$BRIDGE_URL?totals=<hoy>&k=$BRIDGE_TOKEN"`. La respuesta trae un campo **`source`** que
-decide cómo responder:
+> **Esta es la única respuesta correcta a "cómo voy".** Reemplaza la vieja tabla
+> markdown (Consumido/Meta/Queda) + párrafo. Cuando Hugo diga **"cómo voy"**, **"cómo
+> voy hoy"**, **"cuánto llevo"**, **"resumen del día"** o equivalente, **renderiza un
+> dashboard HTML interactivo inline** (la herramienta de visualización inline, **NO un
+> archivo**, NO `create_file`) con datos REALES del bridge, en bloques **A → B → C → D
+> → E** en ese orden. El resto de la skill (registro de comida/peso/workouts/agua) NO
+> cambia.
 
-- **`source:"app"`** → es el número REAL que ve Hugo en la app (todo lo del día
-  − ejercicio). Úsalo tal cual, NO sumes nada más. Trae:
-  - `totals.kcal` = kcal **neto** del día (ya descontó el ejercicio).
-    También `totals.kcalIn` (comido bruto), `totals.kcalBurned`, `protein`,
-    `carbs`, `fat`, `fiber`, `waterMl`.
-  - `targets` = metas del día (`kcalMax`, `proteinMin`, `carbsTarget`,
-    `fatTarget`, `fiberTarget`, `waterTarget`). Úsalas para el "restante" y el %.
-  - `remaining` = lo que falta para cada meta (`kcal`, `protein`, …). Negativo =
-    se pasó.
-  - `eaten` / `extras` = nombres de extras del día (si quieres mencionarlos).
-  Arma el resumen con `totals` vs `targets` y `remaining`. Ese es el mismo número
-  de la pantalla.
+### Paso D1 — Traer TODA la data en una sola llamada
 
-- **`source:"bridge"`** → la app **no se ha abierto/sincronizado hoy**, así que solo
-  hay lo registrado por el chat (parcial). Trae `{ totals:{kcal,protein,carbs,fat},
-  workoutsKcal }`. Muéstralo, pero **avísale a Hugo** que es parcial: "Esto es solo lo
-  que registré por el chat; abre la app un segundo para que sincronice el total
-  completo del día".
+Corre este gatherer por Bash. Hace los curls al `BRIDGE_URL` (POR `curl`, nunca
+`web_fetch` ni el conector de Drive) y emite **un solo JSON consolidado** que vas a
+incrustar en el HTML. El bridge hoy **no exige token** (rama `token-desactivado`); por
+eso las llamadas van sin `&k=`. Usa el campo `totals` del server tal cual, **NO
+recalcules**.
 
-Si Hugo pide el **detalle** de qué comió, `curl -sL "$BRIDGE_URL?k=$BRIDGE_TOKEN"` (el JSON completo)
-y lista las comidas de hoy.
+```bash
+python3 - <<'PY'
+import subprocess, json, datetime
+URL='https://script.google.com/macros/s/AKfycbwcxEoa0nvjhMv6nrdfMcaHKS130PcXV0isbc7ajNj_CMfuBXCR6RhL63LHv-e1zW9W_w/exec'
+def get(params=None):
+    cmd=['curl','-sL','-G',URL]
+    for k,v in (params or {}).items(): cmd+=['--data-urlencode',f'{k}={v}']
+    try: return json.loads(subprocess.run(cmd,capture_output=True,text=True,timeout=30).stdout)
+    except Exception: return {}
+now=datetime.datetime.now(); today=now.strftime('%Y-%m-%d')
+full=get(); tot=get({'totals':today}); cfg=get({'config':'1'}).get('config',{})
+def daystr(i): return (now-datetime.timedelta(days=i)).strftime('%Y-%m-%d')
+meals=[m for m in full.get('meals',[]) if m.get('date')==today]
+trend=[]
+for i in range(6,-1,-1):
+    d=daystr(i); t=get({'totals':d})
+    trend.append({'date':d,'totals':t.get('totals',{}),'targets':t.get('targets',{})})
+out={
+ 'now':now.strftime('%H:%M'),'today':today,'source':tot.get('source'),
+ 'totals':tot.get('totals',{}),'targets':tot.get('targets',{}),'remaining':tot.get('remaining',{}),
+ 'eaten':tot.get('eaten',[]),'workoutsKcal':tot.get('workoutsKcal'),
+ 'config':{'weightKg':cfg.get('weightKg'),'goal':cfg.get('goal')},
+ 'mealsToday':[{'time':m.get('time'),'mealSlot':m.get('mealSlot'),'name':m.get('name'),
+               'protein':m.get('protein'),'kcal':m.get('kcal')} for m in meals],
+ 'workoutsRecent':[{'date':w.get('date'),'name':w.get('name'),'kcal':w.get('kcal'),'minutes':w.get('minutes')}
+                   for w in full.get('workouts',[]) if w.get('date')>=daystr(3)],
+ 'weights':[{'date':w.get('date'),'weightKg':w.get('weightKg')} for w in full.get('weights',[])[-14:]],
+ 'trend':trend,
+}
+print(json.dumps(out,ensure_ascii=False))
+PY
+```
+
+El objeto resultante trae todo lo que necesitan los 5 bloques. Notas de la data real
+(no asumir limpia):
+- **`source`**: `"app"`/`"app+meals"` = el número real de la app (kcal ya neto de
+  ejercicio); `"bridge"` = la app no sincronizó hoy → es parcial, avísale a Hugo en el
+  texto del chat ("abre la app un segundo para el total completo"). Renderiza el
+  dashboard igual con lo que haya.
+- **`targets` cambia por día.** En el Bloque E usa los `targets` que devuelve CADA día
+  en `trend[].targets` (no los de hoy para todos). Si un día no trae `targets`, usa los
+  de hoy como respaldo.
+- **`mealsToday[].time` suele venir `null`** (las comidas registradas por la app no
+  guardan hora). Para el Bloque D, si falta `time`, **infiere desde `mealSlot`**:
+  desayuno→08:00, almuerzo→13:00, colacion→16:30, cena→20:00, antojo→22:00, extra→hora
+  actual. Menciona en el texto del chat que las horas sin registro son aproximadas.
+- **Limpia `mealsToday` antes del Bloque D:** descarta entradas de prueba/basura (p. ej.
+  `name` tipo `TEST_…`) y **colapsa duplicados exactos** (mismo `name` + `protein`) — el
+  bridge a veces deja la misma comida dos veces. El % y los totales de los Bloques A/C
+  vienen del server (`totals`), que ya está reconciliado: NO los recalcules desde
+  `mealsToday`.
+
+### Paso D2 — Renderizar el dashboard inline
+
+Genera un documento HTML inline (mobile ~380px). Incrusta los números reales del JSON
+del Paso D1 (redondea todo número mostrado). Restricciones heredadas del sistema de
+visualización inline, **obligatorias**:
+
+- Máx 2 columnas. **Sin emojis. Sin gradientes ni sombras. Sentence case.**
+- Sin `localStorage`. Sin `position:fixed`. Colores por **CSS variables** salvo los hex
+  de las series del gráfico (Bloque E) y de las barras (Bloque C).
+- **El texto explicativo va FUERA del widget** (en tu respuesta de chat), no dentro del
+  HTML. El widget muestra cifras y visuales; el "por qué" y la recomendación larga van
+  en el chat.
+
+#### Bloque A — 3 anillos (kcal in, proteína, agua)
+Tres anillos de progreso (% sobre meta), lado a lado. Bajo cada uno: valor absoluto +
+etiqueta en sentence case.
+- **Kcal in**: `totals.kcalIn / targets.kcalMax`. (Usa `kcalIn`, el bruto comido, NO el
+  neto `kcal`.)
+- **Proteína**: `totals.protein / targets.proteinMin`. **Puede pasar 100%** (no la
+  topes; muestra p. ej. 126%).
+- **Agua**: `totals.waterMl / targets.waterTarget`.
+
+#### Bloque B — recomendación viva (tarjeta de estado + pregunta de entrenamiento)
+Tarjeta con una recomendación CONCISA (el "por qué" detallado va en el chat). Evalúa la
+lógica EN ESTE ORDEN con `now` (hora actual del Paso D1):
+1. **`protein < proteinMin`** → EMPUJAR proteína. Di cuántos g faltan
+   (`proteinMin − protein`) y sugiere un formato concreto del historial de Hugo: whey,
+   yogurt Colun/griego, charqui, mousse proteica, barra Quest. **Nunca** nueces/almendras.
+2. **`protein ≥ proteinMin` Y `kcalIn < kcalMax` Y `hora < 21:00`** → hay margen; si hay
+   un hueco proteico abierto (ver Bloque D) sugiere una toma; si no, "vas bien".
+3. **`protein ≥ proteinMin` Y (`kcalIn ≥ kcalMax−150` O `hora ≥ 21:00`)** → "no
+   necesitas comer más". Cierra con agua si `waterMl < waterTarget`.
+- **Regla transversal:** nunca recomendar restringir más. El riesgo primario de Hugo es
+  **subingesta diurna** (patrón salteo de día + atracón de noche), no sobreingesta.
+
+**Pregunta de entrenamiento — SOLO de noche (`hora ≥ 20:00`):**
+- Antes de las 20:00 **no la muestres**; la recomendación de comida usa el default
+  conservador (sin excepción pre-sueño).
+- A las ≥20:00 muestra dos botones vía **`sendPrompt`**: "Entreno mañana" /
+  "Descanso mañana".
+- Mientras Hugo no responda: recomendación de comida **sin** excepción pre-sueño (no
+  empujar comida nocturna).
+- (La recomendación según la respuesta se entrega en el Bloque B-bis, en el turno
+  siguiente cuando Hugo toque un botón.)
+
+#### Bloque C — barras de macros (carbos, grasas, fibra)
+Tres barras valor/meta + progreso:
+- Carbos `totals.carbs / targets.carbsTarget` — **#7F77DD** (morado).
+- Grasas `totals.fat / targets.fatTarget` — **#D85A30** (naranja).
+- Fibra `totals.fiber / targets.fiberTarget` — **#1D9E75** (teal).
+
+#### Bloque D — timeline proteico del día
+Strip horizontal (eje horas, p. ej. 06:00→24:00). Un punto por cada comida de
+`mealsToday` con `protein > 0`, posicionado por su `time` (o el inferido del `mealSlot`,
+ver Paso D1). Sobre/junto al punto, los g de proteína.
+- **Marca EN ROJO** todo hueco **> 5 h** (umbral FIJO) entre dos tomas proteicas
+  consecutivas, y el hueco entre la última toma y `now` si ya supera 5 h.
+- Si **dos tomas caen en la misma hora** (típico cuando varias se infieren del mismo
+  `mealSlot`), súmalas en un punto (g totales) o sepáralas ~30 min para que las etiquetas
+  no se encimen.
+- Respaldo: Schoenfeld & Aragon 2018 (≥4 tomas, máx 4-5 h entre ingestas).
+
+#### Bloque E — tendencia 7 días (% de meta), interactiva con Chart.js
+Gráfico de líneas con **Chart.js desde cdnjs** (UMD global, p. ej.
+`https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js`). Datos del
+array `trend` del Paso D1 (**NO hardcodear**). Cada punto = **% de la serie contra su
+meta de ESE día** (`trend[i].totals.X / trend[i].targets.Y * 100`):
+- Kcal: `kcalIn / kcalMax` — **#E24B4A**
+- Proteína: `protein / proteinMin` — **#1D9E75**
+- Carbos: `carbs / carbsTarget` — **#7F77DD**
+- Grasas: `fat / fatTarget` — **#BA7517**
+- Fibra: `fiber / fiberTarget` — **#0F6E56**
+- Peso: de `weights[]` (el peso de cada fecha; interpola/omite días sin pesaje) como **%
+  vs objetivo 90 kg** → **#444441**, **línea punteada**.
+
+Reglas del gráfico (ya validadas con Hugo):
+- **Leyenda = botones TOGGLE de selección MÚLTIPLE acumulativa** (no exclusiva): cada
+  toque muestra/oculta SU serie sin afectar las demás. Activas con fondo relleno,
+  apagadas atenuadas.
+- **Línea horizontal de meta 100% EN ROJO `#E24B4A`, gruesa (2px), punteada**, dibujada
+  SOBRE la grilla con un **plugin `afterDraw`**, con etiqueta **"meta 100%"** a la derecha.
+- Canvas con **`role="img"` + `aria-label`** descriptivo. Redondea todo número.
+
+> **Lo que NO va aquí** (es otra pantalla, el check-in semanal del lunes): visceral +
+> cintura con tendencia, y proyección al objetivo 90 kg (tasa real 0.5-0.7%/sem → fecha
+> estimada). NO lo metas en el dashboard diario.
+
+### Bloque B-bis — recomendación según la respuesta de entrenamiento (turno siguiente)
+Cuando Hugo responda **"Entreno mañana"** o **"Descanso mañana"** (botón del Bloque B u
+hora ≥20:00), entrega SIEMPRE una recomendación (entrene o no), en el texto del chat,
+usando `workoutsRecent` para no repetir estímulo:
+
+- **Comida pre-sueño:** si **ENTRENA** mañana → permite UNA toma proteica pre-sueño
+  (~30-40 g sólida/caseína/yogurt), Res 2013. Si **DESCANSA** → mantén "no comer más",
+  cierra con agua si falta.
+- **Si ENTRENA — qué entrenar** con los implementos de Hugo y su carga reciente
+  (`workoutsRecent`; no repetir el mismo estímulo dos días seguidos):
+  - Implementos: Speediance Monster (fuerza + remo), trotadora interior Speediance,
+    bici estática, trote exterior.
+  - Principios: **remo = mayor quema + bajo impacto** (preferido); **bici estática = zona
+    2 principal** (30-40 min); **trote DEPRIORIZADO** al peso ~105 kg (preferir trotadora
+    interior sobre trote exterior). **Palanca principal = extender DURACIÓN del cardio,
+    no agregar días.** Para cardio prolongado sugiere **combos mixtos** que repartan
+    impacto (p. ej. 20 min trotadora + 20 min remo, o bici z2 + remo). Si el último
+    workout fue fuerza → sugiere cardio; si fue cardio → fuerza o combo.
+- **Si DESCANSA — igual da algo útil:** recuperación (cerrar `waterTarget`; toma proteica
+  pre-sueño opcional para no abrir hueco >5 h de noche). Si hay días acumulados sin
+  cardio en `workoutsRecent`, nótalo suave, sin presionar. Mensaje de fondo: el descanso
+  es parte del plan; el objetivo de mañana es **no subingerir de día**, no entrenar a la
+  fuerza.
+
+### Respaldo si no hay render inline disponible
+Si el entorno no puede renderizar HTML inline, cae a un resumen de texto compacto con los
+mismos números (`totals` vs `targets`, `remaining`, distribución proteica) — pero el
+camino normal y preferido es el dashboard.
 
 ---
 
