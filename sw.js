@@ -4,7 +4,7 @@
  * NO interceptamos llamadas a api.anthropic.com.
  */
 
-const CACHE_NAME = 'plan-hugo-v19-agua-chat';
+const CACHE_NAME = 'plan-hugo-v22-reconcilia-extras-bridge';
 const CORE_URLS = [
   './index.html',
   './app.js',
