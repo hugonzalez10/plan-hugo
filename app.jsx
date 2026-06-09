@@ -9747,6 +9747,70 @@ function analyzePlannedDay(planned, targets) {
   };
 }
 
+// VTIMEZONE de America/Santiago. iOS usa el TZID (nombre IANA) contra su propia base; este
+// bloque es fallback para otros parsers. Reglas actuales de Chile continental.
+const VTIMEZONE_SANTIAGO = [
+  'BEGIN:VTIMEZONE', 'TZID:America/Santiago',
+  'BEGIN:DAYLIGHT', 'TZOFFSETFROM:-0400', 'TZOFFSETTO:-0300', 'TZNAME:-03',
+  'DTSTART:19700906T000000', 'RRULE:FREQ=YEARLY;BYMONTH=9;BYDAY=1SA', 'END:DAYLIGHT',
+  'BEGIN:STANDARD', 'TZOFFSETFROM:-0300', 'TZOFFSETTO:-0400', 'TZNAME:-04',
+  'DTSTART:19700405T000000', 'RRULE:FREQ=YEARLY;BYMONTH=4;BYDAY=1SA', 'END:STANDARD',
+  'END:VTIMEZONE',
+];
+
+function icsEscape(s) {
+  return String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n');
+}
+
+// Genera un .ics con un VTODO por toma planificada (DUE a su hora, TZID Santiago, alarma a la
+// hora, macros en la nota, UID único por toma+día para no duplicar al reimportar).
+function buildDayICS(dateKey, planned, targets, nowIso) {
+  const a = analyzePlannedDay(planned, targets);
+  const tomas = a.bySlot.filter((s) => s.hasItems);
+  if (!tomas.length) return null;
+  const ymd = String(dateKey).replace(/-/g, '');
+  const dtstamp = String(nowIso || '1970-01-01T00:00:00Z').replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z').replace(/Z?$/, 'Z');
+  const sum = (arr, k) => arr.reduce((acc, x) => acc + (Number(x[k]) || 0), 0);
+  const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//PlanHugo//ES', 'CALSCALE:GREGORIAN', ...VTIMEZONE_SANTIAGO];
+  for (const t of tomas) {
+    const hhmmss = t.time.replace(':', '') + '00';
+    const names = t.items.map((i) => i.name).join(' + ');
+    const macros = `~${Math.round(t.kcal)} kcal | P ${Math.round(t.protein)} | C ${Math.round(sum(t.items, 'carbs'))} | G ${Math.round(sum(t.items, 'fat'))} | fibra ${Math.round(sum(t.items, 'fiber'))}`;
+    lines.push(
+      'BEGIN:VTODO',
+      `UID:${ymd}-${t.id}@planhugo`,
+      `DTSTAMP:${dtstamp}`,
+      `DUE;TZID=America/Santiago:${ymd}T${hhmmss}`,
+      `SUMMARY:${icsEscape(`${t.label} — ${names}`)}`,
+      `DESCRIPTION:${icsEscape(macros)}`,
+      'BEGIN:VALARM', 'ACTION:DISPLAY', 'TRIGGER:RELATED=START;PT0M', 'DESCRIPTION:Hora de comer', 'END:VALARM',
+      'END:VTODO',
+    );
+  }
+  lines.push('END:VCALENDAR');
+  return lines.join('\r\n');
+}
+
+// Entrega el .ics: hoja de compartir si hay (mejor en iPhone), si no descarga directa.
+async function exportDayICS(dateKey, planned, targets) {
+  const ics = buildDayICS(dateKey, planned, targets, new Date().toISOString());
+  if (!ics) return;
+  const filename = `plan-${dateKey}.ics`;
+  try {
+    const file = new File([ics], filename, { type: 'text/calendar' });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({ files: [file], title: `Plan ${dateKey}` });
+      return;
+    }
+  } catch (e) { /* cancelado o no soportado → descarga */ }
+  const blob = new Blob([ics], { type: 'text/calendar;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const el = document.createElement('a');
+  el.href = url; el.download = filename;
+  document.body.appendChild(el); el.click(); el.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
 function PlanWeekView({ state, setState, targets }) {
   const weekKeys = useMemo(() => getWeekKeys(), []);
   const [picking, setPicking] = useState(null); // dateKey al que se está agregando
@@ -9882,6 +9946,10 @@ function PlanWeekView({ state, setState, targets }) {
                   <span className={txtColor(a.fiberColor)}>Fibra {Math.round(a.totals.fiber)}/{targets.fiberTarget}</span>
                 </div>
                 <p className="text-[10px] text-gray-400 dark:text-gray-500">El ejercicio no abre margen: el techo de kcal es fijo.</p>
+                <button onClick={() => exportDayICS(dk, planned, targets)}
+                  className="w-full mt-1 py-2 rounded-xl border border-gray-300 dark:border-gray-700 text-xs font-semibold hover:bg-gray-50 dark:hover:bg-gray-800">
+                  📅 Exportar a Recordatorios
+                </button>
               </div>
             )}
             {flash === dk && <div className="mx-4 mb-3 text-[11px] text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-900/30 p-1.5 rounded-lg text-center">✓ Pasado a comido</div>}
