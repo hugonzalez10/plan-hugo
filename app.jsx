@@ -1524,7 +1524,12 @@ function mergeBridge(state, bridge) {
   for (const m of bridge.meals) {
     if (m.id == null || removedBridgeIds.has(m.id)) continue;
     const slot = m.mealSlot || 'extra';
-    const d = ensureDay(m.date || todayKey());
+    // La fecha la fija el bridge; si faltara (escritura legacy sin `date`), se deriva del
+    // ts —NUNCA se asume "hoy", o una comida vieja sin fecha reaparecería como extra de
+    // hoy cada día (el bug de divergencia app↔bridge). Sin date ni ts no se puede ubicar.
+    const mealDate = m.date || (m.ts != null ? todayKey(new Date(m.ts)) : null);
+    if (!mealDate) continue;
+    const d = ensureDay(mealDate);
     // NO se corta por importedIds: si el dato está en el bridge pero falta localmente (estado
     // perdido), se reimporta. El freno real es la presencia local (por id o por contenido) y
     // removedBridgeIds (borrados deliberados, ya filtrados arriba).
@@ -1559,7 +1564,9 @@ function mergeBridge(state, bridge) {
   const bridgeMealDates = new Set();
   for (const m of bridge.meals) {
     if (m == null || m.id == null) continue;
-    bridgeMealDates.add(m.date || todayKey());
+    // Mismo criterio que el import: fecha del bridge, o derivada del ts; nunca "hoy" a ciegas.
+    const mealDate = m.date || (m.ts != null ? todayKey(new Date(m.ts)) : null);
+    if (mealDate) bridgeMealDates.add(mealDate);
     if (!removedBridgeIds.has(m.id)) bridgeMealIds.add(m.id);
   }
   for (const dk of bridgeMealDates) {

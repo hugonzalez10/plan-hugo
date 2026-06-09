@@ -378,6 +378,12 @@ function _mergeInto(bridge, payload, day) {
     if (sec === 'meals' || sec === 'workouts') {
       entries = entries.filter(function (e) { return !_hasNegativeNutrient(e); });
     }
+    // Estampa la fecha del día en el ORIGEN si la entrada no la trae. Sin esto, un add
+    // sin `date` (p.ej. una escritura de la skill que olvidó el campo) entraba SIN fecha:
+    // ?totals la ignoraba (filtra por date) pero la app la importaba a `m.date || hoy`,
+    // así que reaparecía como "extra de hoy" cada día y _prune nunca la caducaba
+    // (entradas sin date son inmortales). La fecha resuelta de op:add es `day`.
+    if (day) entries.forEach(function (e) { if (e && !e.date) e.date = day; });
     return _contentUnion(bridge, sec, entries, true);
   }
 

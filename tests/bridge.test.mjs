@@ -146,6 +146,23 @@ test('_mergeInto add: agrega entradas a la sección', () => {
   assert.equal(b.meals.length, 1);
 });
 
+// ── op:add estampa la fecha del día si la entrada no la trae ──────────────────────
+// Sin fecha, ?totals la ignoraba (filtra por date) pero la app la importaba a "hoy" y
+// reaparecía como extra de hoy cada día (_prune no caduca entradas sin date). El servidor
+// la sella con `day` en el origen para que el antipatrón sea imposible.
+test('_mergeInto add: estampa la fecha (day) cuando la entrada no la trae', () => {
+  const b = emptyBridge();
+  const added = _mergeInto(b, { op: 'add', section: 'meals', entries: [{ name: 'Charqui', kcal: 62, protein: 11, ts: 1 }] }, '2026-06-07');
+  assert.equal(added, 1);
+  assert.equal(b.meals[0].date, '2026-06-07');
+});
+
+test('_mergeInto add: NO pisa la fecha que la entrada ya trae', () => {
+  const b = emptyBridge();
+  _mergeInto(b, { op: 'add', section: 'meals', entries: [{ name: 'Pan', date: '2026-06-05', kcal: 80, ts: 1 }] }, '2026-06-09');
+  assert.equal(b.meals[0].date, '2026-06-05');
+});
+
 // ── op:add rechaza valores NEGATIVOS (antipatrón "corrección por neteo") ──────────
 // Una comida/entrenamiento nunca aporta kcal/macros negativos. El bridge los descarta en
 // el origen para forzar la corrección por ?w=delete. Solo en op:add; la unión de bridge
