@@ -1498,6 +1498,19 @@ function postBridgeDelete(settings, section, id) {
 }
 
 // Merge idempotente: ignora ids ya importados (state.bridge.importedIds). Función pura.
+// Día al que pertenece una entrada del bridge. Si trae `date` explícita, manda. Si no, se
+// deriva del `ts` (epoch ms) — NO de "hoy": antes, una comida/agua sin `date` caía en
+// todayKey() y se volcaba en el día actual cada sync, inflando el progreso de hoy. Solo si
+// tampoco hay `ts` (ni fecha) se usa hoy como último recurso.
+function bridgeDateKey(entry) {
+  if (entry && entry.date) return entry.date;
+  if (entry && entry.ts != null) {
+    const d = new Date(Number(entry.ts));
+    if (!Number.isNaN(d.getTime())) return todayKey(d);
+  }
+  return todayKey();
+}
+
 function mergeBridge(state, bridge) {
   const num = (v) => Number(v) || 0;
   const importedIds = new Set((state.bridge?.importedIds) || []);
@@ -1524,7 +1537,7 @@ function mergeBridge(state, bridge) {
   for (const m of bridge.meals) {
     if (m.id == null || removedBridgeIds.has(m.id)) continue;
     const slot = m.mealSlot || 'extra';
-    const d = ensureDay(m.date || todayKey());
+    const d = ensureDay(bridgeDateKey(m));
     // NO se corta por importedIds: si el dato está en el bridge pero falta localmente (estado
     // perdido), se reimporta. El freno real es la presencia local (por id o por contenido) y
     // removedBridgeIds (borrados deliberados, ya filtrados arriba).
@@ -1559,7 +1572,7 @@ function mergeBridge(state, bridge) {
   const bridgeMealDates = new Set();
   for (const m of bridge.meals) {
     if (m == null || m.id == null) continue;
-    bridgeMealDates.add(m.date || todayKey());
+    bridgeMealDates.add(bridgeDateKey(m));
     if (!removedBridgeIds.has(m.id)) bridgeMealIds.add(m.id);
   }
   for (const dk of bridgeMealDates) {
@@ -1571,7 +1584,7 @@ function mergeBridge(state, bridge) {
 
   for (const w of bridge.workouts) {
     if (w.id == null || removedBridgeIds.has(w.id)) continue;
-    const d = ensureDay(w.date || todayKey());
+    const d = ensureDay(bridgeDateKey(w));
     // No se corta por importedIds (ver meals): reimporta si falta localmente.
     if (d.exercise.some((x) => x.id === w.id)) { importedIds.add(w.id); continue; }
     // Dedup por contenido+ventana (nombre normalizado dentro del día): absorbe el eco del
@@ -1588,7 +1601,7 @@ function mergeBridge(state, bridge) {
 
   for (const wt of bridge.weights) {
     if (wt.id == null || removedBridgeIds.has(wt.id)) continue;
-    const date = wt.date || todayKey();
+    const date = bridgeDateKey(wt);
     const idx = weights.findIndex((x) => x.date === date);
     if (idx >= 0) {
       // Ya hay medición local de ese día (dedup por fecha). Enriquecer campos UNA sola vez:
@@ -1634,7 +1647,7 @@ function mergeBridge(state, bridge) {
   if (Array.isArray(bridge.water)) {
     for (const wd of bridge.water) {
       if (wd == null || wd.id == null || removedBridgeIds.has(wd.id) || importedIds.has(wd.id)) continue;
-      const d = ensureDay(wd.date || todayKey());
+      const d = ensureDay(bridgeDateKey(wd));
       const cur = d.water || { ml: 0 };
       d.water = { ...cur, bridgeMl: (Number(cur.bridgeMl) || 0) + (Number(wd.ml) || 0) };
       importedIds.add(wd.id); added.water++;
@@ -1649,8 +1662,11 @@ function mergeBridge(state, bridge) {
     for (const c of bridge.checks) {
       if (c == null || c.id == null || importedIds.has(c.id)) continue;
       if (!FIXED_MEAL_SLOTS.has(c.meal)) continue;
-      const d = ensureDay(c.date || todayKey());
-      d.eaten = { ...(d.eaten || {}), [c.meal]: true };
+      const d = ensureDay(bridgeDateKey(c));
+      // Si esa sección ya tiene un registro real del chat, NO marcar el fijo como comido:
+      // el extra es la comida y marcar el plan sumaría kcal fantasma (ver computeDayTotals).
+      const alreadyLogged = (d.extras || []).some((x) => extraPlanSlot(x) === c.meal);
+      if (!alreadyLogged) d.eaten = { ...(d.eaten || {}), [c.meal]: true };
       importedIds.add(c.id); added.checks++;
     }
   }
@@ -1706,9 +1722,19 @@ function computeDayTotals(day, snackBank, proteinBank, targets, dessertBank, cus
   const dBank = dessertBank || [];
   const customAntojo = customAntojoItems || [];
   const e = day?.eaten || {};
+  const extras = day?.extras || [];
+
+  // Secciones del plan que YA tienen un registro real del chat (skill-chat). Cuando
+  // existe, ese extra ES la comida de la sección, así que se suprime el plan/banco de
+  // esa sección para no doble-contar: un check de "desayuno" del bridge + el yogur
+  // registrado por chat sumaban el desayuno fijo fantasma (325 kcal / 24 g P). El log del
+  // chat manda sobre el plan sugerido. Ver extraPlanSlot y el handler de checks en mergeBridge.
+  const loggedSlots = new Set();
+  for (const x of extras) { const s = extraPlanSlot(x); if (s) loggedSlots.add(s); }
 
   const eatenFixedItems = [];
   for (const meal of FIXED_MEALS) {
+    if (loggedSlots.has(meal.id)) continue;
     const items = mealItemsFor(meal, customAntojo);
     const ticks = getMealItemTicks(day, meal, customAntojo);
     for (const item of items) {
@@ -1720,12 +1746,11 @@ function computeDayTotals(day, snackBank, proteinBank, targets, dessertBank, cus
   const dinner = day?.proteinId ? proteinBank.find((p) => p.id === day.proteinId) : null;
   const dessertA = day?.dessertAlmuerzoId ? dBank.find((d) => d.id === day.dessertAlmuerzoId) : null;
   const dessertC = day?.dessertCenaId ? dBank.find((d) => d.id === day.dessertCenaId) : null;
-  const snackEaten = snack && e.colacion ? [snack] : [];
-  const dinnerEaten = dinner && e.cena ? [dinner] : [];
+  const snackEaten = snack && e.colacion && !loggedSlots.has('colacion') ? [snack] : [];
+  const dinnerEaten = dinner && e.cena && !loggedSlots.has('cena') ? [dinner] : [];
   const dessertAEaten = dessertA && e.dessertAlmuerzo ? [dessertA] : [];
   const dessertCEaten = dessertC && e.dessertCena ? [dessertC] : [];
 
-  const extras = day?.extras || [];
   const exercise = day?.exercise || [];
   // Porción del PLAN (fijos + banco): lo que NO se empuja a meals[] del bridge. Los extras
   // y el ejercicio sí van a meals[]/workouts[], así que el snapshot debe llevar solo esto
@@ -1780,6 +1805,27 @@ const PLAN_SLOTS = new Set(['desayuno', 'almuerzo', 'colacion', 'cena', 'antojo'
 function extraSlotBucket(x) {
   const s = x?.mealSlot;
   return PLAN_SLOTS.has(s) ? s : 'extra';
+}
+
+// Prefijos con que la skill nombra un reemplazo de comida del plan ("Desayuno - ...",
+// "Colacion 1 - ...", "Cena - ..."). Para registros viejos del chat SIN mealSlot,
+// inferimos el slot por ese prefijo. DEBE coincidir con SLOT_NAME_RE_GS de bridge-writer.gs.
+const SLOT_NAME_RE = {
+  desayuno: /^desayuno\b/i,
+  almuerzo: /^almuerzo\b/i,
+  colacion: /^colaci[oó]n/i,
+  cena: /^cena\b/i,
+  antojo: /^antojo\b/i,
+};
+// La sección del plan que un extra REEMPLAZA, o null si es un extra genuino (suma aparte).
+// Prefiere mealSlot (lo que ahora etiqueta la skill); cae al nombre solo para skill-chat.
+// Cuando devuelve un slot, computeDayTotals suprime el plan/banco de esa sección.
+function extraPlanSlot(x) {
+  if (PLAN_SLOTS.has(x?.mealSlot)) return x.mealSlot;
+  if (x?.source === 'skill-chat' && x?.name) {
+    for (const slot of PLAN_SLOTS) if (SLOT_NAME_RE[slot].test(x.name)) return slot;
+  }
+  return null;
 }
 
 // ---------- Reglas personales ----------
@@ -8939,6 +8985,158 @@ function occasionToPromptKey(id) {
   return id === 'colacion' ? 'snack' : id;
 }
 
+// Formulario manual de receta (crear/editar) — NO usa IA ni API key. Espejo del patrón de
+// BankItemForm para los macros, más listas editables de ingredientes y pasos. onSave recibe
+// el objeto receta (con id+createdAt si venía de `initial`, para que IdeaView decida
+// crear vs actualizar).
+function RecipeForm({ initial, onSave, onCancel }) {
+  const [name, setName] = useState(initial?.name || '');
+  const [occasion, setOccasion] = useState(initial?.occasion === 'snack' ? 'colacion' : (initial?.occasion || autoDetectOccasion()));
+  const [prepMinutes, setPrepMinutes] = useState(initial?.prepMinutes ?? '');
+  const [ingredients, setIngredients] = useState(
+    (initial?.ingredients?.length ? initial.ingredients : [{ name: '', portion: '' }]).map((it) => ({ name: it.name || '', portion: it.portion || '' }))
+  );
+  const [steps, setSteps] = useState(initial?.steps?.length ? [...initial.steps] : ['']);
+  const [kcal, setKcal] = useState(initial?.totals?.kcal ?? '');
+  const [protein, setProtein] = useState(initial?.totals?.protein ?? '');
+  const [carbs, setCarbs] = useState(initial?.totals?.carbs ?? '');
+  const [fat, setFat] = useState(initial?.totals?.fat ?? '');
+  const [fiber, setFiber] = useState(initial?.totals?.fiber ?? '');
+  const [error, setError] = useState(null);
+
+  const setIng = (i, field, val) => setIngredients((prev) => prev.map((it, idx) => idx === i ? { ...it, [field]: val } : it));
+  const addIng = () => setIngredients((prev) => [...prev, { name: '', portion: '' }]);
+  const rmIng = (i) => setIngredients((prev) => prev.length > 1 ? prev.filter((_, idx) => idx !== i) : prev);
+  const setStep = (i, val) => setSteps((prev) => prev.map((s, idx) => idx === i ? val : s));
+  const addStep = () => setSteps((prev) => [...prev, '']);
+  const rmStep = (i) => setSteps((prev) => prev.length > 1 ? prev.filter((_, idx) => idx !== i) : prev);
+
+  const submit = (e) => {
+    e.preventDefault();
+    if (!name.trim()) { setError('Escribe el nombre de la receta.'); return; }
+    const k = Number(kcal);
+    if (!Number.isFinite(k) || k < 0) { setError('Las calorías deben ser un número ≥ 0.'); return; }
+    const numOrZero = (v) => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : 0; };
+    const recipe = {
+      ...(initial || {}),
+      name: name.trim(),
+      occasion: occasionToPromptKey(occasion),
+      prepMinutes: Math.max(0, Math.round(Number(prepMinutes) || 0)),
+      confidence: 'alta',
+      ingredients: ingredients
+        .map((it) => ({ name: (it.name || '').trim(), portion: (it.portion || '').trim(), optional: false }))
+        .filter((it) => it.name),
+      steps: steps.map((s) => (s || '').trim()).filter(Boolean),
+      totals: { kcal: Math.round(k), protein: numOrZero(protein), carbs: numOrZero(carbs), fat: numOrZero(fat), fiber: numOrZero(fiber) },
+      why: initial?.why || '',
+      source: 'manual',
+    };
+    onSave(recipe);
+  };
+
+  const inputCls = 'mt-1 w-full px-3 py-2.5 rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-emerald-500';
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 p-4 overflow-y-auto">
+      <form onSubmit={submit} className="w-full max-w-md bg-white dark:bg-gray-900 rounded-2xl shadow-xl border border-gray-200 dark:border-gray-800 p-5 space-y-4 my-4 max-h-[92vh] overflow-y-auto">
+        <h2 className="text-lg font-bold">{initial ? 'Editar receta' : 'Nueva receta a mano'}</h2>
+
+        <label className="block">
+          <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Nombre</span>
+          <input type="text" value={name} onChange={(e) => setName(e.target.value)}
+            className={inputCls} placeholder="Ej. Bowl de pollo y quinoa" autoFocus />
+        </label>
+
+        <div>
+          <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Ocasión</span>
+          <div className="mt-1 grid grid-cols-4 gap-1.5">
+            {IDEA_OCCASIONS.map((o) => (
+              <button type="button" key={o.id} onClick={() => setOccasion(o.id)}
+                className={`py-2 rounded-xl border-2 text-[11px] font-semibold ${
+                  occasion === o.id ? 'border-emerald-500 bg-emerald-50 dark:bg-emerald-900/20' : 'border-gray-200 dark:border-gray-700'
+                }`}>
+                <div className="text-base">{o.emoji}</div>
+                <div>{o.label}</div>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Ingredientes</span>
+            <button type="button" onClick={addIng} className="text-xs font-semibold text-emerald-600 dark:text-emerald-400">+ Agregar</button>
+          </div>
+          <div className="space-y-1.5">
+            {ingredients.map((it, i) => (
+              <div key={i} className="flex gap-1.5">
+                <input type="text" value={it.name} onChange={(e) => setIng(i, 'name', e.target.value)}
+                  className="flex-1 px-2.5 py-2 rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500" placeholder="Ingrediente" />
+                <input type="text" value={it.portion} onChange={(e) => setIng(i, 'portion', e.target.value)}
+                  className="w-24 px-2.5 py-2 rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500" placeholder="Porción" />
+                <button type="button" onClick={() => rmIng(i)} className="px-2 text-gray-400 hover:text-rose-500" aria-label="Quitar">✕</button>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Pasos (opcional)</span>
+            <button type="button" onClick={addStep} className="text-xs font-semibold text-emerald-600 dark:text-emerald-400">+ Agregar</button>
+          </div>
+          <div className="space-y-1.5">
+            {steps.map((s, i) => (
+              <div key={i} className="flex gap-1.5 items-start">
+                <span className="shrink-0 w-5 h-9 flex items-center justify-center text-xs font-bold text-emerald-600 dark:text-emerald-400">{i + 1}.</span>
+                <input type="text" value={s} onChange={(e) => setStep(i, e.target.value)}
+                  className="flex-1 px-2.5 py-2 rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500" placeholder={`Paso ${i + 1}`} />
+                <button type="button" onClick={() => rmStep(i)} className="px-2 py-2 text-gray-400 hover:text-rose-500" aria-label="Quitar">✕</button>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <label className="block">
+            <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Calorías (kcal)</span>
+            <input type="number" inputMode="numeric" value={kcal} onChange={(e) => setKcal(e.target.value)} className={inputCls} min="0" />
+          </label>
+          <label className="block">
+            <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Proteína (g)</span>
+            <input type="number" inputMode="numeric" value={protein} onChange={(e) => setProtein(e.target.value)} className={inputCls} min="0" />
+          </label>
+        </div>
+        <div className="grid grid-cols-4 gap-2">
+          <label className="block">
+            <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Carbos</span>
+            <input type="number" inputMode="decimal" value={carbs} onChange={(e) => setCarbs(e.target.value)} className={inputCls} min="0" />
+          </label>
+          <label className="block">
+            <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Grasas</span>
+            <input type="number" inputMode="decimal" value={fat} onChange={(e) => setFat(e.target.value)} className={inputCls} min="0" />
+          </label>
+          <label className="block">
+            <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Fibra</span>
+            <input type="number" inputMode="decimal" step="0.1" value={fiber} onChange={(e) => setFiber(e.target.value)} className={inputCls} min="0" />
+          </label>
+          <label className="block">
+            <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Min</span>
+            <input type="number" inputMode="numeric" value={prepMinutes} onChange={(e) => setPrepMinutes(e.target.value)} className={inputCls} min="0" />
+          </label>
+        </div>
+
+        {error && <p className="text-xs text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-900/30 p-2 rounded-lg">{error}</p>}
+
+        <div className="grid grid-cols-2 gap-2 pt-1">
+          <button type="button" onClick={onCancel} className="py-2.5 rounded-xl border border-gray-300 dark:border-gray-700 font-medium text-sm">Cancelar</button>
+          <button type="submit" className="py-2.5 rounded-xl bg-emerald-500 text-white font-semibold text-sm hover:bg-emerald-600">💾 Guardar</button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 function IdeaView({ state, setState, targets }) {
   const [mode, setMode] = useState('new');
   const [attachments, setAttachments] = useState([]);
@@ -8951,9 +9149,41 @@ function IdeaView({ state, setState, targets }) {
   const [savedFlash, setSavedFlash] = useState(false);
   const [addedFlash, setAddedFlash] = useState(false);
   const [expandedId, setExpandedId] = useState(null);
+  const [formOpen, setFormOpen] = useState(false);
+  const [formInitial, setFormInitial] = useState(null);
 
   const apiKey = state.settings?.anthropicApiKey;
   const recipeBank = state.recipeBank || [];
+  // Favoritas primero, luego por fecha de creación (más nueva arriba).
+  const sortedRecipes = [...recipeBank].sort((a, b) =>
+    (b.favorite ? 1 : 0) - (a.favorite ? 1 : 0) ||
+    (new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
+  );
+
+  const openCreateManual = () => { setFormInitial(null); setFormOpen(true); };
+  const openEditRecipe = (r) => { setFormInitial(r); setFormOpen(true); };
+
+  const handleSaveManual = (data) => {
+    setState((prev) => {
+      const bank = prev.recipeBank || [];
+      if (data.id && bank.some((r) => r.id === data.id)) {
+        return { ...prev, recipeBank: bank.map((r) => r.id === data.id ? { ...r, ...data } : r) };
+      }
+      const entry = { ...data, id: uuid(), createdAt: new Date().toISOString() };
+      return { ...prev, recipeBank: [entry, ...bank] };
+    });
+    setFormOpen(false); setFormInitial(null);
+    setMode('saved');
+    setSavedFlash(true);
+    setTimeout(() => setSavedFlash(false), 1800);
+  };
+
+  const handleToggleFavorite = (id) => {
+    setState((prev) => ({
+      ...prev,
+      recipeBank: (prev.recipeBank || []).map((r) => r.id === id ? { ...r, favorite: !r.favorite } : r),
+    }));
+  };
 
   const handleFiles = async (e) => {
     const files = Array.from(e.target.files || []);
@@ -9166,9 +9396,17 @@ function IdeaView({ state, setState, targets }) {
 
           {!apiKey && (
             <p className="text-xs text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/30 p-2 rounded-lg">
-              ⚠️ Configura tu API key en ⚙️ Ajustes para usar esta sección.
+              ⚠️ La generación con IA necesita tu API key en ⚙️ Ajustes. Igual puedes crear recetas a mano.
             </p>
           )}
+
+          <div className="flex items-center gap-2 text-[11px] text-gray-400">
+            <div className="flex-1 h-px bg-gray-200 dark:bg-gray-700" /> o <div className="flex-1 h-px bg-gray-200 dark:bg-gray-700" />
+          </div>
+          <button onClick={openCreateManual}
+            className="w-full py-3 rounded-xl border-2 border-emerald-500 text-emerald-600 dark:text-emerald-400 font-semibold hover:bg-emerald-50 dark:hover:bg-emerald-900/20">
+            ✍️ Crear receta a mano (sin IA)
+          </button>
 
           {error && <p className="text-xs text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-900/30 p-2 rounded-lg">{error}</p>}
         </>
@@ -9266,64 +9504,88 @@ function IdeaView({ state, setState, targets }) {
 
       {mode === 'saved' && (
         <div className="space-y-3">
+          <button onClick={openCreateManual}
+            className="w-full py-3 rounded-xl border-2 border-emerald-500 text-emerald-600 dark:text-emerald-400 font-semibold hover:bg-emerald-50 dark:hover:bg-emerald-900/20">
+            ✍️ Crear receta a mano
+          </button>
+          {(savedFlash || addedFlash) && (
+            <div className="text-xs text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-900/30 p-2 rounded-lg text-center">
+              {savedFlash ? '💾 Guardada en Mis recetas' : '➕ Agregada al día de hoy'}
+            </div>
+          )}
           {recipeBank.length === 0 && (
             <div className="text-center py-12 text-sm text-gray-500 dark:text-gray-400">
               <div className="text-4xl mb-2">📒</div>
               <p>Aún no guardas recetas.</p>
-              <p className="text-xs mt-1">Genera una en "Nueva" y dale 💾 Guardar.</p>
+              <p className="text-xs mt-1">Créala a mano arriba o genérala con IA en "Nueva".</p>
             </div>
           )}
-          {recipeBank.map((r) => {
+          {sortedRecipes.map((r) => {
             const expanded = expandedId === r.id;
             return (
               <div key={r.id} className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 overflow-hidden">
-                <button onClick={() => setExpandedId(expanded ? null : r.id)}
-                  className="w-full px-4 py-3 flex items-center justify-between gap-2 text-left">
-                  <div className="min-w-0 flex-1">
+                <div className="px-3 py-3 flex items-center gap-2">
+                  <button onClick={() => handleToggleFavorite(r.id)}
+                    className={`shrink-0 text-lg leading-none ${r.favorite ? 'opacity-100' : 'opacity-30 grayscale'}`}
+                    aria-label={r.favorite ? 'Quitar de favoritas' : 'Marcar favorita'}>⭐</button>
+                  <button onClick={() => setExpandedId(expanded ? null : r.id)}
+                    className="min-w-0 flex-1 text-left">
                     <div className="font-semibold text-sm truncate">{r.name}</div>
                     <div className="text-[11px] text-gray-500 dark:text-gray-400 mt-0.5">
                       {(IDEA_OCCASIONS.find(o => o.id === (r.occasion === 'snack' ? 'colacion' : r.occasion))?.label) || r.occasion}
                       {' · '}{r.totals?.kcal || 0} kcal · P{r.totals?.protein || 0}g
                       {r.prepMinutes > 0 ? ` · ${r.prepMinutes} min` : ''}
                     </div>
-                  </div>
-                  <span className="text-gray-400 text-sm">{expanded ? '▾' : '▸'}</span>
-                </button>
+                  </button>
+                  <button onClick={() => handleAddToDay(r)}
+                    className="shrink-0 px-3 py-1.5 rounded-full bg-emerald-500 text-white font-semibold text-xs hover:bg-emerald-600"
+                    aria-label="Registrar al día de hoy">➕ Hoy</button>
+                  <button onClick={() => setExpandedId(expanded ? null : r.id)}
+                    className="shrink-0 text-gray-400 text-sm w-4">{expanded ? '▾' : '▸'}</button>
+                </div>
                 {expanded && (
                   <div className="px-4 pb-4 space-y-3 border-t border-gray-100 dark:border-gray-800 pt-3">
                     {r.why && (
                       <p className="text-xs text-gray-600 dark:text-gray-400 italic">{r.why}</p>
                     )}
-                    <div>
-                      <div className="text-[10px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1">Ingredientes</div>
-                      <ul className="space-y-0.5">
-                        {(r.ingredients || []).map((it, i) => (
-                          <li key={i} className="flex items-baseline gap-2 text-xs">
-                            <span className="shrink-0 w-4">{it.optional ? '➕' : '✅'}</span>
-                            <span>{it.name}{it.portion ? ` — ${it.portion}` : ''}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                    <div>
-                      <div className="text-[10px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1">Pasos</div>
-                      <ol className="space-y-1">
-                        {(r.steps || []).map((s, i) => (
-                          <li key={i} className="flex gap-1.5 text-xs">
-                            <span className="shrink-0 font-bold text-emerald-600 dark:text-emerald-400">{i + 1}.</span>
-                            <span>{s}</span>
-                          </li>
-                        ))}
-                      </ol>
-                    </div>
-                    <div className="grid grid-cols-2 gap-2 pt-1">
+                    {(r.ingredients || []).length > 0 && (
+                      <div>
+                        <div className="text-[10px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1">Ingredientes</div>
+                        <ul className="space-y-0.5">
+                          {(r.ingredients || []).map((it, i) => (
+                            <li key={i} className="flex items-baseline gap-2 text-xs">
+                              <span className="shrink-0 w-4">{it.optional ? '➕' : '✅'}</span>
+                              <span>{it.name}{it.portion ? ` — ${it.portion}` : ''}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    {(r.steps || []).length > 0 && (
+                      <div>
+                        <div className="text-[10px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1">Pasos</div>
+                        <ol className="space-y-1">
+                          {(r.steps || []).map((s, i) => (
+                            <li key={i} className="flex gap-1.5 text-xs">
+                              <span className="shrink-0 font-bold text-emerald-600 dark:text-emerald-400">{i + 1}.</span>
+                              <span>{s}</span>
+                            </li>
+                          ))}
+                        </ol>
+                      </div>
+                    )}
+                    <div className="grid grid-cols-3 gap-2 pt-1">
                       <button onClick={() => handleAddToDay(r)}
                         className="py-2 rounded-xl bg-emerald-500 text-white font-semibold text-xs hover:bg-emerald-600">
-                        ➕ Agregar al día
+                        ➕ Hoy
+                      </button>
+                      <button onClick={() => openEditRecipe(r)}
+                        className="py-2 rounded-xl border border-gray-300 dark:border-gray-700 font-semibold text-xs">
+                        ✏️ Editar
                       </button>
                       <button onClick={() => handleDeleteRecipe(r.id)}
                         className="py-2 rounded-xl border border-rose-300 dark:border-rose-700 text-rose-600 dark:text-rose-300 font-semibold text-xs">
-                        🗑️ Eliminar
+                        🗑️ Borrar
                       </button>
                     </div>
                   </div>
@@ -9331,12 +9593,13 @@ function IdeaView({ state, setState, targets }) {
               </div>
             );
           })}
-          {addedFlash && (
-            <div className="text-xs text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-900/30 p-2 rounded-lg text-center">
-              ➕ Agregada al día de hoy
-            </div>
-          )}
         </div>
+      )}
+
+      {formOpen && (
+        <RecipeForm initial={formInitial}
+          onSave={handleSaveManual}
+          onCancel={() => { setFormOpen(false); setFormInitial(null); }} />
       )}
     </div>
   );
