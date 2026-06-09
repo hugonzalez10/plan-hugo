@@ -9636,7 +9636,7 @@ function IdeaView({ state, setState, targets }) {
 // Picker de items para el planificador semanal. Fuentes: recetas y bancos (NO las comidas
 // fijas: esas ya se aplican solas cada día, ofrecerlas aquí confunde). onPick(item) recibe
 // { name, kcal, protein, carbs, fat, fiber, mealSlot? }.
-function PlanPickerModal({ state, onPick, onClose }) {
+function PlanPickerModal({ state, onPick, onClose, slotLabel }) {
   const [q, setQ] = useState('');
   const recipes = (state.recipeBank || []).map((r) => ({
     name: r.name, kcal: r.totals?.kcal || 0, protein: r.totals?.protein || 0,
@@ -9662,7 +9662,7 @@ function PlanPickerModal({ state, onPick, onClose }) {
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 p-4 overflow-y-auto">
       <div className="w-full max-w-md bg-white dark:bg-gray-900 rounded-2xl shadow-xl border border-gray-200 dark:border-gray-800 p-4 space-y-3 my-4 max-h-[88vh] flex flex-col">
         <div className="flex items-center justify-between">
-          <h2 className="text-base font-bold">Agregar al plan</h2>
+          <h2 className="text-base font-bold">Agregar{slotLabel ? ` · ${slotLabel}` : ' al plan'}</h2>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-lg" aria-label="Cerrar">✕</button>
         </div>
         <input type="text" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Buscar…"
@@ -9689,6 +9689,64 @@ function PlanPickerModal({ state, onPick, onClose }) {
   );
 }
 
+// Las 5 tomas del método (anclar fijo → repartir en tomas). Cada toma tiene hora canónica
+// para detectar brechas >5h, y `eat` = el mealSlot real de la app al pasar a comido.
+const PLAN_TOMAS = [
+  { id: 'desayuno',  label: 'Desayuno',   time: '08:30', eat: 'desayuno' },
+  { id: 'colacion1', label: 'Colación AM', time: '11:00', eat: 'colacion' },
+  { id: 'almuerzo',  label: 'Almuerzo',    time: '14:00', eat: 'almuerzo' },
+  { id: 'colacion2', label: 'Colación PM', time: '18:00', eat: 'colacion' },
+  { id: 'cena',      label: 'Cena',        time: '21:00', eat: 'cena' },
+];
+const MIN_PROTEIN_TOMA = 36; // g — umbral de estímulo MPS por toma (Schoenfeld & Aragon 2018)
+const MAX_GAP_HOURS = 5;     // h — máximo entre tomas con proteína
+
+function hhmmToMin(t) { const [h, m] = String(t || '0:0').split(':').map(Number); return (h || 0) * 60 + (m || 0); }
+
+// Analiza un día planificado contra el método: totales, desglose por toma con badge ≥36g,
+// brecha temporal >5h, y restante hacia las metas (la "brújula" del armado). Función pura.
+function analyzePlannedDay(planned, targets) {
+  const T = targets || DEFAULT_TARGETS;
+  const items = Array.isArray(planned) ? planned : [];
+  const slotIds = new Set(PLAN_TOMAS.map((s) => s.id));
+  const slotOf = (x) => (x && slotIds.has(x.planSlot)) ? x.planSlot : 'otros';
+  const sum = (arr, k) => arr.reduce((a, x) => a + (Number(x[k]) || 0), 0);
+
+  const totals = {
+    kcal: sum(items, 'kcal'), protein: sum(items, 'protein'),
+    carbs: sum(items, 'carbs'), fat: sum(items, 'fat'), fiber: sum(items, 'fiber'),
+  };
+  const bySlot = PLAN_TOMAS.map((s) => {
+    const its = items.filter((x) => slotOf(x) === s.id);
+    const protein = sum(its, 'protein');
+    return { ...s, items: its, protein, kcal: sum(its, 'kcal'),
+      hasItems: its.length > 0, lowProtein: its.length > 0 && protein < MIN_PROTEIN_TOMA };
+  });
+  const otros = items.filter((x) => slotOf(x) === 'otros');
+
+  // Brecha: primera distancia >5h entre tomas consecutivas que tienen proteína.
+  const active = bySlot.filter((s) => s.hasItems && s.protein > 0);
+  let gapWarn = null;
+  for (let i = 1; i < active.length; i++) {
+    const dh = (hhmmToMin(active[i].time) - hhmmToMin(active[i - 1].time)) / 60;
+    if (dh > MAX_GAP_HOURS) { gapWarn = { from: active[i - 1].label, to: active[i].label, hours: dh }; break; }
+  }
+
+  const fiberColor = !items.length ? null
+    : totals.fiber >= T.fiberTarget ? 'green'
+    : totals.fiber >= T.fiberTarget * 0.8 ? 'amber' : 'red';
+
+  return {
+    totals, bySlot, otros, gapWarn,
+    remainingProtein: Math.max(0, Math.round((T.proteinMin || 0) - totals.protein)),
+    remainingKcal: Math.round((T.kcalMax || 0) - totals.kcal),
+    kcalColor: items.length ? colorForKcal(totals.kcal, T) : null,
+    proteinColor: items.length ? colorForProtein(totals.protein, T) : null,
+    fiberColor,
+    hasItems: items.length > 0,
+  };
+}
+
 function PlanWeekView({ state, setState, targets }) {
   const weekKeys = useMemo(() => getWeekKeys(), []);
   const [picking, setPicking] = useState(null); // dateKey al que se está agregando
@@ -9698,7 +9756,7 @@ function PlanWeekView({ state, setState, targets }) {
   const dotColor = (c) => c === 'red' ? 'bg-rose-500' : c === 'amber' ? 'bg-amber-500' : 'bg-emerald-500';
   const txtColor = (c) => c === 'red' ? 'text-rose-600 dark:text-rose-400' : c === 'amber' ? 'text-amber-600 dark:text-amber-400' : 'text-emerald-600 dark:text-emerald-400';
 
-  const addPlanned = (dk, item) => {
+  const addPlanned = (dk, slot, item) => {
     setState((prev) => {
       const d = { ...((prev.days || {})[dk] || {}) };
       const planned = Array.isArray(d.plannedMeals) ? [...d.plannedMeals] : [];
@@ -9706,7 +9764,7 @@ function PlanWeekView({ state, setState, targets }) {
         id: uuid(), name: item.name,
         kcal: Number(item.kcal) || 0, protein: Number(item.protein) || 0,
         carbs: Number(item.carbs) || 0, fat: Number(item.fat) || 0, fiber: Number(item.fiber) || 0,
-        mealSlot: item.mealSlot || 'extra',
+        planSlot: slot,
       });
       d.plannedMeals = planned;
       return { ...prev, days: { ...(prev.days || {}), [dk]: d } };
@@ -9721,72 +9779,110 @@ function PlanWeekView({ state, setState, targets }) {
     });
   };
 
-  // Convierte un planificado en comida real (extra) del día y lo saca del plan.
+  // Convierte un planificado en comida real (extra) del día y lo saca del plan. El planSlot
+  // del método (colacion1/colacion2/…) se mapea al mealSlot real de la app.
   const eatPlanned = (dk, item) => {
+    const slotDef = PLAN_TOMAS.find((s) => s.id === item.planSlot);
+    const eatSlot = slotDef ? slotDef.eat : 'extra';
     setState((prev) => {
       const d = { ...((prev.days || {})[dk] || {}) };
       const extras = Array.isArray(d.extras) ? [...d.extras] : [];
       extras.push({
         id: uuid(), ts: Date.now(), name: item.name,
         kcal: item.kcal, protein: item.protein, carbs: item.carbs, fat: item.fat, fiber: item.fiber,
-        mealSlot: item.mealSlot || 'extra', source: 'plan',
+        mealSlot: eatSlot, source: 'plan',
       });
       d.extras = extras;
       d.plannedMeals = (d.plannedMeals || []).filter((x) => x.id !== item.id);
-      if (item.mealSlot && item.mealSlot !== 'extra') d.eaten = { ...(d.eaten || {}), [item.mealSlot]: true };
+      if (eatSlot !== 'extra') d.eaten = { ...(d.eaten || {}), [eatSlot]: true };
       return { ...prev, days: { ...(prev.days || {}), [dk]: d } };
     });
     setFlash(dk); setTimeout(() => setFlash(null), 1500);
   };
 
+  const ItemRow = ({ dk, x }) => (
+    <li className="flex items-center gap-2 px-1 py-1">
+      <span className="flex-1 min-w-0">
+        <span className="text-sm truncate block">{x.name}</span>
+        <span className="text-[11px] text-gray-500 dark:text-gray-400">{Math.round(x.kcal)} kcal · P{Math.round(x.protein)}</span>
+      </span>
+      <button onClick={() => eatPlanned(dk, x)}
+        className="shrink-0 px-2.5 py-1 rounded-full bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300 font-semibold text-[11px]">✓ Comí</button>
+      <button onClick={() => removePlanned(dk, x.id)}
+        className="shrink-0 text-gray-400 hover:text-rose-500 px-1" aria-label="Quitar del plan">✕</button>
+    </li>
+  );
+
   return (
     <div className="px-4 py-4 space-y-4 max-w-md mx-auto">
       <div className="px-1">
         <h1 className="text-2xl font-bold tracking-tight">Planificar la semana</h1>
-        <p className="text-sm text-gray-500 dark:text-gray-400">Arma lo que vas a comer y mira la proyección contra tus metas. Lo planificado no cuenta hasta que marcas “Comí”.</p>
+        <p className="text-sm text-gray-500 dark:text-gray-400">Reparte la proteína en tomas (≥{MIN_PROTEIN_TOMA}g c/u, sin brechas &gt;{MAX_GAP_HOURS}h). Lo planificado no cuenta hasta que marcas “Comí”.</p>
       </div>
       {weekKeys.map((dk) => {
         const day = days[dk] || {};
         const planned = day.plannedMeals || [];
-        const tot = planned.reduce((s, x) => ({
-          kcal: s.kcal + (Number(x.kcal) || 0), protein: s.protein + (Number(x.protein) || 0),
-        }), { kcal: 0, protein: 0 });
+        const a = analyzePlannedDay(planned, targets);
         const dd = new Date(dk + 'T12:00:00');
         const isToday = dk === todayKey();
-        const kc = planned.length ? colorForKcal(tot.kcal, targets) : null;
-        const pc = planned.length ? colorForProtein(tot.protein, targets) : null;
         return (
           <div key={dk} className={`rounded-2xl border bg-white dark:bg-gray-900 overflow-hidden ${isToday ? 'border-emerald-400 dark:border-emerald-600' : 'border-gray-200 dark:border-gray-800'}`}>
             <div className="flex items-center justify-between px-4 pt-3 pb-2">
-              <div>
-                <div className={`font-semibold text-sm ${isToday ? 'text-emerald-600 dark:text-emerald-400' : ''}`}>{DAY_SHORT[dd.getDay()]} {dd.getDate()}/{dd.getMonth() + 1}{isToday ? ' · hoy' : ''}</div>
-                {planned.length > 0 && (
-                  <div className="text-[11px] mt-0.5 flex items-center gap-2">
-                    <span className="flex items-center gap-1"><span className={`w-1.5 h-1.5 rounded-full ${dotColor(kc)}`} /><span className={txtColor(kc)}>{Math.round(tot.kcal)}</span><span className="text-gray-400">/{targets.kcalMax} kcal</span></span>
-                    <span className="flex items-center gap-1"><span className={`w-1.5 h-1.5 rounded-full ${dotColor(pc)}`} /><span className={txtColor(pc)}>{Math.round(tot.protein)}</span><span className="text-gray-400">/{targets.proteinMin}g P</span></span>
+              <div className={`font-semibold text-sm ${isToday ? 'text-emerald-600 dark:text-emerald-400' : ''}`}>{DAY_SHORT[dd.getDay()]} {dd.getDate()}/{dd.getMonth() + 1}{isToday ? ' · hoy' : ''}</div>
+              {a.hasItems && (
+                <div className="text-[11px] flex items-center gap-2">
+                  <span className="flex items-center gap-1"><span className={`w-1.5 h-1.5 rounded-full ${dotColor(a.kcalColor)}`} /><span className={txtColor(a.kcalColor)}>{Math.round(a.totals.kcal)}</span><span className="text-gray-400">/{targets.kcalMax}</span></span>
+                  <span className="flex items-center gap-1"><span className={`w-1.5 h-1.5 rounded-full ${dotColor(a.proteinColor)}`} /><span className={txtColor(a.proteinColor)}>{Math.round(a.totals.protein)}</span><span className="text-gray-400">/{targets.proteinMin}g</span></span>
+                </div>
+              )}
+            </div>
+
+            <div className="px-2 pb-2 divide-y divide-gray-100 dark:divide-gray-800">
+              {a.bySlot.map((s) => (
+                <div key={s.id} className="py-1.5">
+                  <div className="flex items-center justify-between gap-2 px-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="text-[11px] font-semibold text-gray-600 dark:text-gray-300">{s.label}</span>
+                      <span className="text-[10px] text-gray-400">{s.time}</span>
+                      {s.hasItems && (
+                        <span className={`text-[10px] font-semibold ${s.lowProtein ? 'text-amber-600 dark:text-amber-400' : 'text-emerald-600 dark:text-emerald-400'}`}
+                          title={`Umbral de estímulo ${MIN_PROTEIN_TOMA}g por toma`}>
+                          {Math.round(s.protein)}g P {s.lowProtein ? '⚠︎' : '✓'}
+                        </span>
+                      )}
+                    </div>
+                    <button onClick={() => setPicking({ dk, slot: s.id })}
+                      className="shrink-0 px-2 py-0.5 rounded-full border border-emerald-300 dark:border-emerald-700 text-emerald-600 dark:text-emerald-400 font-semibold text-[11px]">+</button>
+                  </div>
+                  {s.items.length > 0 && <ul className="mt-0.5">{s.items.map((x) => <ItemRow key={x.id} dk={dk} x={x} />)}</ul>}
+                </div>
+              ))}
+              {a.otros.length > 0 && (
+                <div className="py-1.5">
+                  <div className="px-2 text-[11px] font-semibold text-gray-600 dark:text-gray-300">Otros</div>
+                  <ul className="mt-0.5">{a.otros.map((x) => <ItemRow key={x.id} dk={dk} x={x} />)}</ul>
+                </div>
+              )}
+            </div>
+
+            {a.hasItems && (
+              <div className="px-4 pb-3 space-y-1.5">
+                {a.gapWarn && (
+                  <div className="text-[11px] text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/20 px-2.5 py-1.5 rounded-lg">
+                    ⏱️ {Math.round(a.gapWarn.hours)} h entre {a.gapWarn.from} y {a.gapWarn.to} — mete una toma con proteína en medio.
                   </div>
                 )}
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px]">
+                  {a.remainingProtein > 0
+                    ? <span className="text-amber-600 dark:text-amber-400">Faltan <b>{a.remainingProtein}g</b> de proteína</span>
+                    : <span className="text-emerald-600 dark:text-emerald-400">Proteína cubierta ✓</span>}
+                  <span className="text-gray-400">·</span>
+                  <span className={txtColor(a.kcalColor)}>{a.remainingKcal >= 0 ? `${a.remainingKcal} kcal de margen` : `${-a.remainingKcal} kcal sobre el techo`}</span>
+                  <span className="text-gray-400">·</span>
+                  <span className={txtColor(a.fiberColor)}>Fibra {Math.round(a.totals.fiber)}/{targets.fiberTarget}</span>
+                </div>
+                <p className="text-[10px] text-gray-400 dark:text-gray-500">El ejercicio no abre margen: el techo de kcal es fijo.</p>
               </div>
-              <button onClick={() => setPicking(dk)}
-                className="shrink-0 px-3 py-1.5 rounded-full bg-emerald-500 text-white font-semibold text-xs hover:bg-emerald-600">+ Agregar</button>
-            </div>
-            {planned.length === 0 ? (
-              <p className="px-4 pb-3 text-xs text-gray-400 dark:text-gray-500">Sin nada planificado.</p>
-            ) : (
-              <ul className="px-3 pb-3 space-y-1">
-                {planned.map((x) => (
-                  <li key={x.id} className="flex items-center gap-2 px-1 py-1">
-                    <span className="flex-1 min-w-0">
-                      <span className="text-sm truncate block">{x.name}</span>
-                      <span className="text-[11px] text-gray-500 dark:text-gray-400">{Math.round(x.kcal)} kcal · P{Math.round(x.protein)}</span>
-                    </span>
-                    <button onClick={() => eatPlanned(dk, x)}
-                      className="shrink-0 px-2.5 py-1 rounded-full bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300 font-semibold text-[11px]">✓ Comí</button>
-                    <button onClick={() => removePlanned(dk, x.id)}
-                      className="shrink-0 text-gray-400 hover:text-rose-500 px-1" aria-label="Quitar del plan">✕</button>
-                  </li>
-                ))}
-              </ul>
             )}
             {flash === dk && <div className="mx-4 mb-3 text-[11px] text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-900/30 p-1.5 rounded-lg text-center">✓ Pasado a comido</div>}
           </div>
@@ -9794,7 +9890,8 @@ function PlanWeekView({ state, setState, targets }) {
       })}
       {picking && (
         <PlanPickerModal state={state}
-          onPick={(it) => { addPlanned(picking, it); }}
+          slotLabel={(PLAN_TOMAS.find((s) => s.id === picking.slot) || {}).label}
+          onPick={(it) => { addPlanned(picking.dk, picking.slot, it); }}
           onClose={() => setPicking(null)} />
       )}
     </div>
