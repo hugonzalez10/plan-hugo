@@ -9633,8 +9633,9 @@ function IdeaView({ state, setState, targets }) {
   );
 }
 
-// Picker de items para el planificador semanal. Fuentes: recetas, bancos y comidas fijas.
-// onPick(item) recibe { name, kcal, protein, carbs, fat, fiber, mealSlot? }.
+// Picker de items para el planificador semanal. Fuentes: recetas y bancos (NO las comidas
+// fijas: esas ya se aplican solas cada día, ofrecerlas aquí confunde). onPick(item) recibe
+// { name, kcal, protein, carbs, fat, fiber, mealSlot? }.
 function PlanPickerModal({ state, onPick, onClose }) {
   const [q, setQ] = useState('');
   const recipes = (state.recipeBank || []).map((r) => ({
@@ -9646,10 +9647,8 @@ function PlanPickerModal({ state, onPick, onClose }) {
     name: x.name, kcal: x.kcal || 0, protein: x.protein || 0,
     carbs: x.carbs || 0, fat: x.fat || 0, fiber: x.fiber || 0,
   }));
-  const fixed = FIXED_MEALS.map((m) => { const t = mealTotals(m); return { name: m.label, ...t, mealSlot: m.id }; });
   const groups = [
     { title: '📒 Recetas', items: recipes },
-    { title: '🍳 Comidas fijas', items: fixed },
     { title: '🍗 Proteínas', items: bankItems(state.proteinBank) },
     { title: '🥪 Snacks', items: bankItems(state.snackBank) },
     { title: '🍫 Postres', items: bankItems(state.dessertBank) },
@@ -9672,7 +9671,7 @@ function PlanPickerModal({ state, onPick, onClose }) {
           {filtered.length === 0 && <p className="text-sm text-gray-500 dark:text-gray-400 text-center py-6">Nada que mostrar.</p>}
           {filtered.map((g) => (
             <div key={g.title}>
-              <div className="text-[10px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1 sticky top-0 bg-white dark:bg-gray-900 py-0.5">{g.title}</div>
+              <div className="text-[10px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1.5 py-0.5">{g.title}</div>
               <div className="space-y-1">
                 {g.items.map((it, i) => (
                   <button key={i} onClick={() => onPick(it)}
