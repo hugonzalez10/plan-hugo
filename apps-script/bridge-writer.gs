@@ -440,6 +440,43 @@ function _sig(sec, e) {
   return null;
 }
 
+// Slots del plan + prefijos con que la skill nombra un reemplazo de comida ("Desayuno -
+// ...", "Colacion 1 - ...", "Cena - ..."). DEBE coincidir con SLOT_NAME_RE de app.jsx.
+var PLAN_SLOTS_GS = ['desayuno', 'almuerzo', 'colacion', 'cena', 'antojo'];
+var SLOT_NAME_RE_GS = {
+  desayuno: /^desayuno\b/i,
+  almuerzo: /^almuerzo\b/i,
+  colacion: /^colaci[oó]n/i,
+  cena: /^cena\b/i,
+  antojo: /^antojo\b/i,
+};
+// La sección del plan que un meal REEMPLAZA, o null si es un extra genuino. Prefiere
+// mealSlot; cae al nombre solo para skill-chat. Espejo de extraPlanSlot() de app.jsx.
+function _mealSlot(m) {
+  if (!m) return null;
+  if (PLAN_SLOTS_GS.indexOf(m.mealSlot) >= 0) return m.mealSlot;
+  if (m.source === 'skill-chat' && m.name) {
+    for (var i = 0; i < PLAN_SLOTS_GS.length; i++) {
+      var slot = PLAN_SLOTS_GS[i];
+      if (SLOT_NAME_RE_GS[slot].test(m.name)) return slot;
+    }
+  }
+  return null;
+}
+// ¿Ese día ya tiene un registro real de comida para la sección del check? Si sí, el
+// check es redundante: el extra es la comida y marcar además el plan sumaría kcal
+// fantasma en la app. Se descarta en el origen. Ver computeDayTotals/mergeBridge.
+function _checkRedundant(bridge, check) {
+  if (!check || !check.meal) return false;
+  var date = check.date || '';
+  for (var i = 0; i < bridge.meals.length; i++) {
+    var m = bridge.meals[i];
+    if (!m || (m.date || '') !== date) continue;
+    if (_mealSlot(m) === check.meal) return true;
+  }
+  return false;
+}
+
 // ts en ms para la ventana. Orden: e.ts (ms) → date+time → id unix-segundos → nowMs.
 function _entryTs(e, nowMs) {
   if (!e) return nowMs;
@@ -489,6 +526,10 @@ function _contentUnion(bridge, sec, entries, assignId) {
       }
       return; // dedup: ya existe (o mergeado, en weights)
     }
+    // Anti-doble-conteo: un check de una sección que ese día YA tiene comida registrada
+    // es redundante (el extra es la comida; el check sumaría el plan fijo fantasma). Como
+    // SECTIONS procesa meals antes que checks, el meal ya está cuando llega el check.
+    if (sec === 'checks' && _checkRedundant(bridge, e)) return;
     if (assignId || e.id == null) e.id = Utilities.getUuid();
     e.ts = ets;
     bridge[sec].push(e);
