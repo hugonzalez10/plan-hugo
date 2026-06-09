@@ -9683,6 +9683,41 @@ function IdeaView({ state, setState, targets }) {
 // Picker de items para el planificador semanal. Fuentes: recetas y bancos (NO las comidas
 // fijas: esas ya se aplican solas cada día, ofrecerlas aquí confunde). onPick(item) recibe
 // { name, kcal, protein, carbs, fat, fiber, mealSlot? }.
+// Fila del picker. Si el item tiene `portionGrams`, ofrece un campo de gramos y escala los
+// macros proporcionalmente; si no, se agrega tal cual con un toque.
+function PlanPickerItem({ item, onPick }) {
+  const base = Number(item.portionGrams) || 0;
+  const [grams, setGrams] = useState(base || '');
+  const scalable = base > 0;
+  const f = scalable ? ((Number(grams) || base) / base) : 1;
+  const sc = (v) => Math.round((Number(v) || 0) * f);
+  const add = () => {
+    if (scalable) {
+      const g = Math.round(Number(grams) || base);
+      onPick({ name: `${item.name} (${g}g)`, kcal: (item.kcal || 0) * f, protein: (item.protein || 0) * f,
+        carbs: (item.carbs || 0) * f, fat: (item.fat || 0) * f, fiber: (item.fiber || 0) * f });
+    } else { onPick(item); }
+  };
+  return (
+    <div className="flex items-center gap-2 px-3 py-2 rounded-xl border border-gray-200 dark:border-gray-800">
+      <button onClick={add} className="flex-1 min-w-0 flex items-center justify-between gap-2 text-left hover:opacity-80">
+        <span className="text-sm font-medium truncate">
+          {item.name}
+          {item.gi && item.gi !== 'bajo' ? <span className="ml-1 text-[9px] text-amber-600 dark:text-amber-400">GI {item.gi}</span> : null}
+        </span>
+        <span className="text-[11px] text-gray-500 dark:text-gray-400 shrink-0">{sc(item.kcal)} kcal · P{sc(item.protein)}</span>
+      </button>
+      {scalable && (
+        <span className="shrink-0 flex items-center gap-1">
+          <input type="number" inputMode="numeric" value={grams} onChange={(e) => setGrams(e.target.value)}
+            className="w-14 px-1.5 py-1 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-[11px] text-right focus:outline-none focus:ring-2 focus:ring-emerald-500" min="0" />
+          <span className="text-[10px] text-gray-400">g</span>
+        </span>
+      )}
+    </div>
+  );
+}
+
 function PlanPickerModal({ state, onPick, onClose, slotLabel }) {
   const [q, setQ] = useState('');
   const recipes = (state.recipeBank || []).map((r) => ({
@@ -9693,6 +9728,7 @@ function PlanPickerModal({ state, onPick, onClose, slotLabel }) {
   const bankItems = (bank) => (bank || []).map((x) => ({
     name: x.name, kcal: x.kcal || 0, protein: x.protein || 0,
     carbs: x.carbs || 0, fat: x.fat || 0, fiber: x.fiber || 0,
+    gi: x.gi, portionGrams: x.portionGrams,
   }));
   const groups = [
     { title: '📒 Recetas', items: recipes },
@@ -9721,11 +9757,7 @@ function PlanPickerModal({ state, onPick, onClose, slotLabel }) {
               <div className="text-[10px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1.5 py-0.5">{g.title}</div>
               <div className="space-y-1">
                 {g.items.map((it, i) => (
-                  <button key={i} onClick={() => onPick(it)}
-                    className="w-full flex items-center justify-between gap-2 px-3 py-2 rounded-xl border border-gray-200 dark:border-gray-800 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 text-left">
-                    <span className="text-sm font-medium truncate">{it.name}</span>
-                    <span className="text-[11px] text-gray-500 dark:text-gray-400 shrink-0">{Math.round(it.kcal)} kcal · P{Math.round(it.protein)}</span>
-                  </button>
+                  <PlanPickerItem key={i} item={it} onPick={onPick} />
                 ))}
               </div>
             </div>
