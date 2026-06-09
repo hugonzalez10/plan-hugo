@@ -1498,6 +1498,19 @@ function postBridgeDelete(settings, section, id) {
 }
 
 // Merge idempotente: ignora ids ya importados (state.bridge.importedIds). Función pura.
+// Día al que pertenece una entrada del bridge. Si trae `date` explícita, manda. Si no, se
+// deriva del `ts` (epoch ms) — NO de "hoy": antes, una comida/agua sin `date` caía en
+// todayKey() y se volcaba en el día actual cada sync, inflando el progreso de hoy. Solo si
+// tampoco hay `ts` (ni fecha) se usa hoy como último recurso.
+function bridgeDateKey(entry) {
+  if (entry && entry.date) return entry.date;
+  if (entry && entry.ts != null) {
+    const d = new Date(Number(entry.ts));
+    if (!Number.isNaN(d.getTime())) return todayKey(d);
+  }
+  return todayKey();
+}
+
 function mergeBridge(state, bridge) {
   const num = (v) => Number(v) || 0;
   const importedIds = new Set((state.bridge?.importedIds) || []);
@@ -1524,7 +1537,7 @@ function mergeBridge(state, bridge) {
   for (const m of bridge.meals) {
     if (m.id == null || removedBridgeIds.has(m.id)) continue;
     const slot = m.mealSlot || 'extra';
-    const d = ensureDay(m.date || todayKey());
+    const d = ensureDay(bridgeDateKey(m));
     // NO se corta por importedIds: si el dato está en el bridge pero falta localmente (estado
     // perdido), se reimporta. El freno real es la presencia local (por id o por contenido) y
     // removedBridgeIds (borrados deliberados, ya filtrados arriba).
@@ -1559,7 +1572,7 @@ function mergeBridge(state, bridge) {
   const bridgeMealDates = new Set();
   for (const m of bridge.meals) {
     if (m == null || m.id == null) continue;
-    bridgeMealDates.add(m.date || todayKey());
+    bridgeMealDates.add(bridgeDateKey(m));
     if (!removedBridgeIds.has(m.id)) bridgeMealIds.add(m.id);
   }
   for (const dk of bridgeMealDates) {
@@ -1571,7 +1584,7 @@ function mergeBridge(state, bridge) {
 
   for (const w of bridge.workouts) {
     if (w.id == null || removedBridgeIds.has(w.id)) continue;
-    const d = ensureDay(w.date || todayKey());
+    const d = ensureDay(bridgeDateKey(w));
     // No se corta por importedIds (ver meals): reimporta si falta localmente.
     if (d.exercise.some((x) => x.id === w.id)) { importedIds.add(w.id); continue; }
     // Dedup por contenido+ventana (nombre normalizado dentro del día): absorbe el eco del
@@ -1588,7 +1601,7 @@ function mergeBridge(state, bridge) {
 
   for (const wt of bridge.weights) {
     if (wt.id == null || removedBridgeIds.has(wt.id)) continue;
-    const date = wt.date || todayKey();
+    const date = bridgeDateKey(wt);
     const idx = weights.findIndex((x) => x.date === date);
     if (idx >= 0) {
       // Ya hay medición local de ese día (dedup por fecha). Enriquecer campos UNA sola vez:
@@ -1634,7 +1647,7 @@ function mergeBridge(state, bridge) {
   if (Array.isArray(bridge.water)) {
     for (const wd of bridge.water) {
       if (wd == null || wd.id == null || removedBridgeIds.has(wd.id) || importedIds.has(wd.id)) continue;
-      const d = ensureDay(wd.date || todayKey());
+      const d = ensureDay(bridgeDateKey(wd));
       const cur = d.water || { ml: 0 };
       d.water = { ...cur, bridgeMl: (Number(cur.bridgeMl) || 0) + (Number(wd.ml) || 0) };
       importedIds.add(wd.id); added.water++;
@@ -1649,8 +1662,11 @@ function mergeBridge(state, bridge) {
     for (const c of bridge.checks) {
       if (c == null || c.id == null || importedIds.has(c.id)) continue;
       if (!FIXED_MEAL_SLOTS.has(c.meal)) continue;
-      const d = ensureDay(c.date || todayKey());
-      d.eaten = { ...(d.eaten || {}), [c.meal]: true };
+      const d = ensureDay(bridgeDateKey(c));
+      // Si esa sección ya tiene un registro real del chat, NO marcar el fijo como comido:
+      // el extra es la comida y marcar el plan sumaría kcal fantasma (ver computeDayTotals).
+      const alreadyLogged = (d.extras || []).some((x) => extraPlanSlot(x) === c.meal);
+      if (!alreadyLogged) d.eaten = { ...(d.eaten || {}), [c.meal]: true };
       importedIds.add(c.id); added.checks++;
     }
   }
@@ -1706,9 +1722,19 @@ function computeDayTotals(day, snackBank, proteinBank, targets, dessertBank, cus
   const dBank = dessertBank || [];
   const customAntojo = customAntojoItems || [];
   const e = day?.eaten || {};
+  const extras = day?.extras || [];
+
+  // Secciones del plan que YA tienen un registro real del chat (skill-chat). Cuando
+  // existe, ese extra ES la comida de la sección, así que se suprime el plan/banco de
+  // esa sección para no doble-contar: un check de "desayuno" del bridge + el yogur
+  // registrado por chat sumaban el desayuno fijo fantasma (325 kcal / 24 g P). El log del
+  // chat manda sobre el plan sugerido. Ver extraPlanSlot y el handler de checks en mergeBridge.
+  const loggedSlots = new Set();
+  for (const x of extras) { const s = extraPlanSlot(x); if (s) loggedSlots.add(s); }
 
   const eatenFixedItems = [];
   for (const meal of FIXED_MEALS) {
+    if (loggedSlots.has(meal.id)) continue;
     const items = mealItemsFor(meal, customAntojo);
     const ticks = getMealItemTicks(day, meal, customAntojo);
     for (const item of items) {
@@ -1720,12 +1746,11 @@ function computeDayTotals(day, snackBank, proteinBank, targets, dessertBank, cus
   const dinner = day?.proteinId ? proteinBank.find((p) => p.id === day.proteinId) : null;
   const dessertA = day?.dessertAlmuerzoId ? dBank.find((d) => d.id === day.dessertAlmuerzoId) : null;
   const dessertC = day?.dessertCenaId ? dBank.find((d) => d.id === day.dessertCenaId) : null;
-  const snackEaten = snack && e.colacion ? [snack] : [];
-  const dinnerEaten = dinner && e.cena ? [dinner] : [];
+  const snackEaten = snack && e.colacion && !loggedSlots.has('colacion') ? [snack] : [];
+  const dinnerEaten = dinner && e.cena && !loggedSlots.has('cena') ? [dinner] : [];
   const dessertAEaten = dessertA && e.dessertAlmuerzo ? [dessertA] : [];
   const dessertCEaten = dessertC && e.dessertCena ? [dessertC] : [];
 
-  const extras = day?.extras || [];
   const exercise = day?.exercise || [];
   // Porción del PLAN (fijos + banco): lo que NO se empuja a meals[] del bridge. Los extras
   // y el ejercicio sí van a meals[]/workouts[], así que el snapshot debe llevar solo esto
@@ -1780,6 +1805,27 @@ const PLAN_SLOTS = new Set(['desayuno', 'almuerzo', 'colacion', 'cena', 'antojo'
 function extraSlotBucket(x) {
   const s = x?.mealSlot;
   return PLAN_SLOTS.has(s) ? s : 'extra';
+}
+
+// Prefijos con que la skill nombra un reemplazo de comida del plan ("Desayuno - ...",
+// "Colacion 1 - ...", "Cena - ..."). Para registros viejos del chat SIN mealSlot,
+// inferimos el slot por ese prefijo. DEBE coincidir con SLOT_NAME_RE_GS de bridge-writer.gs.
+const SLOT_NAME_RE = {
+  desayuno: /^desayuno\b/i,
+  almuerzo: /^almuerzo\b/i,
+  colacion: /^colaci[oó]n/i,
+  cena: /^cena\b/i,
+  antojo: /^antojo\b/i,
+};
+// La sección del plan que un extra REEMPLAZA, o null si es un extra genuino (suma aparte).
+// Prefiere mealSlot (lo que ahora etiqueta la skill); cae al nombre solo para skill-chat.
+// Cuando devuelve un slot, computeDayTotals suprime el plan/banco de esa sección.
+function extraPlanSlot(x) {
+  if (PLAN_SLOTS.has(x?.mealSlot)) return x.mealSlot;
+  if (x?.source === 'skill-chat' && x?.name) {
+    for (const slot of PLAN_SLOTS) if (SLOT_NAME_RE[slot].test(x.name)) return slot;
+  }
+  return null;
 }
 
 // ---------- Reglas personales ----------
@@ -2042,6 +2088,20 @@ function generateShoppingList(state, options = {}) {
     // Extras (todos, no requieren eaten flag — ya están en el día)
     for (const x of (day.extras || [])) {
       addUsage(x, 'extra');
+    }
+  }
+
+  // Ingredientes de las recetas guardadas. Prioriza las favoritas (⭐); si no hay ninguna
+  // marcada, toma todas. Cada ingrediente se funde por nombre con lo del historial (mismo
+  // Map), así "Pollo" de una receta y "pollo" comido no se duplican.
+  if (options.includeRecipes) {
+    const recipes = state?.recipeBank || [];
+    const favs = recipes.filter((r) => r.favorite);
+    const src = favs.length ? favs : recipes;
+    for (const r of src) {
+      for (const ing of (r.ingredients || [])) {
+        if (ing && ing.name) addUsage({ name: ing.name, kcal: 0, protein: 0 }, 'receta');
+      }
     }
   }
 
@@ -6296,10 +6356,14 @@ function BankItemForm({ initial, kind, apiKey, onSave, onCancel }) {
   const [fat, setFat] = useState(initial?.fat ?? '');
   const [fiber, setFiber] = useState(initial?.fiber ?? '');
   const [category, setCategory] = useState(initial?.category || 'salado');
+  const [gi, setGi] = useState(initial?.gi || 'bajo');
+  const [tags, setTags] = useState(Array.isArray(initial?.tags) ? initial.tags : []);
+  const [portionGrams, setPortionGrams] = useState(initial?.portionGrams ?? '');
   const [estimating, setEstimating] = useState(false);
   const [estimated, setEstimated] = useState(null);
   const [error, setError] = useState(null);
 
+  const toggleTag = (t) => setTags((prev) => prev.includes(t) ? prev.filter((x) => x !== t) : [...prev, t]);
   const canEstimate = name.trim().length > 0;
 
   const handleEstimate = async () => {
@@ -6337,7 +6401,11 @@ function BankItemForm({ initial, kind, apiKey, onSave, onCancel }) {
       carbs: numOrZero(carbs),
       fat: numOrZero(fat),
       fiber: numOrZero(fiber),
+      gi,
+      tags,
     };
+    const pg = Number(portionGrams);
+    if (Number.isFinite(pg) && pg > 0) item.portionGrams = pg;
     if (kind === 'snack') item.category = category;
     onSave(item);
   };
@@ -6402,6 +6470,36 @@ function BankItemForm({ initial, kind, apiKey, onSave, onCancel }) {
               className="mt-1 w-full px-2.5 py-2 rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-emerald-500" min="0" />
           </label>
         </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Índice glicémico</span>
+            <div className="mt-1 grid grid-cols-3 gap-1.5">
+              {['bajo', 'medio', 'alto'].map((g) => (
+                <button type="button" key={g} onClick={() => setGi(g)}
+                  className={`py-1.5 rounded-lg border-2 text-[11px] font-semibold capitalize ${
+                    gi === g ? 'border-emerald-500 bg-emerald-50 dark:bg-emerald-900/20' : 'border-gray-200 dark:border-gray-700'
+                  }`}>{g}</button>
+              ))}
+            </div>
+          </div>
+          <label className="block">
+            <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Porción (g) — opcional</span>
+            <input type="number" inputMode="numeric" value={portionGrams} onChange={(e) => setPortionGrams(e.target.value)}
+              placeholder="p.ej. 150"
+              className="mt-1 w-full px-3 py-2.5 rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-emerald-500" min="0" />
+          </label>
+        </div>
+        <div>
+          <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Etiquetas</span>
+          <div className="mt-1 flex flex-wrap gap-1.5">
+            {['proteína', 'fibra', 'portable', 'sin-refrigeración', 'dulce'].map((t) => (
+              <button type="button" key={t} onClick={() => toggleTag(t)}
+                className={`px-2.5 py-1 rounded-full text-[11px] font-semibold border ${
+                  tags.includes(t) ? 'border-emerald-500 bg-emerald-50 dark:bg-emerald-900/20 text-emerald-700 dark:text-emerald-300' : 'border-gray-200 dark:border-gray-700 text-gray-500'
+                }`}>{t}</button>
+            ))}
+          </div>
+        </div>
         {kind === 'snack' && (
           <label className="block">
             <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Categoría</span>
@@ -6438,7 +6536,16 @@ function BankList({ items, kind, onAdd, onEdit, onDelete }) {
                 {item.kcal} kcal · P {item.protein}g
                 {(item.carbs || item.fat || item.fiber) ? <> · C {Math.round(item.carbs || 0)} · G {Math.round(item.fat || 0)} · F {Number(item.fiber || 0).toFixed(0)}</> : null}
                 {kind === 'snack' && item.category && ` · ${item.category}`}
+                {item.gi && item.gi !== 'bajo' ? ` · GI ${item.gi}` : null}
+                {item.portionGrams ? ` · ${item.portionGrams}g` : null}
               </div>
+              {Array.isArray(item.tags) && item.tags.length > 0 && (
+                <div className="mt-1 flex flex-wrap gap-1">
+                  {item.tags.map((t) => (
+                    <span key={t} className="px-1.5 py-0.5 rounded-full text-[9px] font-semibold bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400">{t}</span>
+                  ))}
+                </div>
+              )}
             </div>
             <button onClick={() => onEdit(item)} className="text-xs font-medium px-2.5 py-1.5 rounded-lg bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700">Editar</button>
             {!item.builtin && (
@@ -8486,10 +8593,13 @@ function RuleChips({ state, dateKey, targets }) {
 
 function ShoppingListModal({ state, onClose }) {
   const [windowDays, setWindowDays] = useState(7);
+  const [includeRecipes, setIncludeRecipes] = useState(true);
   const list = useMemo(
-    () => generateShoppingList(state, { windowDays }),
-    [state, windowDays]
+    () => generateShoppingList(state, { windowDays, includeRecipes }),
+    [state, windowDays, includeRecipes]
   );
+  const anyFav = (state.recipeBank || []).some((r) => r.favorite);
+  const hasRecipes = (state.recipeBank || []).length > 0;
   const [checked, setChecked] = useState({}); // normalizedName → bool
   const [copied, setCopied] = useState(false);
 
@@ -8531,7 +8641,8 @@ function ShoppingListModal({ state, onClose }) {
         </div>
 
         <p className="text-xs text-gray-500 dark:text-gray-400">
-          Generada de lo que comiste los últimos <span className="font-semibold">{windowDays}</span> días.
+          De lo que comiste los últimos <span className="font-semibold">{windowDays}</span> días
+          {includeRecipes && hasRecipes ? <> + ingredientes de tus recetas {anyFav ? 'favoritas ⭐' : ''}</> : null}.
         </p>
 
         <div className="flex gap-1 text-[11px]">
@@ -8546,6 +8657,16 @@ function ShoppingListModal({ state, onClose }) {
             </button>
           ))}
         </div>
+
+        {hasRecipes && (
+          <button onClick={() => setIncludeRecipes((v) => !v)}
+            className="w-full flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-gray-50 dark:bg-gray-800/60 text-left">
+            <span className="text-xs text-gray-700 dark:text-gray-300">📒 Incluir ingredientes de mis recetas {anyFav ? 'favoritas' : ''}</span>
+            <span className={`shrink-0 w-9 h-5 rounded-full transition-colors relative ${includeRecipes ? 'bg-emerald-500' : 'bg-gray-300 dark:bg-gray-600'}`}>
+              <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${includeRecipes ? 'left-[1.125rem]' : 'left-0.5'}`} />
+            </span>
+          </button>
+        )}
 
         {list.groups.length === 0 ? (
           <div className="rounded-xl bg-gray-50 dark:bg-gray-800/60 p-4 text-center">
@@ -8939,6 +9060,158 @@ function occasionToPromptKey(id) {
   return id === 'colacion' ? 'snack' : id;
 }
 
+// Formulario manual de receta (crear/editar) — NO usa IA ni API key. Espejo del patrón de
+// BankItemForm para los macros, más listas editables de ingredientes y pasos. onSave recibe
+// el objeto receta (con id+createdAt si venía de `initial`, para que IdeaView decida
+// crear vs actualizar).
+function RecipeForm({ initial, onSave, onCancel }) {
+  const [name, setName] = useState(initial?.name || '');
+  const [occasion, setOccasion] = useState(initial?.occasion === 'snack' ? 'colacion' : (initial?.occasion || autoDetectOccasion()));
+  const [prepMinutes, setPrepMinutes] = useState(initial?.prepMinutes ?? '');
+  const [ingredients, setIngredients] = useState(
+    (initial?.ingredients?.length ? initial.ingredients : [{ name: '', portion: '' }]).map((it) => ({ name: it.name || '', portion: it.portion || '' }))
+  );
+  const [steps, setSteps] = useState(initial?.steps?.length ? [...initial.steps] : ['']);
+  const [kcal, setKcal] = useState(initial?.totals?.kcal ?? '');
+  const [protein, setProtein] = useState(initial?.totals?.protein ?? '');
+  const [carbs, setCarbs] = useState(initial?.totals?.carbs ?? '');
+  const [fat, setFat] = useState(initial?.totals?.fat ?? '');
+  const [fiber, setFiber] = useState(initial?.totals?.fiber ?? '');
+  const [error, setError] = useState(null);
+
+  const setIng = (i, field, val) => setIngredients((prev) => prev.map((it, idx) => idx === i ? { ...it, [field]: val } : it));
+  const addIng = () => setIngredients((prev) => [...prev, { name: '', portion: '' }]);
+  const rmIng = (i) => setIngredients((prev) => prev.length > 1 ? prev.filter((_, idx) => idx !== i) : prev);
+  const setStep = (i, val) => setSteps((prev) => prev.map((s, idx) => idx === i ? val : s));
+  const addStep = () => setSteps((prev) => [...prev, '']);
+  const rmStep = (i) => setSteps((prev) => prev.length > 1 ? prev.filter((_, idx) => idx !== i) : prev);
+
+  const submit = (e) => {
+    e.preventDefault();
+    if (!name.trim()) { setError('Escribe el nombre de la receta.'); return; }
+    const k = Number(kcal);
+    if (!Number.isFinite(k) || k < 0) { setError('Las calorías deben ser un número ≥ 0.'); return; }
+    const numOrZero = (v) => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : 0; };
+    const recipe = {
+      ...(initial || {}),
+      name: name.trim(),
+      occasion: occasionToPromptKey(occasion),
+      prepMinutes: Math.max(0, Math.round(Number(prepMinutes) || 0)),
+      confidence: 'alta',
+      ingredients: ingredients
+        .map((it) => ({ name: (it.name || '').trim(), portion: (it.portion || '').trim(), optional: false }))
+        .filter((it) => it.name),
+      steps: steps.map((s) => (s || '').trim()).filter(Boolean),
+      totals: { kcal: Math.round(k), protein: numOrZero(protein), carbs: numOrZero(carbs), fat: numOrZero(fat), fiber: numOrZero(fiber) },
+      why: initial?.why || '',
+      source: 'manual',
+    };
+    onSave(recipe);
+  };
+
+  const inputCls = 'mt-1 w-full px-3 py-2.5 rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-emerald-500';
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 p-4 overflow-y-auto">
+      <form onSubmit={submit} className="w-full max-w-md bg-white dark:bg-gray-900 rounded-2xl shadow-xl border border-gray-200 dark:border-gray-800 p-5 space-y-4 my-4 max-h-[92vh] overflow-y-auto">
+        <h2 className="text-lg font-bold">{initial ? 'Editar receta' : 'Nueva receta a mano'}</h2>
+
+        <label className="block">
+          <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Nombre</span>
+          <input type="text" value={name} onChange={(e) => setName(e.target.value)}
+            className={inputCls} placeholder="Ej. Bowl de pollo y quinoa" autoFocus />
+        </label>
+
+        <div>
+          <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Ocasión</span>
+          <div className="mt-1 grid grid-cols-4 gap-1.5">
+            {IDEA_OCCASIONS.map((o) => (
+              <button type="button" key={o.id} onClick={() => setOccasion(o.id)}
+                className={`py-2 rounded-xl border-2 text-[11px] font-semibold ${
+                  occasion === o.id ? 'border-emerald-500 bg-emerald-50 dark:bg-emerald-900/20' : 'border-gray-200 dark:border-gray-700'
+                }`}>
+                <div className="text-base">{o.emoji}</div>
+                <div>{o.label}</div>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Ingredientes</span>
+            <button type="button" onClick={addIng} className="text-xs font-semibold text-emerald-600 dark:text-emerald-400">+ Agregar</button>
+          </div>
+          <div className="space-y-1.5">
+            {ingredients.map((it, i) => (
+              <div key={i} className="flex gap-1.5">
+                <input type="text" value={it.name} onChange={(e) => setIng(i, 'name', e.target.value)}
+                  className="flex-1 px-2.5 py-2 rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500" placeholder="Ingrediente" />
+                <input type="text" value={it.portion} onChange={(e) => setIng(i, 'portion', e.target.value)}
+                  className="w-24 px-2.5 py-2 rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500" placeholder="Porción" />
+                <button type="button" onClick={() => rmIng(i)} className="px-2 text-gray-400 hover:text-rose-500" aria-label="Quitar">✕</button>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Pasos (opcional)</span>
+            <button type="button" onClick={addStep} className="text-xs font-semibold text-emerald-600 dark:text-emerald-400">+ Agregar</button>
+          </div>
+          <div className="space-y-1.5">
+            {steps.map((s, i) => (
+              <div key={i} className="flex gap-1.5 items-start">
+                <span className="shrink-0 w-5 h-9 flex items-center justify-center text-xs font-bold text-emerald-600 dark:text-emerald-400">{i + 1}.</span>
+                <input type="text" value={s} onChange={(e) => setStep(i, e.target.value)}
+                  className="flex-1 px-2.5 py-2 rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500" placeholder={`Paso ${i + 1}`} />
+                <button type="button" onClick={() => rmStep(i)} className="px-2 py-2 text-gray-400 hover:text-rose-500" aria-label="Quitar">✕</button>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <label className="block">
+            <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Calorías (kcal)</span>
+            <input type="number" inputMode="numeric" value={kcal} onChange={(e) => setKcal(e.target.value)} className={inputCls} min="0" />
+          </label>
+          <label className="block">
+            <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Proteína (g)</span>
+            <input type="number" inputMode="numeric" value={protein} onChange={(e) => setProtein(e.target.value)} className={inputCls} min="0" />
+          </label>
+        </div>
+        <div className="grid grid-cols-4 gap-2">
+          <label className="block">
+            <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Carbos</span>
+            <input type="number" inputMode="decimal" value={carbs} onChange={(e) => setCarbs(e.target.value)} className={inputCls} min="0" />
+          </label>
+          <label className="block">
+            <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Grasas</span>
+            <input type="number" inputMode="decimal" value={fat} onChange={(e) => setFat(e.target.value)} className={inputCls} min="0" />
+          </label>
+          <label className="block">
+            <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Fibra</span>
+            <input type="number" inputMode="decimal" step="0.1" value={fiber} onChange={(e) => setFiber(e.target.value)} className={inputCls} min="0" />
+          </label>
+          <label className="block">
+            <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Min</span>
+            <input type="number" inputMode="numeric" value={prepMinutes} onChange={(e) => setPrepMinutes(e.target.value)} className={inputCls} min="0" />
+          </label>
+        </div>
+
+        {error && <p className="text-xs text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-900/30 p-2 rounded-lg">{error}</p>}
+
+        <div className="grid grid-cols-2 gap-2 pt-1">
+          <button type="button" onClick={onCancel} className="py-2.5 rounded-xl border border-gray-300 dark:border-gray-700 font-medium text-sm">Cancelar</button>
+          <button type="submit" className="py-2.5 rounded-xl bg-emerald-500 text-white font-semibold text-sm hover:bg-emerald-600">💾 Guardar</button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 function IdeaView({ state, setState, targets }) {
   const [mode, setMode] = useState('new');
   const [attachments, setAttachments] = useState([]);
@@ -8951,9 +9224,41 @@ function IdeaView({ state, setState, targets }) {
   const [savedFlash, setSavedFlash] = useState(false);
   const [addedFlash, setAddedFlash] = useState(false);
   const [expandedId, setExpandedId] = useState(null);
+  const [formOpen, setFormOpen] = useState(false);
+  const [formInitial, setFormInitial] = useState(null);
 
   const apiKey = state.settings?.anthropicApiKey;
   const recipeBank = state.recipeBank || [];
+  // Favoritas primero, luego por fecha de creación (más nueva arriba).
+  const sortedRecipes = [...recipeBank].sort((a, b) =>
+    (b.favorite ? 1 : 0) - (a.favorite ? 1 : 0) ||
+    (new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
+  );
+
+  const openCreateManual = () => { setFormInitial(null); setFormOpen(true); };
+  const openEditRecipe = (r) => { setFormInitial(r); setFormOpen(true); };
+
+  const handleSaveManual = (data) => {
+    setState((prev) => {
+      const bank = prev.recipeBank || [];
+      if (data.id && bank.some((r) => r.id === data.id)) {
+        return { ...prev, recipeBank: bank.map((r) => r.id === data.id ? { ...r, ...data } : r) };
+      }
+      const entry = { ...data, id: uuid(), createdAt: new Date().toISOString() };
+      return { ...prev, recipeBank: [entry, ...bank] };
+    });
+    setFormOpen(false); setFormInitial(null);
+    setMode('saved');
+    setSavedFlash(true);
+    setTimeout(() => setSavedFlash(false), 1800);
+  };
+
+  const handleToggleFavorite = (id) => {
+    setState((prev) => ({
+      ...prev,
+      recipeBank: (prev.recipeBank || []).map((r) => r.id === id ? { ...r, favorite: !r.favorite } : r),
+    }));
+  };
 
   const handleFiles = async (e) => {
     const files = Array.from(e.target.files || []);
@@ -9166,9 +9471,17 @@ function IdeaView({ state, setState, targets }) {
 
           {!apiKey && (
             <p className="text-xs text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/30 p-2 rounded-lg">
-              ⚠️ Configura tu API key en ⚙️ Ajustes para usar esta sección.
+              ⚠️ La generación con IA necesita tu API key en ⚙️ Ajustes. Igual puedes crear recetas a mano.
             </p>
           )}
+
+          <div className="flex items-center gap-2 text-[11px] text-gray-400">
+            <div className="flex-1 h-px bg-gray-200 dark:bg-gray-700" /> o <div className="flex-1 h-px bg-gray-200 dark:bg-gray-700" />
+          </div>
+          <button onClick={openCreateManual}
+            className="w-full py-3 rounded-xl border-2 border-emerald-500 text-emerald-600 dark:text-emerald-400 font-semibold hover:bg-emerald-50 dark:hover:bg-emerald-900/20">
+            ✍️ Crear receta a mano (sin IA)
+          </button>
 
           {error && <p className="text-xs text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-900/30 p-2 rounded-lg">{error}</p>}
         </>
@@ -9266,64 +9579,88 @@ function IdeaView({ state, setState, targets }) {
 
       {mode === 'saved' && (
         <div className="space-y-3">
+          <button onClick={openCreateManual}
+            className="w-full py-3 rounded-xl border-2 border-emerald-500 text-emerald-600 dark:text-emerald-400 font-semibold hover:bg-emerald-50 dark:hover:bg-emerald-900/20">
+            ✍️ Crear receta a mano
+          </button>
+          {(savedFlash || addedFlash) && (
+            <div className="text-xs text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-900/30 p-2 rounded-lg text-center">
+              {savedFlash ? '💾 Guardada en Mis recetas' : '➕ Agregada al día de hoy'}
+            </div>
+          )}
           {recipeBank.length === 0 && (
             <div className="text-center py-12 text-sm text-gray-500 dark:text-gray-400">
               <div className="text-4xl mb-2">📒</div>
               <p>Aún no guardas recetas.</p>
-              <p className="text-xs mt-1">Genera una en "Nueva" y dale 💾 Guardar.</p>
+              <p className="text-xs mt-1">Créala a mano arriba o genérala con IA en "Nueva".</p>
             </div>
           )}
-          {recipeBank.map((r) => {
+          {sortedRecipes.map((r) => {
             const expanded = expandedId === r.id;
             return (
               <div key={r.id} className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 overflow-hidden">
-                <button onClick={() => setExpandedId(expanded ? null : r.id)}
-                  className="w-full px-4 py-3 flex items-center justify-between gap-2 text-left">
-                  <div className="min-w-0 flex-1">
+                <div className="px-3 py-3 flex items-center gap-2">
+                  <button onClick={() => handleToggleFavorite(r.id)}
+                    className={`shrink-0 text-lg leading-none ${r.favorite ? 'opacity-100' : 'opacity-30 grayscale'}`}
+                    aria-label={r.favorite ? 'Quitar de favoritas' : 'Marcar favorita'}>⭐</button>
+                  <button onClick={() => setExpandedId(expanded ? null : r.id)}
+                    className="min-w-0 flex-1 text-left">
                     <div className="font-semibold text-sm truncate">{r.name}</div>
                     <div className="text-[11px] text-gray-500 dark:text-gray-400 mt-0.5">
                       {(IDEA_OCCASIONS.find(o => o.id === (r.occasion === 'snack' ? 'colacion' : r.occasion))?.label) || r.occasion}
                       {' · '}{r.totals?.kcal || 0} kcal · P{r.totals?.protein || 0}g
                       {r.prepMinutes > 0 ? ` · ${r.prepMinutes} min` : ''}
                     </div>
-                  </div>
-                  <span className="text-gray-400 text-sm">{expanded ? '▾' : '▸'}</span>
-                </button>
+                  </button>
+                  <button onClick={() => handleAddToDay(r)}
+                    className="shrink-0 px-3 py-1.5 rounded-full bg-emerald-500 text-white font-semibold text-xs hover:bg-emerald-600"
+                    aria-label="Registrar al día de hoy">➕ Hoy</button>
+                  <button onClick={() => setExpandedId(expanded ? null : r.id)}
+                    className="shrink-0 text-gray-400 text-sm w-4">{expanded ? '▾' : '▸'}</button>
+                </div>
                 {expanded && (
                   <div className="px-4 pb-4 space-y-3 border-t border-gray-100 dark:border-gray-800 pt-3">
                     {r.why && (
                       <p className="text-xs text-gray-600 dark:text-gray-400 italic">{r.why}</p>
                     )}
-                    <div>
-                      <div className="text-[10px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1">Ingredientes</div>
-                      <ul className="space-y-0.5">
-                        {(r.ingredients || []).map((it, i) => (
-                          <li key={i} className="flex items-baseline gap-2 text-xs">
-                            <span className="shrink-0 w-4">{it.optional ? '➕' : '✅'}</span>
-                            <span>{it.name}{it.portion ? ` — ${it.portion}` : ''}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                    <div>
-                      <div className="text-[10px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1">Pasos</div>
-                      <ol className="space-y-1">
-                        {(r.steps || []).map((s, i) => (
-                          <li key={i} className="flex gap-1.5 text-xs">
-                            <span className="shrink-0 font-bold text-emerald-600 dark:text-emerald-400">{i + 1}.</span>
-                            <span>{s}</span>
-                          </li>
-                        ))}
-                      </ol>
-                    </div>
-                    <div className="grid grid-cols-2 gap-2 pt-1">
+                    {(r.ingredients || []).length > 0 && (
+                      <div>
+                        <div className="text-[10px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1">Ingredientes</div>
+                        <ul className="space-y-0.5">
+                          {(r.ingredients || []).map((it, i) => (
+                            <li key={i} className="flex items-baseline gap-2 text-xs">
+                              <span className="shrink-0 w-4">{it.optional ? '➕' : '✅'}</span>
+                              <span>{it.name}{it.portion ? ` — ${it.portion}` : ''}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    {(r.steps || []).length > 0 && (
+                      <div>
+                        <div className="text-[10px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1">Pasos</div>
+                        <ol className="space-y-1">
+                          {(r.steps || []).map((s, i) => (
+                            <li key={i} className="flex gap-1.5 text-xs">
+                              <span className="shrink-0 font-bold text-emerald-600 dark:text-emerald-400">{i + 1}.</span>
+                              <span>{s}</span>
+                            </li>
+                          ))}
+                        </ol>
+                      </div>
+                    )}
+                    <div className="grid grid-cols-3 gap-2 pt-1">
                       <button onClick={() => handleAddToDay(r)}
                         className="py-2 rounded-xl bg-emerald-500 text-white font-semibold text-xs hover:bg-emerald-600">
-                        ➕ Agregar al día
+                        ➕ Hoy
+                      </button>
+                      <button onClick={() => openEditRecipe(r)}
+                        className="py-2 rounded-xl border border-gray-300 dark:border-gray-700 font-semibold text-xs">
+                        ✏️ Editar
                       </button>
                       <button onClick={() => handleDeleteRecipe(r.id)}
                         className="py-2 rounded-xl border border-rose-300 dark:border-rose-700 text-rose-600 dark:text-rose-300 font-semibold text-xs">
-                        🗑️ Eliminar
+                        🗑️ Borrar
                       </button>
                     </div>
                   </div>
@@ -9331,12 +9668,458 @@ function IdeaView({ state, setState, targets }) {
               </div>
             );
           })}
-          {addedFlash && (
-            <div className="text-xs text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-900/30 p-2 rounded-lg text-center">
-              ➕ Agregada al día de hoy
-            </div>
-          )}
         </div>
+      )}
+
+      {formOpen && (
+        <RecipeForm initial={formInitial}
+          onSave={handleSaveManual}
+          onCancel={() => { setFormOpen(false); setFormInitial(null); }} />
+      )}
+    </div>
+  );
+}
+
+// Picker de items para el planificador semanal. Fuentes: recetas y bancos (NO las comidas
+// fijas: esas ya se aplican solas cada día, ofrecerlas aquí confunde). onPick(item) recibe
+// { name, kcal, protein, carbs, fat, fiber, mealSlot? }.
+// Fila del picker. Si el item tiene `portionGrams`, ofrece un campo de gramos y escala los
+// macros proporcionalmente; si no, se agrega tal cual con un toque.
+function PlanPickerItem({ item, onPick }) {
+  const base = Number(item.portionGrams) || 0;
+  const [grams, setGrams] = useState(base || '');
+  const scalable = base > 0;
+  const f = scalable ? ((Number(grams) || base) / base) : 1;
+  const sc = (v) => Math.round((Number(v) || 0) * f);
+  const add = () => {
+    if (scalable) {
+      const g = Math.round(Number(grams) || base);
+      onPick({ name: `${item.name} (${g}g)`, kcal: (item.kcal || 0) * f, protein: (item.protein || 0) * f,
+        carbs: (item.carbs || 0) * f, fat: (item.fat || 0) * f, fiber: (item.fiber || 0) * f });
+    } else { onPick(item); }
+  };
+  return (
+    <div className="flex items-center gap-2 px-3 py-2 rounded-xl border border-gray-200 dark:border-gray-800">
+      <button onClick={add} className="flex-1 min-w-0 flex items-center justify-between gap-2 text-left hover:opacity-80">
+        <span className="text-sm font-medium truncate">
+          {item.name}
+          {item.gi && item.gi !== 'bajo' ? <span className="ml-1 text-[9px] text-amber-600 dark:text-amber-400">GI {item.gi}</span> : null}
+        </span>
+        <span className="text-[11px] text-gray-500 dark:text-gray-400 shrink-0">{sc(item.kcal)} kcal · P{sc(item.protein)}</span>
+      </button>
+      {scalable && (
+        <span className="shrink-0 flex items-center gap-1">
+          <input type="number" inputMode="numeric" value={grams} onChange={(e) => setGrams(e.target.value)}
+            className="w-14 px-1.5 py-1 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-[11px] text-right focus:outline-none focus:ring-2 focus:ring-emerald-500" min="0" />
+          <span className="text-[10px] text-gray-400">g</span>
+        </span>
+      )}
+    </div>
+  );
+}
+
+function PlanPickerModal({ state, onPick, onClose, slotLabel }) {
+  const [q, setQ] = useState('');
+  const recipes = (state.recipeBank || []).map((r) => ({
+    name: r.name, kcal: r.totals?.kcal || 0, protein: r.totals?.protein || 0,
+    carbs: r.totals?.carbs || 0, fat: r.totals?.fat || 0, fiber: r.totals?.fiber || 0,
+    mealSlot: r.occasion === 'snack' ? 'colacion' : r.occasion,
+  }));
+  const bankItems = (bank) => (bank || []).map((x) => ({
+    name: x.name, kcal: x.kcal || 0, protein: x.protein || 0,
+    carbs: x.carbs || 0, fat: x.fat || 0, fiber: x.fiber || 0,
+    gi: x.gi, portionGrams: x.portionGrams,
+  }));
+  const groups = [
+    { title: '📒 Recetas', items: recipes },
+    { title: '🍗 Proteínas', items: bankItems(state.proteinBank) },
+    { title: '🥪 Snacks', items: bankItems(state.snackBank) },
+    { title: '🍫 Postres', items: bankItems(state.dessertBank) },
+  ];
+  const norm = (s) => (s || '').toLowerCase();
+  const filtered = groups
+    .map((g) => ({ ...g, items: g.items.filter((it) => !q.trim() || norm(it.name).includes(norm(q))) }))
+    .filter((g) => g.items.length);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 p-4 overflow-y-auto">
+      <div className="w-full max-w-md bg-white dark:bg-gray-900 rounded-2xl shadow-xl border border-gray-200 dark:border-gray-800 p-4 space-y-3 my-4 max-h-[88vh] flex flex-col">
+        <div className="flex items-center justify-between">
+          <h2 className="text-base font-bold">Agregar{slotLabel ? ` · ${slotLabel}` : ' al plan'}</h2>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-lg" aria-label="Cerrar">✕</button>
+        </div>
+        <input type="text" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Buscar…"
+          className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500" autoFocus />
+        <div className="flex-1 overflow-y-auto space-y-3 -mx-1 px-1">
+          {filtered.length === 0 && <p className="text-sm text-gray-500 dark:text-gray-400 text-center py-6">Nada que mostrar.</p>}
+          {filtered.map((g) => (
+            <div key={g.title}>
+              <div className="text-[10px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1.5 py-0.5">{g.title}</div>
+              <div className="space-y-1">
+                {g.items.map((it, i) => (
+                  <PlanPickerItem key={i} item={it} onPick={onPick} />
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Las 5 tomas del método (anclar fijo → repartir en tomas). Cada toma tiene hora canónica
+// para detectar brechas >5h, y `eat` = el mealSlot real de la app al pasar a comido.
+const PLAN_TOMAS = [
+  { id: 'desayuno',  label: 'Desayuno',   time: '08:30', eat: 'desayuno' },
+  { id: 'colacion1', label: 'Colación AM', time: '11:00', eat: 'colacion' },
+  { id: 'almuerzo',  label: 'Almuerzo',    time: '14:00', eat: 'almuerzo' },
+  { id: 'colacion2', label: 'Colación PM', time: '18:00', eat: 'colacion' },
+  { id: 'cena',      label: 'Cena',        time: '21:00', eat: 'cena' },
+];
+const MIN_PROTEIN_TOMA = 36; // g — umbral de estímulo MPS por toma (Schoenfeld & Aragon 2018)
+const MAX_GAP_HOURS = 5;     // h — máximo entre tomas con proteína
+
+function hhmmToMin(t) { const [h, m] = String(t || '0:0').split(':').map(Number); return (h || 0) * 60 + (m || 0); }
+
+// Analiza un día planificado contra el método: totales, desglose por toma con badge ≥36g,
+// brecha temporal >5h, y restante hacia las metas (la "brújula" del armado). Función pura.
+function analyzePlannedDay(planned, targets) {
+  const T = targets || DEFAULT_TARGETS;
+  const items = Array.isArray(planned) ? planned : [];
+  const slotIds = new Set(PLAN_TOMAS.map((s) => s.id));
+  const slotOf = (x) => (x && slotIds.has(x.planSlot)) ? x.planSlot : 'otros';
+  const sum = (arr, k) => arr.reduce((a, x) => a + (Number(x[k]) || 0), 0);
+
+  const totals = {
+    kcal: sum(items, 'kcal'), protein: sum(items, 'protein'),
+    carbs: sum(items, 'carbs'), fat: sum(items, 'fat'), fiber: sum(items, 'fiber'),
+  };
+  const bySlot = PLAN_TOMAS.map((s) => {
+    const its = items.filter((x) => slotOf(x) === s.id);
+    const protein = sum(its, 'protein');
+    return { ...s, items: its, protein, kcal: sum(its, 'kcal'),
+      hasItems: its.length > 0, lowProtein: its.length > 0 && protein < MIN_PROTEIN_TOMA };
+  });
+  const otros = items.filter((x) => slotOf(x) === 'otros');
+
+  // Brecha: primera distancia >5h entre tomas consecutivas que tienen proteína.
+  const active = bySlot.filter((s) => s.hasItems && s.protein > 0);
+  let gapWarn = null;
+  for (let i = 1; i < active.length; i++) {
+    const dh = (hhmmToMin(active[i].time) - hhmmToMin(active[i - 1].time)) / 60;
+    if (dh > MAX_GAP_HOURS) { gapWarn = { from: active[i - 1].label, to: active[i].label, hours: dh }; break; }
+  }
+
+  const fiberColor = !items.length ? null
+    : totals.fiber >= T.fiberTarget ? 'green'
+    : totals.fiber >= T.fiberTarget * 0.8 ? 'amber' : 'red';
+
+  return {
+    totals, bySlot, otros, gapWarn,
+    remainingProtein: Math.max(0, Math.round((T.proteinMin || 0) - totals.protein)),
+    remainingKcal: Math.round((T.kcalMax || 0) - totals.kcal),
+    kcalColor: items.length ? colorForKcal(totals.kcal, T) : null,
+    proteinColor: items.length ? colorForProtein(totals.protein, T) : null,
+    fiberColor,
+    hasItems: items.length > 0,
+  };
+}
+
+// VTIMEZONE de America/Santiago. iOS usa el TZID (nombre IANA) contra su propia base; este
+// bloque es fallback para otros parsers. Reglas actuales de Chile continental.
+const VTIMEZONE_SANTIAGO = [
+  'BEGIN:VTIMEZONE', 'TZID:America/Santiago',
+  'BEGIN:DAYLIGHT', 'TZOFFSETFROM:-0400', 'TZOFFSETTO:-0300', 'TZNAME:-03',
+  'DTSTART:19700906T000000', 'RRULE:FREQ=YEARLY;BYMONTH=9;BYDAY=1SA', 'END:DAYLIGHT',
+  'BEGIN:STANDARD', 'TZOFFSETFROM:-0300', 'TZOFFSETTO:-0400', 'TZNAME:-04',
+  'DTSTART:19700405T000000', 'RRULE:FREQ=YEARLY;BYMONTH=4;BYDAY=1SA', 'END:STANDARD',
+  'END:VTIMEZONE',
+];
+
+function icsEscape(s) {
+  return String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n');
+}
+
+// Genera un .ics con un VTODO por toma planificada (DUE a su hora, TZID Santiago, alarma a la
+// hora, macros en la nota, UID único por toma+día para no duplicar al reimportar).
+function buildDayICS(dateKey, planned, targets, nowIso) {
+  const a = analyzePlannedDay(planned, targets);
+  const tomas = a.bySlot.filter((s) => s.hasItems);
+  if (!tomas.length) return null;
+  const ymd = String(dateKey).replace(/-/g, '');
+  const dtstamp = String(nowIso || '1970-01-01T00:00:00Z').replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z').replace(/Z?$/, 'Z');
+  const sum = (arr, k) => arr.reduce((acc, x) => acc + (Number(x[k]) || 0), 0);
+  const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//PlanHugo//ES', 'CALSCALE:GREGORIAN', ...VTIMEZONE_SANTIAGO];
+  for (const t of tomas) {
+    const hhmmss = t.time.replace(':', '') + '00';
+    const names = t.items.map((i) => i.name).join(' + ');
+    const macros = `~${Math.round(t.kcal)} kcal | P ${Math.round(t.protein)} | C ${Math.round(sum(t.items, 'carbs'))} | G ${Math.round(sum(t.items, 'fat'))} | fibra ${Math.round(sum(t.items, 'fiber'))}`;
+    lines.push(
+      'BEGIN:VTODO',
+      `UID:${ymd}-${t.id}@planhugo`,
+      `DTSTAMP:${dtstamp}`,
+      `DUE;TZID=America/Santiago:${ymd}T${hhmmss}`,
+      `SUMMARY:${icsEscape(`${t.label} — ${names}`)}`,
+      `DESCRIPTION:${icsEscape(macros)}`,
+      'BEGIN:VALARM', 'ACTION:DISPLAY', 'TRIGGER:RELATED=START;PT0M', 'DESCRIPTION:Hora de comer', 'END:VALARM',
+      'END:VTODO',
+    );
+  }
+  lines.push('END:VCALENDAR');
+  return lines.join('\r\n');
+}
+
+// Entrega el .ics: hoja de compartir si hay (mejor en iPhone), si no descarga directa.
+async function exportDayICS(dateKey, planned, targets) {
+  const ics = buildDayICS(dateKey, planned, targets, new Date().toISOString());
+  if (!ics) return;
+  const filename = `plan-${dateKey}.ics`;
+  try {
+    const file = new File([ics], filename, { type: 'text/calendar' });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({ files: [file], title: `Plan ${dateKey}` });
+      return;
+    }
+  } catch (e) { /* cancelado o no soportado → descarga */ }
+  const blob = new Blob([ics], { type: 'text/calendar;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const el = document.createElement('a');
+  el.href = url; el.download = filename;
+  document.body.appendChild(el); el.click(); el.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+// "Armar día" con IA: llena SOLO las tomas vacías respetando lo ya fijado, las reglas del
+// método (≥36g/toma, ≤5h, no nueces, no repetir, fibra, portable, banda no punto) y usando
+// SOLO la biblioteca (bancos + recetas). Valida nombres contra la biblioteca y descarta
+// inventados. Devuelve items {planSlot,name,macros} listos para popular el plan (editable).
+async function suggestDayPlan({ state, targets, anchored, apiKey }) {
+  const T = targets || DEFAULT_TARGETS;
+  const lib = [];
+  const push = (x) => { if (x && x.name) lib.push({ name: x.name, kcal: Math.round(x.kcal || 0), protein: Math.round(x.protein || 0), carbs: Math.round(x.carbs || 0), fat: Math.round(x.fat || 0), fiber: Math.round(x.fiber || 0), gi: x.gi || 'bajo', tags: x.tags || [] }); };
+  (state.proteinBank || []).forEach(push);
+  (state.snackBank || []).forEach(push);
+  (state.dessertBank || []).forEach(push);
+  (state.recipeBank || []).forEach((r) => push({ name: r.name, ...(r.totals || {}), gi: 'bajo', tags: [] }));
+
+  const anchoredList = anchored || [];
+  const emptyTomas = PLAN_TOMAS.filter((t) => !anchoredList.some((a) => a.planSlot === t.id));
+  if (!emptyTomas.length) return { items: [], nota: 'Todas las tomas ya tienen algo planificado.' };
+  const anchoredDesc = anchoredList.map((a) => `${a.planSlot}: ${a.name} (P${Math.round(a.protein || 0)})`);
+
+  const prompt = `Eres coach nutricional de Hugo (chileno, tuteo). Arma SOLO las tomas vacías de su día.
+TARGETS DEL DÍA: kcal máx ${T.kcalMax}, proteína mín ${T.proteinMin} g, fibra ${T.fiberTarget} g.
+REGLAS (método): cada toma ≥36 g de proteína; sin brechas >5 h entre tomas; NO nueces (jamás); no repetir el mismo alimento en el día; prioriza fibra; en colaciones prefiere opciones portables sin refrigeración; índice glicémico bajo. BANDA NO PUNTO: no rellenes hasta el techo de kcal, quedar 200-400 abajo está bien, NO propongas comida de más. El ejercicio NO abre margen.
+BIBLIOTECA (usa SOLO estos alimentos, por su "name" EXACTO): ${JSON.stringify(lib)}
+YA FIJO (no lo toques): ${anchoredDesc.length ? anchoredDesc.join('; ') : 'nada'}
+TOMAS A LLENAR (slot id · hora): ${emptyTomas.map((t) => `${t.id} ${t.time}`).join(', ')}
+Devuelve SOLO JSON, sin markdown ni backticks:
+{ "tomas": [ { "slot": "<id de la lista>", "items": [ { "name": "<name EXACTO de la biblioteca>" } ] } ], "nota": "1 línea tipo coach" }`;
+
+  const text = await askClaude(prompt, apiKey, 900, MODEL_DEFAULT);
+  const parsed = parseJsonLoose(text);
+  if (!parsed || !Array.isArray(parsed.tomas)) throw new Error('La IA no devolvió un plan válido. Intenta de nuevo.');
+  const byName = new Map(lib.map((f) => [normalizeName(f.name), f]));
+  const validSlots = new Set(emptyTomas.map((t) => t.id));
+  const out = [];
+  for (const t of parsed.tomas) {
+    if (!validSlots.has(t?.slot)) continue;
+    for (const it of (t.items || [])) {
+      const f = byName.get(normalizeName(it?.name || ''));
+      if (f) out.push({ planSlot: t.slot, name: f.name, kcal: f.kcal, protein: f.protein, carbs: f.carbs, fat: f.fat, fiber: f.fiber });
+    }
+  }
+  return { items: out, nota: String(parsed.nota || '') };
+}
+
+function PlanWeekView({ state, setState, targets }) {
+  const weekKeys = useMemo(() => getWeekKeys(), []);
+  const [picking, setPicking] = useState(null); // dateKey al que se está agregando
+  const [flash, setFlash] = useState(null);
+  const [armando, setArmando] = useState(null); // dateKey en generación IA
+  const [armarError, setArmarError] = useState(null);
+  const days = state.days || {};
+  const apiKey = state.settings?.anthropicApiKey;
+
+  const armarDia = async (dk) => {
+    if (!apiKey) { setArmarError({ dk, msg: 'Configura tu API key en ⚙️ Ajustes para usar la IA (o arma el plan a mano).' }); return; }
+    setArmando(dk); setArmarError(null);
+    try {
+      const planned = (days[dk]?.plannedMeals) || [];
+      const { items, nota } = await suggestDayPlan({ state, targets, anchored: planned, apiKey });
+      if (!items.length) { setArmarError({ dk, msg: nota || 'No se pudo armar nada con tu biblioteca actual.' }); return; }
+      setState((prev) => {
+        const d = { ...((prev.days || {})[dk] || {}) };
+        const cur = Array.isArray(d.plannedMeals) ? [...d.plannedMeals] : [];
+        for (const it of items) cur.push({ id: uuid(), ...it });
+        d.plannedMeals = cur;
+        if (nota) d.planNota = nota;
+        return { ...prev, days: { ...(prev.days || {}), [dk]: d } };
+      });
+    } catch (e) {
+      setArmarError({ dk, msg: String(e?.message || e) });
+    } finally {
+      setArmando(null);
+    }
+  };
+
+  const dotColor = (c) => c === 'red' ? 'bg-rose-500' : c === 'amber' ? 'bg-amber-500' : 'bg-emerald-500';
+  const txtColor = (c) => c === 'red' ? 'text-rose-600 dark:text-rose-400' : c === 'amber' ? 'text-amber-600 dark:text-amber-400' : 'text-emerald-600 dark:text-emerald-400';
+
+  const addPlanned = (dk, slot, item) => {
+    setState((prev) => {
+      const d = { ...((prev.days || {})[dk] || {}) };
+      const planned = Array.isArray(d.plannedMeals) ? [...d.plannedMeals] : [];
+      planned.push({
+        id: uuid(), name: item.name,
+        kcal: Number(item.kcal) || 0, protein: Number(item.protein) || 0,
+        carbs: Number(item.carbs) || 0, fat: Number(item.fat) || 0, fiber: Number(item.fiber) || 0,
+        planSlot: slot,
+      });
+      d.plannedMeals = planned;
+      return { ...prev, days: { ...(prev.days || {}), [dk]: d } };
+    });
+  };
+
+  const removePlanned = (dk, id) => {
+    setState((prev) => {
+      const d = { ...((prev.days || {})[dk] || {}) };
+      d.plannedMeals = (d.plannedMeals || []).filter((x) => x.id !== id);
+      return { ...prev, days: { ...(prev.days || {}), [dk]: d } };
+    });
+  };
+
+  // Convierte un planificado en comida real (extra) del día y lo saca del plan. El planSlot
+  // del método (colacion1/colacion2/…) se mapea al mealSlot real de la app.
+  const eatPlanned = (dk, item) => {
+    const slotDef = PLAN_TOMAS.find((s) => s.id === item.planSlot);
+    const eatSlot = slotDef ? slotDef.eat : 'extra';
+    setState((prev) => {
+      const d = { ...((prev.days || {})[dk] || {}) };
+      const extras = Array.isArray(d.extras) ? [...d.extras] : [];
+      extras.push({
+        id: uuid(), ts: Date.now(), name: item.name,
+        kcal: item.kcal, protein: item.protein, carbs: item.carbs, fat: item.fat, fiber: item.fiber,
+        mealSlot: eatSlot, source: 'plan',
+      });
+      d.extras = extras;
+      d.plannedMeals = (d.plannedMeals || []).filter((x) => x.id !== item.id);
+      if (eatSlot !== 'extra') d.eaten = { ...(d.eaten || {}), [eatSlot]: true };
+      return { ...prev, days: { ...(prev.days || {}), [dk]: d } };
+    });
+    setFlash(dk); setTimeout(() => setFlash(null), 1500);
+  };
+
+  const ItemRow = ({ dk, x }) => (
+    <li className="flex items-center gap-2 px-1 py-1">
+      <span className="flex-1 min-w-0">
+        <span className="text-sm truncate block">{x.name}</span>
+        <span className="text-[11px] text-gray-500 dark:text-gray-400">{Math.round(x.kcal)} kcal · P{Math.round(x.protein)}</span>
+      </span>
+      <button onClick={() => eatPlanned(dk, x)}
+        className="shrink-0 px-2.5 py-1 rounded-full bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300 font-semibold text-[11px]">✓ Comí</button>
+      <button onClick={() => removePlanned(dk, x.id)}
+        className="shrink-0 text-gray-400 hover:text-rose-500 px-1" aria-label="Quitar del plan">✕</button>
+    </li>
+  );
+
+  return (
+    <div className="px-4 py-4 space-y-4 max-w-md mx-auto">
+      <div className="px-1">
+        <h1 className="text-2xl font-bold tracking-tight">Planificar la semana</h1>
+        <p className="text-sm text-gray-500 dark:text-gray-400">Reparte la proteína en tomas (≥{MIN_PROTEIN_TOMA}g c/u, sin brechas &gt;{MAX_GAP_HOURS}h). Lo planificado no cuenta hasta que marcas “Comí”.</p>
+      </div>
+      {weekKeys.map((dk) => {
+        const day = days[dk] || {};
+        const planned = day.plannedMeals || [];
+        const a = analyzePlannedDay(planned, targets);
+        const dd = new Date(dk + 'T12:00:00');
+        const isToday = dk === todayKey();
+        return (
+          <div key={dk} className={`rounded-2xl border bg-white dark:bg-gray-900 overflow-hidden ${isToday ? 'border-emerald-400 dark:border-emerald-600' : 'border-gray-200 dark:border-gray-800'}`}>
+            <div className="flex items-center justify-between px-4 pt-3 pb-2">
+              <div className={`font-semibold text-sm ${isToday ? 'text-emerald-600 dark:text-emerald-400' : ''}`}>{DAY_SHORT[dd.getDay()]} {dd.getDate()}/{dd.getMonth() + 1}{isToday ? ' · hoy' : ''}</div>
+              {a.hasItems && (
+                <div className="text-[11px] flex items-center gap-2">
+                  <span className="flex items-center gap-1"><span className={`w-1.5 h-1.5 rounded-full ${dotColor(a.kcalColor)}`} /><span className={txtColor(a.kcalColor)}>{Math.round(a.totals.kcal)}</span><span className="text-gray-400">/{targets.kcalMax}</span></span>
+                  <span className="flex items-center gap-1"><span className={`w-1.5 h-1.5 rounded-full ${dotColor(a.proteinColor)}`} /><span className={txtColor(a.proteinColor)}>{Math.round(a.totals.protein)}</span><span className="text-gray-400">/{targets.proteinMin}g</span></span>
+                </div>
+              )}
+            </div>
+
+            <div className="px-2 pb-2 divide-y divide-gray-100 dark:divide-gray-800">
+              {a.bySlot.map((s) => (
+                <div key={s.id} className="py-1.5">
+                  <div className="flex items-center justify-between gap-2 px-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="text-[11px] font-semibold text-gray-600 dark:text-gray-300">{s.label}</span>
+                      <span className="text-[10px] text-gray-400">{s.time}</span>
+                      {s.hasItems && (
+                        <span className={`text-[10px] font-semibold ${s.lowProtein ? 'text-amber-600 dark:text-amber-400' : 'text-emerald-600 dark:text-emerald-400'}`}
+                          title={`Umbral de estímulo ${MIN_PROTEIN_TOMA}g por toma`}>
+                          {Math.round(s.protein)}g P {s.lowProtein ? '⚠︎' : '✓'}
+                        </span>
+                      )}
+                    </div>
+                    <button onClick={() => setPicking({ dk, slot: s.id })}
+                      className="shrink-0 px-2 py-0.5 rounded-full border border-emerald-300 dark:border-emerald-700 text-emerald-600 dark:text-emerald-400 font-semibold text-[11px]">+</button>
+                  </div>
+                  {s.items.length > 0 && <ul className="mt-0.5">{s.items.map((x) => <ItemRow key={x.id} dk={dk} x={x} />)}</ul>}
+                </div>
+              ))}
+              {a.otros.length > 0 && (
+                <div className="py-1.5">
+                  <div className="px-2 text-[11px] font-semibold text-gray-600 dark:text-gray-300">Otros</div>
+                  <ul className="mt-0.5">{a.otros.map((x) => <ItemRow key={x.id} dk={dk} x={x} />)}</ul>
+                </div>
+              )}
+            </div>
+
+            {a.hasItems && (
+              <div className="px-4 pb-3 space-y-1.5">
+                {a.gapWarn && (
+                  <div className="text-[11px] text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/20 px-2.5 py-1.5 rounded-lg">
+                    ⏱️ {Math.round(a.gapWarn.hours)} h entre {a.gapWarn.from} y {a.gapWarn.to} — mete una toma con proteína en medio.
+                  </div>
+                )}
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px]">
+                  {a.remainingProtein > 0
+                    ? <span className="text-amber-600 dark:text-amber-400">Faltan <b>{a.remainingProtein}g</b> de proteína</span>
+                    : <span className="text-emerald-600 dark:text-emerald-400">Proteína cubierta ✓</span>}
+                  <span className="text-gray-400">·</span>
+                  <span className={txtColor(a.kcalColor)}>{a.remainingKcal >= 0 ? `${a.remainingKcal} kcal de margen` : `${-a.remainingKcal} kcal sobre el techo`}</span>
+                  <span className="text-gray-400">·</span>
+                  <span className={txtColor(a.fiberColor)}>Fibra {Math.round(a.totals.fiber)}/{targets.fiberTarget}</span>
+                </div>
+                <p className="text-[10px] text-gray-400 dark:text-gray-500">El ejercicio no abre margen: el techo de kcal es fijo.</p>
+                <button onClick={() => exportDayICS(dk, planned, targets)}
+                  className="w-full mt-1 py-2 rounded-xl border border-gray-300 dark:border-gray-700 text-xs font-semibold hover:bg-gray-50 dark:hover:bg-gray-800">
+                  📅 Exportar a Recordatorios
+                </button>
+              </div>
+            )}
+            <div className="px-4 pb-3 space-y-1.5">
+              {day.planNota && a.hasItems && (
+                <p className="text-[11px] text-gray-600 dark:text-gray-400 italic">💬 {day.planNota}</p>
+              )}
+              <button onClick={() => armarDia(dk)} disabled={armando === dk}
+                className="w-full py-2 rounded-xl bg-violet-500 text-white text-xs font-semibold hover:bg-violet-600 disabled:opacity-60">
+                {armando === dk ? 'Pensando un plan…' : '✨ Armar día con IA'}
+              </button>
+              {armarError && armarError.dk === dk && (
+                <p className="text-[11px] text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/20 px-2.5 py-1.5 rounded-lg">{armarError.msg}</p>
+              )}
+            </div>
+            {flash === dk && <div className="mx-4 mb-3 text-[11px] text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-900/30 p-1.5 rounded-lg text-center">✓ Pasado a comido</div>}
+          </div>
+        );
+      })}
+      {picking && (
+        <PlanPickerModal state={state}
+          slotLabel={(PLAN_TOMAS.find((s) => s.id === picking.slot) || {}).label}
+          onPick={(it) => { addPlanned(picking.dk, picking.slot, it); }}
+          onClose={() => setPicking(null)} />
       )}
     </div>
   );
@@ -9346,6 +10129,7 @@ function TabBar({ tab, setTab }) {
   const tabs = [
     { id: 'today', label: 'Hoy', icon: '🍽️' },
     { id: 'week', label: 'Semana', icon: '📅' },
+    { id: 'plan', label: 'Plan', icon: '📋' },
     { id: 'idea', label: 'Idea', icon: '✨' },
     { id: 'insights', label: 'Insights', icon: '🧠' },
     { id: 'weight', label: 'Peso', icon: '⚖️' },
@@ -9542,6 +10326,7 @@ function TopButtons({ theme, setTheme, onOpenSettings }) {
 const BENTO_TABS = [
   { id: 'today',    label: 'Hoy',      short: 'Hoy',  icon: '🍽️' },
   { id: 'week',     label: 'Semana',   short: 'Sem',  icon: '📅' },
+  { id: 'plan',     label: 'Plan',     short: 'Plan', icon: '📋' },
   { id: 'idea',     label: 'Idea',     short: 'Idea', icon: '✨' },
   { id: 'insights', label: 'Insights', short: 'Stats',icon: '🧠' },
   { id: 'weight',   label: 'Peso',     short: 'Peso', icon: '⚖️' },
@@ -10135,6 +10920,7 @@ function App() {
             onCoach={() => setShowCoach(true)} />
         )}
         {tab === 'week' && <WeekView state={state} setState={setState} onSelectDay={handleSelectDay} targets={targets} />}
+        {tab === 'plan' && <PlanWeekView state={state} setState={setState} targets={targets} />}
         {tab === 'idea' && <IdeaView state={state} setState={setState} targets={targets} />}
         {tab === 'insights' && <InsightsView state={state} setState={setState} targets={targets} />}
         {tab === 'weight' && <WeightView state={state} setState={setState} targets={targets} />}
