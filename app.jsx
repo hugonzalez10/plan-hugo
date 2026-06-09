@@ -6356,10 +6356,14 @@ function BankItemForm({ initial, kind, apiKey, onSave, onCancel }) {
   const [fat, setFat] = useState(initial?.fat ?? '');
   const [fiber, setFiber] = useState(initial?.fiber ?? '');
   const [category, setCategory] = useState(initial?.category || 'salado');
+  const [gi, setGi] = useState(initial?.gi || 'bajo');
+  const [tags, setTags] = useState(Array.isArray(initial?.tags) ? initial.tags : []);
+  const [portionGrams, setPortionGrams] = useState(initial?.portionGrams ?? '');
   const [estimating, setEstimating] = useState(false);
   const [estimated, setEstimated] = useState(null);
   const [error, setError] = useState(null);
 
+  const toggleTag = (t) => setTags((prev) => prev.includes(t) ? prev.filter((x) => x !== t) : [...prev, t]);
   const canEstimate = name.trim().length > 0;
 
   const handleEstimate = async () => {
@@ -6397,7 +6401,11 @@ function BankItemForm({ initial, kind, apiKey, onSave, onCancel }) {
       carbs: numOrZero(carbs),
       fat: numOrZero(fat),
       fiber: numOrZero(fiber),
+      gi,
+      tags,
     };
+    const pg = Number(portionGrams);
+    if (Number.isFinite(pg) && pg > 0) item.portionGrams = pg;
     if (kind === 'snack') item.category = category;
     onSave(item);
   };
@@ -6462,6 +6470,36 @@ function BankItemForm({ initial, kind, apiKey, onSave, onCancel }) {
               className="mt-1 w-full px-2.5 py-2 rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-emerald-500" min="0" />
           </label>
         </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Índice glicémico</span>
+            <div className="mt-1 grid grid-cols-3 gap-1.5">
+              {['bajo', 'medio', 'alto'].map((g) => (
+                <button type="button" key={g} onClick={() => setGi(g)}
+                  className={`py-1.5 rounded-lg border-2 text-[11px] font-semibold capitalize ${
+                    gi === g ? 'border-emerald-500 bg-emerald-50 dark:bg-emerald-900/20' : 'border-gray-200 dark:border-gray-700'
+                  }`}>{g}</button>
+              ))}
+            </div>
+          </div>
+          <label className="block">
+            <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Porción (g) — opcional</span>
+            <input type="number" inputMode="numeric" value={portionGrams} onChange={(e) => setPortionGrams(e.target.value)}
+              placeholder="p.ej. 150"
+              className="mt-1 w-full px-3 py-2.5 rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-emerald-500" min="0" />
+          </label>
+        </div>
+        <div>
+          <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Etiquetas</span>
+          <div className="mt-1 flex flex-wrap gap-1.5">
+            {['proteína', 'fibra', 'portable', 'sin-refrigeración', 'dulce'].map((t) => (
+              <button type="button" key={t} onClick={() => toggleTag(t)}
+                className={`px-2.5 py-1 rounded-full text-[11px] font-semibold border ${
+                  tags.includes(t) ? 'border-emerald-500 bg-emerald-50 dark:bg-emerald-900/20 text-emerald-700 dark:text-emerald-300' : 'border-gray-200 dark:border-gray-700 text-gray-500'
+                }`}>{t}</button>
+            ))}
+          </div>
+        </div>
         {kind === 'snack' && (
           <label className="block">
             <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Categoría</span>
@@ -6498,7 +6536,16 @@ function BankList({ items, kind, onAdd, onEdit, onDelete }) {
                 {item.kcal} kcal · P {item.protein}g
                 {(item.carbs || item.fat || item.fiber) ? <> · C {Math.round(item.carbs || 0)} · G {Math.round(item.fat || 0)} · F {Number(item.fiber || 0).toFixed(0)}</> : null}
                 {kind === 'snack' && item.category && ` · ${item.category}`}
+                {item.gi && item.gi !== 'bajo' ? ` · GI ${item.gi}` : null}
+                {item.portionGrams ? ` · ${item.portionGrams}g` : null}
               </div>
+              {Array.isArray(item.tags) && item.tags.length > 0 && (
+                <div className="mt-1 flex flex-wrap gap-1">
+                  {item.tags.map((t) => (
+                    <span key={t} className="px-1.5 py-0.5 rounded-full text-[9px] font-semibold bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400">{t}</span>
+                  ))}
+                </div>
+              )}
             </div>
             <button onClick={() => onEdit(item)} className="text-xs font-medium px-2.5 py-1.5 rounded-lg bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700">Editar</button>
             {!item.builtin && (
