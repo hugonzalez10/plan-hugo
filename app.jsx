@@ -9890,11 +9890,79 @@ async function exportDayICS(dateKey, planned, targets) {
   setTimeout(() => URL.revokeObjectURL(url), 4000);
 }
 
+// "Armar día" con IA: llena SOLO las tomas vacías respetando lo ya fijado, las reglas del
+// método (≥36g/toma, ≤5h, no nueces, no repetir, fibra, portable, banda no punto) y usando
+// SOLO la biblioteca (bancos + recetas). Valida nombres contra la biblioteca y descarta
+// inventados. Devuelve items {planSlot,name,macros} listos para popular el plan (editable).
+async function suggestDayPlan({ state, targets, anchored, apiKey }) {
+  const T = targets || DEFAULT_TARGETS;
+  const lib = [];
+  const push = (x) => { if (x && x.name) lib.push({ name: x.name, kcal: Math.round(x.kcal || 0), protein: Math.round(x.protein || 0), carbs: Math.round(x.carbs || 0), fat: Math.round(x.fat || 0), fiber: Math.round(x.fiber || 0), gi: x.gi || 'bajo', tags: x.tags || [] }); };
+  (state.proteinBank || []).forEach(push);
+  (state.snackBank || []).forEach(push);
+  (state.dessertBank || []).forEach(push);
+  (state.recipeBank || []).forEach((r) => push({ name: r.name, ...(r.totals || {}), gi: 'bajo', tags: [] }));
+
+  const anchoredList = anchored || [];
+  const emptyTomas = PLAN_TOMAS.filter((t) => !anchoredList.some((a) => a.planSlot === t.id));
+  if (!emptyTomas.length) return { items: [], nota: 'Todas las tomas ya tienen algo planificado.' };
+  const anchoredDesc = anchoredList.map((a) => `${a.planSlot}: ${a.name} (P${Math.round(a.protein || 0)})`);
+
+  const prompt = `Eres coach nutricional de Hugo (chileno, tuteo). Arma SOLO las tomas vacías de su día.
+TARGETS DEL DÍA: kcal máx ${T.kcalMax}, proteína mín ${T.proteinMin} g, fibra ${T.fiberTarget} g.
+REGLAS (método): cada toma ≥36 g de proteína; sin brechas >5 h entre tomas; NO nueces (jamás); no repetir el mismo alimento en el día; prioriza fibra; en colaciones prefiere opciones portables sin refrigeración; índice glicémico bajo. BANDA NO PUNTO: no rellenes hasta el techo de kcal, quedar 200-400 abajo está bien, NO propongas comida de más. El ejercicio NO abre margen.
+BIBLIOTECA (usa SOLO estos alimentos, por su "name" EXACTO): ${JSON.stringify(lib)}
+YA FIJO (no lo toques): ${anchoredDesc.length ? anchoredDesc.join('; ') : 'nada'}
+TOMAS A LLENAR (slot id · hora): ${emptyTomas.map((t) => `${t.id} ${t.time}`).join(', ')}
+Devuelve SOLO JSON, sin markdown ni backticks:
+{ "tomas": [ { "slot": "<id de la lista>", "items": [ { "name": "<name EXACTO de la biblioteca>" } ] } ], "nota": "1 línea tipo coach" }`;
+
+  const text = await askClaude(prompt, apiKey, 900, MODEL_DEFAULT);
+  const parsed = parseJsonLoose(text);
+  if (!parsed || !Array.isArray(parsed.tomas)) throw new Error('La IA no devolvió un plan válido. Intenta de nuevo.');
+  const byName = new Map(lib.map((f) => [normalizeName(f.name), f]));
+  const validSlots = new Set(emptyTomas.map((t) => t.id));
+  const out = [];
+  for (const t of parsed.tomas) {
+    if (!validSlots.has(t?.slot)) continue;
+    for (const it of (t.items || [])) {
+      const f = byName.get(normalizeName(it?.name || ''));
+      if (f) out.push({ planSlot: t.slot, name: f.name, kcal: f.kcal, protein: f.protein, carbs: f.carbs, fat: f.fat, fiber: f.fiber });
+    }
+  }
+  return { items: out, nota: String(parsed.nota || '') };
+}
+
 function PlanWeekView({ state, setState, targets }) {
   const weekKeys = useMemo(() => getWeekKeys(), []);
   const [picking, setPicking] = useState(null); // dateKey al que se está agregando
   const [flash, setFlash] = useState(null);
+  const [armando, setArmando] = useState(null); // dateKey en generación IA
+  const [armarError, setArmarError] = useState(null);
   const days = state.days || {};
+  const apiKey = state.settings?.anthropicApiKey;
+
+  const armarDia = async (dk) => {
+    if (!apiKey) { setArmarError({ dk, msg: 'Configura tu API key en ⚙️ Ajustes para usar la IA (o arma el plan a mano).' }); return; }
+    setArmando(dk); setArmarError(null);
+    try {
+      const planned = (days[dk]?.plannedMeals) || [];
+      const { items, nota } = await suggestDayPlan({ state, targets, anchored: planned, apiKey });
+      if (!items.length) { setArmarError({ dk, msg: nota || 'No se pudo armar nada con tu biblioteca actual.' }); return; }
+      setState((prev) => {
+        const d = { ...((prev.days || {})[dk] || {}) };
+        const cur = Array.isArray(d.plannedMeals) ? [...d.plannedMeals] : [];
+        for (const it of items) cur.push({ id: uuid(), ...it });
+        d.plannedMeals = cur;
+        if (nota) d.planNota = nota;
+        return { ...prev, days: { ...(prev.days || {}), [dk]: d } };
+      });
+    } catch (e) {
+      setArmarError({ dk, msg: String(e?.message || e) });
+    } finally {
+      setArmando(null);
+    }
+  };
 
   const dotColor = (c) => c === 'red' ? 'bg-rose-500' : c === 'amber' ? 'bg-amber-500' : 'bg-emerald-500';
   const txtColor = (c) => c === 'red' ? 'text-rose-600 dark:text-rose-400' : c === 'amber' ? 'text-amber-600 dark:text-amber-400' : 'text-emerald-600 dark:text-emerald-400';
@@ -10031,6 +10099,18 @@ function PlanWeekView({ state, setState, targets }) {
                 </button>
               </div>
             )}
+            <div className="px-4 pb-3 space-y-1.5">
+              {day.planNota && a.hasItems && (
+                <p className="text-[11px] text-gray-600 dark:text-gray-400 italic">💬 {day.planNota}</p>
+              )}
+              <button onClick={() => armarDia(dk)} disabled={armando === dk}
+                className="w-full py-2 rounded-xl bg-violet-500 text-white text-xs font-semibold hover:bg-violet-600 disabled:opacity-60">
+                {armando === dk ? 'Pensando un plan…' : '✨ Armar día con IA'}
+              </button>
+              {armarError && armarError.dk === dk && (
+                <p className="text-[11px] text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/20 px-2.5 py-1.5 rounded-lg">{armarError.msg}</p>
+              )}
+            </div>
             {flash === dk && <div className="mx-4 mb-3 text-[11px] text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-900/30 p-1.5 rounded-lg text-center">✓ Pasado a comido</div>}
           </div>
         );
