@@ -146,6 +146,29 @@ test('_mergeInto add: agrega entradas a la sección', () => {
   assert.equal(b.meals.length, 1);
 });
 
+// ── op:add rechaza valores NEGATIVOS (antipatrón "corrección por neteo") ──────────
+// Una comida/entrenamiento nunca aporta kcal/macros negativos. El bridge los descarta en
+// el origen para forzar la corrección por ?w=delete. Solo en op:add; la unión de bridge
+// completo no filtra (no toca negativas históricas).
+test('_mergeInto add: descarta meals con nutriente negativo, conserva las válidas', () => {
+  const b = emptyBridge();
+  const added = _mergeInto(b, { op: 'add', section: 'meals', entries: [
+    { name: 'Almuerzo real', date: '2026-06-09', kcal: 520, protein: 42, ts: 1 },
+    { name: 'ANULA desayuno duplicado', date: '2026-06-09', kcal: -305, protein: -52, ts: 2 },
+    { name: 'AJUSTE carne (-130)', date: '2026-06-09', kcal: -130, protein: 1, ts: 3 },
+  ] });
+  assert.equal(added, 1);                 // solo la válida
+  assert.equal(b.meals.length, 1);
+  assert.equal(b.meals[0].name, 'Almuerzo real');
+});
+
+test('_mergeInto add: workout con kcal negativo se descarta', () => {
+  const b = emptyBridge();
+  const added = _mergeInto(b, { op: 'add', section: 'workouts', entries: [{ name: 'X', date: '2026-06-09', kcal: -50, ts: 1 }] });
+  assert.equal(added, 0);
+  assert.equal(b.workouts.length, 0);
+});
+
 // ── _authed: el guard de seguridad del bridge ────────────────────────────────────
 // Token DESACTIVADO (SHARED_TOKEN === '', deploy v13): el guard deja pasar TODO, con o
 // sin ?k=. Rompía el registro por chat; la URL /exec ya es secreta. Si algún día se

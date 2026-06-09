@@ -357,6 +357,19 @@ curl -sL "$BRIDGE_URL?w=delete&section=meals&id=<id>&k=$BRIDGE_TOKEN"
 completo (`curl -sL "$BRIDGE_URL?k=$BRIDGE_TOKEN"`) y ubica la entrada por nombre/fecha. `deleted: 0`
 significa que no había ninguna con ese id.
 
+> **NUNCA corrijas con entradas de valor NEGATIVO.** Para anular/ajustar una comida o
+> entrenamiento mal registrado, BORRA el id errado con `?w=delete` y re-registra el bueno.
+> Registrar un `-305 kcal` para "netear" un duplicado deja las DOS entradas en el historial
+> y rompe la conciliación con la app. El bridge además rechaza en el origen toda entrada
+> `op:add` con algún nutriente negativo (ver `_hasNegativeNutrient` en el `.gs`), así que el
+> neteo por negativo ni siquiera se aplica: la única vía de corrección es delete + re-add.
+>
+> **Antes de registrar una comida, LEE las `meals` del día** (`?totals=` o el JSON) y no
+> re-registres lo que ya está. El dedup server-side solo colapsa si el nombre + `mealSlot` +
+> fecha coinciden dentro de ~5 min; un mismo plato con nombre distinto y sin `mealSlot` SÍ se
+> duplica (fue lo que pasó). Por eso el `mealSlot` correcto es obligatorio, no opcional: es lo
+> que además deja a la app suprimir el doble conteo plan↔chat.
+
 ---
 
 ## Paso 5 — Responder en chat (resumen + feedback)

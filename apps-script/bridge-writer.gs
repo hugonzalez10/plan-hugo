@@ -368,6 +368,16 @@ function _mergeInto(bridge, payload, day) {
     var sec = payload.section;
     if (SECTIONS.indexOf(sec) < 0) return 0;
     var entries = payload.entries || (payload.entry ? [payload.entry] : []);
+    // Rechaza "correcciones" con valores NEGATIVOS: en este modelo una comida o un
+    // entrenamiento nunca aporta kcal/macros negativos. Netear con una entrada negativa
+    // ensucia el ledger (queda el +duplicado Y el -corrección, ambos en el historial) y es
+    // lo que rompió el día (duplicados + negativas). La forma correcta de corregir es
+    // ?w=delete del id errado y re-registrar el bueno. Se descartan en el ORIGEN (solo
+    // op:add, escrituras nuevas) para que el antipatrón sea imposible; la unión de un
+    // bridge completo / auto-heal NO filtra, así que las negativas históricas no se tocan.
+    if (sec === 'meals' || sec === 'workouts') {
+      entries = entries.filter(function (e) { return !_hasNegativeNutrient(e); });
+    }
     return _contentUnion(bridge, sec, entries, true);
   }
 
@@ -395,6 +405,16 @@ function _mergeInto(bridge, payload, day) {
   }
 
   return 0;
+}
+
+// ¿La entrada trae algún nutriente NEGATIVO? Una comida/entrenamiento legítimo nunca lo
+// hace; un negativo es el antipatrón de "corrección por neteo" que ensucia el ledger. Se
+// usa para rechazarlos en op:add (ver _mergeInto). Corregir = ?w=delete + re-registrar.
+function _hasNegativeNutrient(e) {
+  if (!e) return false;
+  return ['kcal', 'protein', 'carbs', 'fat', 'fiber'].some(function (k) {
+    return Number(e[k]) < 0;
+  });
 }
 
 // Normalización idéntica a `normalizeName` de app.jsx (minúsculas, trim, espacios
