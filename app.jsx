@@ -2091,6 +2091,20 @@ function generateShoppingList(state, options = {}) {
     }
   }
 
+  // Ingredientes de las recetas guardadas. Prioriza las favoritas (⭐); si no hay ninguna
+  // marcada, toma todas. Cada ingrediente se funde por nombre con lo del historial (mismo
+  // Map), así "Pollo" de una receta y "pollo" comido no se duplican.
+  if (options.includeRecipes) {
+    const recipes = state?.recipeBank || [];
+    const favs = recipes.filter((r) => r.favorite);
+    const src = favs.length ? favs : recipes;
+    for (const r of src) {
+      for (const ing of (r.ingredients || [])) {
+        if (ing && ing.name) addUsage({ name: ing.name, kcal: 0, protein: 0 }, 'receta');
+      }
+    }
+  }
+
   // Agrupar por categoría
   const byCat = {};
   for (const cat of SHOPPING_CATEGORIES) byCat[cat.key] = [];
@@ -8532,10 +8546,13 @@ function RuleChips({ state, dateKey, targets }) {
 
 function ShoppingListModal({ state, onClose }) {
   const [windowDays, setWindowDays] = useState(7);
+  const [includeRecipes, setIncludeRecipes] = useState(true);
   const list = useMemo(
-    () => generateShoppingList(state, { windowDays }),
-    [state, windowDays]
+    () => generateShoppingList(state, { windowDays, includeRecipes }),
+    [state, windowDays, includeRecipes]
   );
+  const anyFav = (state.recipeBank || []).some((r) => r.favorite);
+  const hasRecipes = (state.recipeBank || []).length > 0;
   const [checked, setChecked] = useState({}); // normalizedName → bool
   const [copied, setCopied] = useState(false);
 
@@ -8577,7 +8594,8 @@ function ShoppingListModal({ state, onClose }) {
         </div>
 
         <p className="text-xs text-gray-500 dark:text-gray-400">
-          Generada de lo que comiste los últimos <span className="font-semibold">{windowDays}</span> días.
+          De lo que comiste los últimos <span className="font-semibold">{windowDays}</span> días
+          {includeRecipes && hasRecipes ? <> + ingredientes de tus recetas {anyFav ? 'favoritas ⭐' : ''}</> : null}.
         </p>
 
         <div className="flex gap-1 text-[11px]">
@@ -8592,6 +8610,16 @@ function ShoppingListModal({ state, onClose }) {
             </button>
           ))}
         </div>
+
+        {hasRecipes && (
+          <button onClick={() => setIncludeRecipes((v) => !v)}
+            className="w-full flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-gray-50 dark:bg-gray-800/60 text-left">
+            <span className="text-xs text-gray-700 dark:text-gray-300">📒 Incluir ingredientes de mis recetas {anyFav ? 'favoritas' : ''}</span>
+            <span className={`shrink-0 w-9 h-5 rounded-full transition-colors relative ${includeRecipes ? 'bg-emerald-500' : 'bg-gray-300 dark:bg-gray-600'}`}>
+              <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${includeRecipes ? 'left-[1.125rem]' : 'left-0.5'}`} />
+            </span>
+          </button>
+        )}
 
         {list.groups.length === 0 ? (
           <div className="rounded-xl bg-gray-50 dark:bg-gray-800/60 p-4 text-center">
@@ -9605,10 +9633,180 @@ function IdeaView({ state, setState, targets }) {
   );
 }
 
+// Picker de items para el planificador semanal. Fuentes: recetas, bancos y comidas fijas.
+// onPick(item) recibe { name, kcal, protein, carbs, fat, fiber, mealSlot? }.
+function PlanPickerModal({ state, onPick, onClose }) {
+  const [q, setQ] = useState('');
+  const recipes = (state.recipeBank || []).map((r) => ({
+    name: r.name, kcal: r.totals?.kcal || 0, protein: r.totals?.protein || 0,
+    carbs: r.totals?.carbs || 0, fat: r.totals?.fat || 0, fiber: r.totals?.fiber || 0,
+    mealSlot: r.occasion === 'snack' ? 'colacion' : r.occasion,
+  }));
+  const bankItems = (bank) => (bank || []).map((x) => ({
+    name: x.name, kcal: x.kcal || 0, protein: x.protein || 0,
+    carbs: x.carbs || 0, fat: x.fat || 0, fiber: x.fiber || 0,
+  }));
+  const fixed = FIXED_MEALS.map((m) => { const t = mealTotals(m); return { name: m.label, ...t, mealSlot: m.id }; });
+  const groups = [
+    { title: '📒 Recetas', items: recipes },
+    { title: '🍳 Comidas fijas', items: fixed },
+    { title: '🍗 Proteínas', items: bankItems(state.proteinBank) },
+    { title: '🥪 Snacks', items: bankItems(state.snackBank) },
+    { title: '🍫 Postres', items: bankItems(state.dessertBank) },
+  ];
+  const norm = (s) => (s || '').toLowerCase();
+  const filtered = groups
+    .map((g) => ({ ...g, items: g.items.filter((it) => !q.trim() || norm(it.name).includes(norm(q))) }))
+    .filter((g) => g.items.length);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 p-4 overflow-y-auto">
+      <div className="w-full max-w-md bg-white dark:bg-gray-900 rounded-2xl shadow-xl border border-gray-200 dark:border-gray-800 p-4 space-y-3 my-4 max-h-[88vh] flex flex-col">
+        <div className="flex items-center justify-between">
+          <h2 className="text-base font-bold">Agregar al plan</h2>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-lg" aria-label="Cerrar">✕</button>
+        </div>
+        <input type="text" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Buscar…"
+          className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500" autoFocus />
+        <div className="flex-1 overflow-y-auto space-y-3 -mx-1 px-1">
+          {filtered.length === 0 && <p className="text-sm text-gray-500 dark:text-gray-400 text-center py-6">Nada que mostrar.</p>}
+          {filtered.map((g) => (
+            <div key={g.title}>
+              <div className="text-[10px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1 sticky top-0 bg-white dark:bg-gray-900 py-0.5">{g.title}</div>
+              <div className="space-y-1">
+                {g.items.map((it, i) => (
+                  <button key={i} onClick={() => onPick(it)}
+                    className="w-full flex items-center justify-between gap-2 px-3 py-2 rounded-xl border border-gray-200 dark:border-gray-800 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 text-left">
+                    <span className="text-sm font-medium truncate">{it.name}</span>
+                    <span className="text-[11px] text-gray-500 dark:text-gray-400 shrink-0">{Math.round(it.kcal)} kcal · P{Math.round(it.protein)}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PlanWeekView({ state, setState, targets }) {
+  const weekKeys = useMemo(() => getWeekKeys(), []);
+  const [picking, setPicking] = useState(null); // dateKey al que se está agregando
+  const [flash, setFlash] = useState(null);
+  const days = state.days || {};
+
+  const dotColor = (c) => c === 'red' ? 'bg-rose-500' : c === 'amber' ? 'bg-amber-500' : 'bg-emerald-500';
+  const txtColor = (c) => c === 'red' ? 'text-rose-600 dark:text-rose-400' : c === 'amber' ? 'text-amber-600 dark:text-amber-400' : 'text-emerald-600 dark:text-emerald-400';
+
+  const addPlanned = (dk, item) => {
+    setState((prev) => {
+      const d = { ...((prev.days || {})[dk] || {}) };
+      const planned = Array.isArray(d.plannedMeals) ? [...d.plannedMeals] : [];
+      planned.push({
+        id: uuid(), name: item.name,
+        kcal: Number(item.kcal) || 0, protein: Number(item.protein) || 0,
+        carbs: Number(item.carbs) || 0, fat: Number(item.fat) || 0, fiber: Number(item.fiber) || 0,
+        mealSlot: item.mealSlot || 'extra',
+      });
+      d.plannedMeals = planned;
+      return { ...prev, days: { ...(prev.days || {}), [dk]: d } };
+    });
+  };
+
+  const removePlanned = (dk, id) => {
+    setState((prev) => {
+      const d = { ...((prev.days || {})[dk] || {}) };
+      d.plannedMeals = (d.plannedMeals || []).filter((x) => x.id !== id);
+      return { ...prev, days: { ...(prev.days || {}), [dk]: d } };
+    });
+  };
+
+  // Convierte un planificado en comida real (extra) del día y lo saca del plan.
+  const eatPlanned = (dk, item) => {
+    setState((prev) => {
+      const d = { ...((prev.days || {})[dk] || {}) };
+      const extras = Array.isArray(d.extras) ? [...d.extras] : [];
+      extras.push({
+        id: uuid(), ts: Date.now(), name: item.name,
+        kcal: item.kcal, protein: item.protein, carbs: item.carbs, fat: item.fat, fiber: item.fiber,
+        mealSlot: item.mealSlot || 'extra', source: 'plan',
+      });
+      d.extras = extras;
+      d.plannedMeals = (d.plannedMeals || []).filter((x) => x.id !== item.id);
+      if (item.mealSlot && item.mealSlot !== 'extra') d.eaten = { ...(d.eaten || {}), [item.mealSlot]: true };
+      return { ...prev, days: { ...(prev.days || {}), [dk]: d } };
+    });
+    setFlash(dk); setTimeout(() => setFlash(null), 1500);
+  };
+
+  return (
+    <div className="px-4 py-4 space-y-4 max-w-md mx-auto">
+      <div className="px-1">
+        <h1 className="text-2xl font-bold tracking-tight">Planificar la semana</h1>
+        <p className="text-sm text-gray-500 dark:text-gray-400">Arma lo que vas a comer y mira la proyección contra tus metas. Lo planificado no cuenta hasta que marcas “Comí”.</p>
+      </div>
+      {weekKeys.map((dk) => {
+        const day = days[dk] || {};
+        const planned = day.plannedMeals || [];
+        const tot = planned.reduce((s, x) => ({
+          kcal: s.kcal + (Number(x.kcal) || 0), protein: s.protein + (Number(x.protein) || 0),
+        }), { kcal: 0, protein: 0 });
+        const dd = new Date(dk + 'T12:00:00');
+        const isToday = dk === todayKey();
+        const kc = planned.length ? colorForKcal(tot.kcal, targets) : null;
+        const pc = planned.length ? colorForProtein(tot.protein, targets) : null;
+        return (
+          <div key={dk} className={`rounded-2xl border bg-white dark:bg-gray-900 overflow-hidden ${isToday ? 'border-emerald-400 dark:border-emerald-600' : 'border-gray-200 dark:border-gray-800'}`}>
+            <div className="flex items-center justify-between px-4 pt-3 pb-2">
+              <div>
+                <div className={`font-semibold text-sm ${isToday ? 'text-emerald-600 dark:text-emerald-400' : ''}`}>{DAY_SHORT[dd.getDay()]} {dd.getDate()}/{dd.getMonth() + 1}{isToday ? ' · hoy' : ''}</div>
+                {planned.length > 0 && (
+                  <div className="text-[11px] mt-0.5 flex items-center gap-2">
+                    <span className="flex items-center gap-1"><span className={`w-1.5 h-1.5 rounded-full ${dotColor(kc)}`} /><span className={txtColor(kc)}>{Math.round(tot.kcal)}</span><span className="text-gray-400">/{targets.kcalMax} kcal</span></span>
+                    <span className="flex items-center gap-1"><span className={`w-1.5 h-1.5 rounded-full ${dotColor(pc)}`} /><span className={txtColor(pc)}>{Math.round(tot.protein)}</span><span className="text-gray-400">/{targets.proteinMin}g P</span></span>
+                  </div>
+                )}
+              </div>
+              <button onClick={() => setPicking(dk)}
+                className="shrink-0 px-3 py-1.5 rounded-full bg-emerald-500 text-white font-semibold text-xs hover:bg-emerald-600">+ Agregar</button>
+            </div>
+            {planned.length === 0 ? (
+              <p className="px-4 pb-3 text-xs text-gray-400 dark:text-gray-500">Sin nada planificado.</p>
+            ) : (
+              <ul className="px-3 pb-3 space-y-1">
+                {planned.map((x) => (
+                  <li key={x.id} className="flex items-center gap-2 px-1 py-1">
+                    <span className="flex-1 min-w-0">
+                      <span className="text-sm truncate block">{x.name}</span>
+                      <span className="text-[11px] text-gray-500 dark:text-gray-400">{Math.round(x.kcal)} kcal · P{Math.round(x.protein)}</span>
+                    </span>
+                    <button onClick={() => eatPlanned(dk, x)}
+                      className="shrink-0 px-2.5 py-1 rounded-full bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300 font-semibold text-[11px]">✓ Comí</button>
+                    <button onClick={() => removePlanned(dk, x.id)}
+                      className="shrink-0 text-gray-400 hover:text-rose-500 px-1" aria-label="Quitar del plan">✕</button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {flash === dk && <div className="mx-4 mb-3 text-[11px] text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-900/30 p-1.5 rounded-lg text-center">✓ Pasado a comido</div>}
+          </div>
+        );
+      })}
+      {picking && (
+        <PlanPickerModal state={state}
+          onPick={(it) => { addPlanned(picking, it); }}
+          onClose={() => setPicking(null)} />
+      )}
+    </div>
+  );
+}
+
 function TabBar({ tab, setTab }) {
   const tabs = [
     { id: 'today', label: 'Hoy', icon: '🍽️' },
     { id: 'week', label: 'Semana', icon: '📅' },
+    { id: 'plan', label: 'Plan', icon: '📋' },
     { id: 'idea', label: 'Idea', icon: '✨' },
     { id: 'insights', label: 'Insights', icon: '🧠' },
     { id: 'weight', label: 'Peso', icon: '⚖️' },
@@ -9805,6 +10003,7 @@ function TopButtons({ theme, setTheme, onOpenSettings }) {
 const BENTO_TABS = [
   { id: 'today',    label: 'Hoy',      short: 'Hoy',  icon: '🍽️' },
   { id: 'week',     label: 'Semana',   short: 'Sem',  icon: '📅' },
+  { id: 'plan',     label: 'Plan',     short: 'Plan', icon: '📋' },
   { id: 'idea',     label: 'Idea',     short: 'Idea', icon: '✨' },
   { id: 'insights', label: 'Insights', short: 'Stats',icon: '🧠' },
   { id: 'weight',   label: 'Peso',     short: 'Peso', icon: '⚖️' },
@@ -10398,6 +10597,7 @@ function App() {
             onCoach={() => setShowCoach(true)} />
         )}
         {tab === 'week' && <WeekView state={state} setState={setState} onSelectDay={handleSelectDay} targets={targets} />}
+        {tab === 'plan' && <PlanWeekView state={state} setState={setState} targets={targets} />}
         {tab === 'idea' && <IdeaView state={state} setState={setState} targets={targets} />}
         {tab === 'insights' && <InsightsView state={state} setState={setState} targets={targets} />}
         {tab === 'weight' && <WeightView state={state} setState={setState} targets={targets} />}

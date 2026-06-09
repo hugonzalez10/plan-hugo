@@ -4,7 +4,7 @@
  * NO interceptamos llamadas a api.anthropic.com.
  */
 
-const CACHE_NAME = 'plan-hugo-v23-anti-doble-conteo-desayuno';
+const CACHE_NAME = 'plan-hugo-v24-recetas-mano-plan-semana-compras';
 const CORE_URLS = [
   './index.html',
   './app.js',
