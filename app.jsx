@@ -1707,8 +1707,17 @@ function computeDayTotals(day, snackBank, proteinBank, targets, dessertBank, cus
   const customAntojo = customAntojoItems || [];
   const e = day?.eaten || {};
 
+  const extras = day?.extras || [];
+  const exercise = day?.exercise || [];
+  // Slots del plan que ya cubre un extra (ver planSlotsCoveredByExtras): su porción fija/
+  // bancaria NO se cuenta, porque el extra ya la aporta con sus propios macros. Sin esto,
+  // una comida del plan registrada por chat (extra con mealSlot) + el mismo slot tildado en
+  // la app se sumaban dos veces.
+  const coveredSlots = planSlotsCoveredByExtras(extras);
+
   const eatenFixedItems = [];
   for (const meal of FIXED_MEALS) {
+    if (coveredSlots.has(meal.id)) continue; // un extra ya registra este slot
     const items = mealItemsFor(meal, customAntojo);
     const ticks = getMealItemTicks(day, meal, customAntojo);
     for (const item of items) {
@@ -1720,13 +1729,10 @@ function computeDayTotals(day, snackBank, proteinBank, targets, dessertBank, cus
   const dinner = day?.proteinId ? proteinBank.find((p) => p.id === day.proteinId) : null;
   const dessertA = day?.dessertAlmuerzoId ? dBank.find((d) => d.id === day.dessertAlmuerzoId) : null;
   const dessertC = day?.dessertCenaId ? dBank.find((d) => d.id === day.dessertCenaId) : null;
-  const snackEaten = snack && e.colacion ? [snack] : [];
-  const dinnerEaten = dinner && e.cena ? [dinner] : [];
+  const snackEaten = snack && e.colacion && !coveredSlots.has('colacion') ? [snack] : [];
+  const dinnerEaten = dinner && e.cena && !coveredSlots.has('cena') ? [dinner] : [];
   const dessertAEaten = dessertA && e.dessertAlmuerzo ? [dessertA] : [];
   const dessertCEaten = dessertC && e.dessertCena ? [dessertC] : [];
-
-  const extras = day?.extras || [];
-  const exercise = day?.exercise || [];
   // Porción del PLAN (fijos + banco): lo que NO se empuja a meals[] del bridge. Los extras
   // y el ejercicio sí van a meals[]/workouts[], así que el snapshot debe llevar solo esto
   // para que el bridge sume sin solape (partición aditiva, no Math.max). Ver snapPayload.
@@ -1780,6 +1786,21 @@ const PLAN_SLOTS = new Set(['desayuno', 'almuerzo', 'colacion', 'cena', 'antojo'
 function extraSlotBucket(x) {
   const s = x?.mealSlot;
   return PLAN_SLOTS.has(s) ? s : 'extra';
+}
+
+// Slots del plan ya cubiertos por un extra con ese mealSlot. Cuando una comida del plan
+// se registra como extra (típicamente por el chat: mealSlot=desayuno/almuerzo/colacion/
+// cena/antojo), ESE extra es el registro real del slot y trae SUS macros. Si además el
+// slot está tildado en la app, computeDayTotals sumaría la misma comida dos veces —el
+// "proteína fantasma" de la divergencia app↔bridge—. Esta función marca qué slots quedan
+// cubiertos para suprimir su porción fija/bancaria. Idempotente: sin extras de plan no
+// suprime nada. Mantener PLAN_SLOTS alineado con extraSlotBucket.
+function planSlotsCoveredByExtras(extras) {
+  const covered = new Set();
+  for (const x of (extras || [])) {
+    if (x && PLAN_SLOTS.has(x.mealSlot)) covered.add(x.mealSlot);
+  }
+  return covered;
 }
 
 // ---------- Reglas personales ----------
