@@ -1343,6 +1343,7 @@ function migrateState(parsed) {
     autoSync: next.settings.autoSync ?? true,
     lastPushedSig: next.settings.lastPushedSig ?? null,
     lastRemoteUpdatedAt: next.settings.lastRemoteUpdatedAt ?? null,
+    tabOrder: Array.isArray(next.settings.tabOrder) ? next.settings.tabOrder : null,
   };
   next.weights = Array.isArray(next.weights) ? next.weights : [];
   next.recipeBank = Array.isArray(next.recipeBank) ? next.recipeBank : [];
@@ -10636,6 +10637,21 @@ const BENTO_TABS = [
   { id: 'bank',     label: 'Banco',    short: 'Banco',icon: '📚' },
 ];
 
+// Aplica el orden guardado por el usuario (settings.tabOrder = lista de ids) sobre
+// BENTO_TABS. Ignora ids desconocidos y agrega al final cualquier tab nuevo que aún no
+// esté en el orden guardado (compatibilidad hacia adelante si sumamos pestañas después).
+function orderBentoTabs(order) {
+  const byId = new Map(BENTO_TABS.map((t) => [t.id, t]));
+  const seen = new Set();
+  const out = [];
+  for (const id of (Array.isArray(order) ? order : [])) {
+    const t = byId.get(id);
+    if (t && !seen.has(id)) { out.push(t); seen.add(id); }
+  }
+  for (const t of BENTO_TABS) if (!seen.has(t.id)) out.push(t);
+  return out;
+}
+
 function BentoLogo() {
   return (
     <div style={{
@@ -10723,8 +10739,20 @@ function BridgeSyncIndicator({ status, syncing, onSync, size = 36 }) {
   );
 }
 
-function BentoTopBar({ activeTab, onTabChange, onCmdK, onAddMeal, onOpenSettings, theme, onToggleTheme, dateLabel, sync, bridgeSync, onBridgeSync, bridgeSyncing }) {
+function BentoTopBar({ activeTab, onTabChange, onCmdK, onAddMeal, onOpenSettings, theme, onToggleTheme, dateLabel, sync, bridgeSync, onBridgeSync, bridgeSyncing, tabs, onReorder }) {
   const isDark = theme === 'dark';
+  const list = tabs || BENTO_TABS;
+  const [dragId, setDragId] = useState(null);
+  const [overId, setOverId] = useState(null);
+  const drop = (dropId) => {
+    if (dragId && dropId && dragId !== dropId && onReorder) {
+      const ids = list.map((t) => t.id);
+      const from = ids.indexOf(dragId);
+      const to = ids.indexOf(dropId);
+      if (from >= 0 && to >= 0) { ids.splice(to, 0, ids.splice(from, 1)[0]); onReorder(ids); }
+    }
+    setDragId(null); setOverId(null);
+  };
   return (
     <div className="bento-topbar-desktop" style={{
       position: 'sticky', top: 0, zIndex: 30,
@@ -10740,13 +10768,24 @@ function BentoTopBar({ activeTab, onTabChange, onCmdK, onAddMeal, onOpenSettings
         </div>
       </div>
       <div style={{ display: 'flex', gap: 2, flex: '0 0 auto' }}>
-        {BENTO_TABS.map((t) => (
-          <button key={t.id} onClick={() => onTabChange(t.id)} style={{
-            padding: '6px 12px', borderRadius: 8, border: 'none', cursor: 'pointer',
-            fontSize: 13, fontWeight: 500, letterSpacing: '-0.005em',
-            background: activeTab === t.id ? 'var(--bento-ink)' : 'transparent',
-            color: activeTab === t.id ? 'var(--bento-on-ink)' : 'var(--bento-muted)',
-          }}>{t.label}</button>
+        {list.map((t) => (
+          <button key={t.id} draggable
+            onClick={() => onTabChange(t.id)}
+            onDragStart={(e) => { setDragId(t.id); e.dataTransfer.effectAllowed = 'move'; }}
+            onDragOver={(e) => { e.preventDefault(); if (overId !== t.id) setOverId(t.id); }}
+            onDragEnd={() => { setDragId(null); setOverId(null); }}
+            onDrop={(e) => { e.preventDefault(); drop(t.id); }}
+            title="Arrastra para reordenar"
+            style={{
+              padding: '6px 12px', borderRadius: 8, border: 'none',
+              cursor: dragId ? 'grabbing' : 'grab',
+              fontSize: 13, fontWeight: 500, letterSpacing: '-0.005em',
+              background: activeTab === t.id ? 'var(--bento-ink)' : 'transparent',
+              color: activeTab === t.id ? 'var(--bento-on-ink)' : 'var(--bento-muted)',
+              opacity: dragId === t.id ? 0.4 : 1,
+              boxShadow: (overId === t.id && dragId && dragId !== t.id) ? 'inset 0 0 0 2px var(--bento-muted)' : 'none',
+              transition: 'opacity .12s',
+            }}>{t.label}</button>
         ))}
       </div>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
@@ -10814,7 +10853,8 @@ function BentoMobileTopBar({ activeTab, onCmdK, onOpenSettings, theme, onToggleT
   );
 }
 
-function BentoMobileTabBar({ activeTab, onTabChange }) {
+function BentoMobileTabBar({ activeTab, onTabChange, tabs }) {
+  const list = tabs || BENTO_TABS;
   return (
     <nav className="bento-mobile-tabbar safe-bottom" style={{
       position: 'fixed', bottom: 0, left: 0, right: 0, zIndex: 30,
@@ -10822,7 +10862,7 @@ function BentoMobileTabBar({ activeTab, onTabChange }) {
       backdropFilter: 'blur(12px)',
     }}>
       <div style={{ display: 'flex', justifyContent: 'space-around' }}>
-        {BENTO_TABS.map((t) => (
+        {list.map((t) => (
           <button key={t.id} onClick={() => onTabChange(t.id)} style={{
             flex: 1, padding: '8px 4px', border: 'none', background: 'transparent',
             display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, cursor: 'pointer',
@@ -10838,7 +10878,7 @@ function BentoMobileTabBar({ activeTab, onTabChange }) {
   );
 }
 
-function CmdKPalette({ open, onClose, onAction }) {
+function CmdKPalette({ open, onClose, onAction, tabs }) {
   const [q, setQ] = useState('');
   const [idx, setIdx] = useState(0);
   const inputRef = React.useRef(null);
@@ -10848,7 +10888,7 @@ function CmdKPalette({ open, onClose, onAction }) {
   }, [open]);
 
   const items = useMemo(() => {
-    const navs = BENTO_TABS.map((t, i) => ({
+    const navs = (tabs || BENTO_TABS).map((t, i) => ({
       id: 'nav:' + t.id, kind: 'Navegar', label: 'Ir a · ' + t.label, hint: '#' + (i + 1), kbd: String(i + 1),
       action: () => onAction({ type: 'nav', tab: t.id }),
     }));
@@ -10866,7 +10906,7 @@ function CmdKPalette({ open, onClose, onAction }) {
       { id: 'th:dark',  kind: 'Tema', label: 'Tema · oscuro',  action: () => onAction({ type: 'theme', value: 'dark' }) },
     ];
     return [...navs, ...acts, ...themes];
-  }, [onAction]);
+  }, [onAction, tabs]);
 
   const filtered = useMemo(() => {
     if (!q.trim()) return items;
@@ -10941,6 +10981,11 @@ function App() {
     const hit = BENTO_TABS.find((t) => t.id === h);
     return hit ? hit.id : 'today';
   });
+  // Orden de pestañas elegido por el usuario (arrastre en la barra), persistido en settings.
+  const orderedTabs = useMemo(() => orderBentoTabs(state.settings?.tabOrder), [state.settings?.tabOrder]);
+  const handleReorderTabs = useCallback((ids) => {
+    setState((prev) => ({ ...prev, settings: { ...(prev.settings || {}), tabOrder: ids } }));
+  }, [setState]);
   const [selectedDate, setSelectedDate] = useState(todayKey());
   const [showSettings, setShowSettings] = useState(false);
   const [showMealCapture, setShowMealCapture] = useState(false);
@@ -11159,13 +11204,13 @@ function App() {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); setCmdkOpen((v) => !v); return; }
       const inField = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName);
       if (!inField && /^[1-6]$/.test(e.key)) {
-        const t = BENTO_TABS[Number(e.key) - 1];
+        const t = orderedTabs[Number(e.key) - 1];
         if (t) setTab(t.id);
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, []);
+  }, [orderedTabs]);
 
   const handleSelectDay = (key) => { setSelectedDate(key); setTab('today'); };
 
@@ -11197,7 +11242,8 @@ function App() {
       <BentoTopBar activeTab={tab} onTabChange={setTab} onCmdK={() => setCmdkOpen(true)}
         onAddMeal={() => setShowMealCapture(true)} onOpenSettings={() => setShowSettings(true)}
         theme={effectiveTheme} onToggleTheme={toggleTheme} dateLabel={dateLabel} sync={sync}
-        bridgeSync={bridgeSyncUi} onBridgeSync={manualBridgeSync} bridgeSyncing={bridgeSyncing} />
+        bridgeSync={bridgeSyncUi} onBridgeSync={manualBridgeSync} bridgeSyncing={bridgeSyncing}
+        tabs={orderedTabs} onReorder={handleReorderTabs} />
       <BentoMobileTopBar activeTab={tab} onCmdK={() => setCmdkOpen(true)}
         onOpenSettings={() => setShowSettings(true)} theme={effectiveTheme} onToggleTheme={toggleTheme} dateLabel={dateLabel} sync={sync}
         bridgeSync={bridgeSyncUi} onBridgeSync={manualBridgeSync} bridgeSyncing={bridgeSyncing} />
@@ -11230,8 +11276,8 @@ function App() {
         {tab === 'bank' && <BankView state={state} setState={setState} />}
       </div>
 
-      <BentoMobileTabBar activeTab={tab} onTabChange={setTab} />
-      <CmdKPalette open={cmdkOpen} onClose={() => setCmdkOpen(false)} onAction={handleCmdkAction} />
+      <BentoMobileTabBar activeTab={tab} onTabChange={setTab} tabs={orderedTabs} />
+      <CmdKPalette open={cmdkOpen} onClose={() => setCmdkOpen(false)} onAction={handleCmdkAction} tabs={orderedTabs} />
 
       {needsOnboarding && (
         <OnboardingModal state={state} setState={setState} onClose={() => {}} />
