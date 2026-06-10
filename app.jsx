@@ -7487,14 +7487,14 @@ function SettingsModal({ state, setState, onClose }) {
                   −
                 </button>
                 <div className="text-center">
-                  <input type="number" inputMode="numeric" step="50" min="0" max="1000"
+                  <input type="number" inputMode="numeric" step="50" min="0" max="1500"
                     value={kcalDeficitDraft}
-                    onChange={(e) => setKcalDeficitDraft(Math.max(0, Math.min(1000, Number(e.target.value) || 0)))}
+                    onChange={(e) => setKcalDeficitDraft(Math.max(0, Math.min(1500, Number(e.target.value) || 0)))}
                     className="w-24 text-center text-2xl font-bold bg-transparent border-0 focus:outline-none" />
                   <div className="text-[10px] text-gray-500 dark:text-gray-400 uppercase tracking-wide">kcal/día</div>
                 </div>
                 <button type="button"
-                  onClick={() => setKcalDeficitDraft((v) => Math.min(1000, v + 50))}
+                  onClick={() => setKcalDeficitDraft((v) => Math.min(1500, v + 50))}
                   className="w-10 h-10 rounded-full bg-white dark:bg-gray-900 border border-gray-300 dark:border-gray-700 font-bold text-lg hover:bg-gray-100 dark:hover:bg-gray-800">
                   +
                 </button>
