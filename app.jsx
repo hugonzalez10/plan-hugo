@@ -7420,6 +7420,17 @@ function SettingsModal({ state, setState, onClose }) {
     }
   };
 
+  // Orden de pestañas: mismo settings.tabOrder que el arrastre de la barra; acá lo movemos
+  // con ↑↓ (sirve en móvil, donde arrastrar la barra inferior es latoso).
+  const moveTab = (i, delta) => {
+    const ids = orderBentoTabs(state.settings?.tabOrder).map((t) => t.id);
+    const j = i + delta;
+    if (j < 0 || j >= ids.length) return;
+    [ids[i], ids[j]] = [ids[j], ids[i]];
+    setState((prev) => ({ ...prev, settings: { ...(prev.settings || {}), tabOrder: ids } }));
+  };
+  const resetTabOrder = () => setState((prev) => ({ ...prev, settings: { ...(prev.settings || {}), tabOrder: null } }));
+
   const resetAll = () => {
     if (!confirm('¿Borrar TODOS los datos? Esto incluye historial de comidas, pesos, banco y onboarding. No se puede deshacer.')) return;
     if (!confirm('Confirma una vez más: ¿realmente quieres resetear todo?')) return;
@@ -7486,6 +7497,27 @@ function SettingsModal({ state, setState, onClose }) {
             Solo se guarda en este dispositivo. Se envía únicamente a api.anthropic.com.
           </p>
         </label>
+
+        <div className="rounded-2xl border border-gray-200 dark:border-gray-800 p-3 space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="text-sm font-semibold">Orden de pestañas</div>
+            <button type="button" onClick={resetTabOrder}
+              className="text-[11px] text-gray-500 dark:text-gray-400 underline">Restablecer</button>
+          </div>
+          <div className="text-[11px] text-gray-500 dark:text-gray-400 -mt-1">Mueve con ↑↓. En el desktop también puedes arrastrarlas directo en la barra.</div>
+          <div className="space-y-1">
+            {orderBentoTabs(state.settings?.tabOrder).map((t, i, arr) => (
+              <div key={t.id} className="flex items-center gap-2 px-2 py-1.5 rounded-lg bg-gray-50 dark:bg-gray-800/50">
+                <span className="text-base">{t.icon}</span>
+                <span className="flex-1 text-sm">{t.label}</span>
+                <button type="button" disabled={i === 0} onClick={() => moveTab(i, -1)} aria-label={`Subir ${t.label}`}
+                  className="w-7 h-7 rounded-lg border border-gray-300 dark:border-gray-700 text-sm disabled:opacity-30 hover:bg-gray-100 dark:hover:bg-gray-800">↑</button>
+                <button type="button" disabled={i === arr.length - 1} onClick={() => moveTab(i, 1)} aria-label={`Bajar ${t.label}`}
+                  className="w-7 h-7 rounded-lg border border-gray-300 dark:border-gray-700 text-sm disabled:opacity-30 hover:bg-gray-100 dark:hover:bg-gray-800">↓</button>
+              </div>
+            ))}
+          </div>
+        </div>
 
         <label className="flex items-start gap-3 cursor-pointer">
           <input type="checkbox" checked={saveImages} onChange={(e) => setSaveImages(e.target.checked)}
