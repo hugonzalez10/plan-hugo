@@ -463,6 +463,21 @@ function _mealSlot(m) {
   }
   return null;
 }
+// Slot del plan según la hora del registro (time "HH:MM" o, si falta, el ts). Espejo de
+// slotByTime() de app.jsx; la tabla DEBE coincidir con la de la skill (food-tracker). Usa la
+// zona horaria del script (appsscript.json → America/Santiago).
+function _slotByTime(time, ts) {
+  var mins = null;
+  var m = time && /^(\d{1,2}):(\d{2})/.exec(time);
+  if (m) mins = (+m[1]) * 60 + (+m[2]);
+  else if (ts != null) { var d = new Date(Number(ts)); mins = d.getHours() * 60 + d.getMinutes(); }
+  if (mins == null) return null;
+  if (mins < 11 * 60) return 'desayuno';
+  if (mins < 15 * 60) return 'almuerzo';
+  if (mins < 19 * 60) return 'colacion';
+  if (mins < 21 * 60 + 30) return 'cena';
+  return 'antojo';
+}
 // ¿Ese día ya tiene un registro real de comida para la sección del check? Si sí, el
 // check es redundante: el extra es la comida y marcar además el plan sumaría kcal
 // fantasma en la app. Se descarta en el origen. Ver computeDayTotals/mergeBridge.
@@ -662,6 +677,12 @@ function _entryFromParams(p) {
   // Se conserva solo como pista para derivar el ts si no viene `ts`/`time`.
   if (p.id != null && p.id !== '') entry.id = Number(p.id);
   if (p.satfat != null) entry.sat_fat_warning = (p.satfat === '1' || p.satfat === 'true');
+  // Relleno de mealSlot cuando la skill no lo mandó: nombre → hora. Solo si está AUSENTE,
+  // para no pisar un 'extra' explícito (comida fuera de plan). Así no cae todo a 'extra'.
+  if (p.section === 'meals' && entry.mealSlot == null) {
+    var inferred = _mealSlot(entry) || _slotByTime(entry.time, entry.ts);
+    if (inferred) entry.mealSlot = inferred;
+  }
   return entry;
 }
 

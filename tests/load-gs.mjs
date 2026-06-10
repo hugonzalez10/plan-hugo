@@ -29,7 +29,7 @@ const factory = new Function(`
   ${src}
   return {
     _norm, _sig, _entryTs, _contentUnion, _totals, _prune, _mergeInto, _reconcile, _authed,
-    _mealSlot, _checkRedundant,
+    _mealSlot, _slotByTime, _entryFromParams, _checkRedundant,
     SECTIONS, WINDOW_MS,
   };
 `);

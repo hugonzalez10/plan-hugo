@@ -1758,6 +1758,17 @@ function computeDayTotals(day, snackBank, proteinBank, targets, dessertBank, cus
   const dessertAEaten = dessertA && e.dessertAlmuerzo ? [dessertA] : [];
   const dessertCEaten = dessertC && e.dessertCena ? [dessertC] : [];
 
+  // Comidas del chat (extras) que caen en colación / cena, por mealSlot, nombre u hora
+  // (ver extraPlanSlot). La vista semanal antes solo miraba el banco (snack/dinner) y por eso
+  // ignoraba las colaciones/cenas registradas por chat; estos campos hacen que la semana, los
+  // días completos, los colores y el promedio las cuenten.
+  const colacionExtras = extras.filter((x) => extraPlanSlot(x) === 'colacion');
+  const cenaExtras = extras.filter((x) => extraPlanSlot(x) === 'cena');
+  const hasSnack = !!snack || colacionExtras.length > 0;
+  const hasDinner = !!dinner || cenaExtras.length > 0;
+  const snackLabel = snack ? snack.name : (colacionExtras.length ? colacionExtras.map((x) => x.name).join(' + ') : null);
+  const dinnerLabel = dinner ? dinner.name : (cenaExtras.length ? cenaExtras.map((x) => x.name).join(' + ') : null);
+
   const exercise = day?.exercise || [];
   // Porción del PLAN (fijos + banco): lo que NO se empuja a meals[] del bridge. Los extras
   // y el ejercicio sí van a meals[]/workouts[], así que el snapshot debe llevar solo esto
@@ -1793,7 +1804,7 @@ function computeDayTotals(day, snackBank, proteinBank, targets, dessertBank, cus
     fat, fatRemaining: T.fatTarget - fat,
     fiber, fiberRemaining: T.fiberTarget - fiber,
     waterMl, waterRemaining: T.waterTarget - waterMl,
-    hasSnack: !!snack, hasDinner: !!dinner,
+    hasSnack, hasDinner, snackLabel, dinnerLabel,
     hasDessertA: !!dessertA, hasDessertC: !!dessertC,
     eatenAny: !!(eatenFixedItems.length || e.colacion || e.cena || e.dessertAlmuerzo || e.dessertCena || extras.length || exercise.length || (Array.isArray(day?.skipped) && day.skipped.length)),
     snack, dinner, dessertA, dessertC, extras, exercise,
@@ -1804,14 +1815,14 @@ function normalizeName(name) {
   return (name || '').toLowerCase().trim().replace(/\s+/g, ' ');
 }
 
-// Cubeta de despliegue de un extra según su mealSlot. Las comidas con slot de una
-// sección del plan (desayuno/almuerzo/colacion/cena/antojo) se muestran DENTRO de esa
-// sección con "📝 Registrado"; el resto (mealSlot ausente o desconocido) cae en 'extra'
-// → lista "Extras del día".
+// Cubeta de despliegue de un extra. Las comidas con slot de una sección del plan
+// (desayuno/almuerzo/colacion/cena/antojo) se muestran DENTRO de esa sección con
+// "📝 Registrado"; el resto cae en 'extra' → lista "Extras del día". Usa la misma
+// inferencia que extraPlanSlot (mealSlot → nombre → hora del ts) para que el detalle del
+// día y la vista semanal concuerden, incluso con comidas viejas del chat sin mealSlot.
 const PLAN_SLOTS = new Set(['desayuno', 'almuerzo', 'colacion', 'cena', 'antojo']);
 function extraSlotBucket(x) {
-  const s = x?.mealSlot;
-  return PLAN_SLOTS.has(s) ? s : 'extra';
+  return extraPlanSlot(x) || 'extra';
 }
 
 // Prefijos con que la skill nombra un reemplazo de comida del plan ("Desayuno - ...",
@@ -1827,10 +1838,27 @@ const SLOT_NAME_RE = {
 // La sección del plan que un extra REEMPLAZA, o null si es un extra genuino (suma aparte).
 // Prefiere mealSlot (lo que ahora etiqueta la skill); cae al nombre solo para skill-chat.
 // Cuando devuelve un slot, computeDayTotals suprime el plan/banco de esa sección.
+// Slot del plan según la hora del registro. Espejo de _slotByTime() de bridge-writer.gs;
+// la tabla DEBE coincidir con la de la skill (food-tracker).
+function slotByTime(d) {
+  if (!d || isNaN(d)) return null;
+  const mins = d.getHours() * 60 + d.getMinutes();
+  if (mins < 11 * 60) return 'desayuno';
+  if (mins < 15 * 60) return 'almuerzo';
+  if (mins < 19 * 60) return 'colacion';
+  if (mins < 21 * 60 + 30) return 'cena';
+  return 'antojo';
+}
 function extraPlanSlot(x) {
   if (PLAN_SLOTS.has(x?.mealSlot)) return x.mealSlot;
   if (x?.source === 'skill-chat' && x?.name) {
     for (const slot of PLAN_SLOTS) if (SLOT_NAME_RE[slot].test(x.name)) return slot;
+  }
+  // Último recurso para comidas viejas del chat sin mealSlot: inferir por la hora del ts.
+  // Guardado por mealSlot ausente para no pisar un 'extra' explícito de la skill.
+  if (x?.source === 'skill-chat' && x?.mealSlot == null && x?.ts != null) {
+    const s = slotByTime(new Date(x.ts));
+    if (s) return s;
   }
   return null;
 }
@@ -6153,9 +6181,9 @@ function WeekView({ state, setState, onSelectDay, targets }) {
                 <div className="text-xs text-gray-500 dark:text-gray-400">{r.dateStr}</div>
               </div>
               <div className="flex-1 min-w-0 text-xs text-gray-600 dark:text-gray-400 truncate">
-                {r.totals.snack ? r.totals.snack.name : <span className="italic">— sin colación</span>}
+                {r.totals.snackLabel ? r.totals.snackLabel : <span className="italic">— sin colación</span>}
                 <br />
-                {r.totals.dinner ? r.totals.dinner.name : <span className="italic">— sin cena</span>}
+                {r.totals.dinnerLabel ? r.totals.dinnerLabel : <span className="italic">— sin cena</span>}
               </div>
               <div className="text-right shrink-0">
                 <div className="text-sm font-semibold">{Math.round(r.totals.kcal)} kcal</div>
@@ -10002,40 +10030,74 @@ async function exportDayICS(dateKey, planned, targets) {
 // método (≥36g/toma, ≤5h, no nueces, no repetir, fibra, portable, banda no punto) y usando
 // SOLO la biblioteca (bancos + recetas). Valida nombres contra la biblioteca y descarta
 // inventados. Devuelve items {planSlot,name,macros} listos para popular el plan (editable).
+// Qué bancos alimentan cada toma. Las proteínas (Salmón, Pollo, Filete) son platos
+// principales: SOLO almuerzo/cena, nunca desayuno ni colación. Desayuno y colaciones
+// se arman con colaciones (huevos, atún, yogur, quesillo) + postres (fruta, yogur).
+// Las recetas son comidas completas y entran en desayuno/almuerzo/cena.
+const SLOT_GROUPS = {
+  desayuno:  ['colacion', 'postre', 'receta'],
+  colacion1: ['colacion', 'postre'],
+  almuerzo:  ['main', 'postre', 'receta'],
+  colacion2: ['colacion', 'postre'],
+  cena:      ['main', 'postre', 'receta'],
+};
+const GROUP_LABEL = {
+  main: 'PLATOS PRINCIPALES (solo almuerzo/cena)',
+  colacion: 'COLACIONES (desayuno y colaciones)',
+  postre: 'POSTRES/COMPLEMENTOS (fruta, yogur — acompañan cualquier toma)',
+  receta: 'RECETAS COMPLETAS (desayuno/almuerzo/cena)',
+};
+
 async function suggestDayPlan({ state, targets, anchored, apiKey }) {
   const T = targets || DEFAULT_TARGETS;
-  const lib = [];
-  const push = (x) => { if (x && x.name) lib.push({ name: x.name, kcal: Math.round(x.kcal || 0), protein: Math.round(x.protein || 0), carbs: Math.round(x.carbs || 0), fat: Math.round(x.fat || 0), fiber: Math.round(x.fiber || 0), gi: x.gi || 'bajo', tags: x.tags || [] }); };
-  (state.proteinBank || []).forEach(push);
-  (state.snackBank || []).forEach(push);
-  (state.dessertBank || []).forEach(push);
-  (state.recipeBank || []).forEach((r) => push({ name: r.name, ...(r.totals || {}), gi: 'bajo', tags: [] }));
+  const byName = new Map();   // name normalizado → { ...macros, group }
+  const groups = { main: [], colacion: [], postre: [], receta: [] };
+  const push = (x, group) => {
+    if (!x || !x.name) return;
+    const item = { name: x.name, kcal: Math.round(x.kcal || 0), protein: Math.round(x.protein || 0), carbs: Math.round(x.carbs || 0), fat: Math.round(x.fat || 0), fiber: Math.round(x.fiber || 0), gi: x.gi || 'bajo', group };
+    groups[group].push(item);
+    byName.set(normalizeName(x.name), item);
+  };
+  (state.proteinBank || []).forEach((x) => push(x, 'main'));
+  (state.snackBank || []).forEach((x) => push(x, 'colacion'));
+  (state.dessertBank || []).forEach((x) => push(x, 'postre'));
+  (state.recipeBank || []).forEach((r) => push({ name: r.name, ...(r.totals || {}), gi: 'bajo' }, 'receta'));
 
   const anchoredList = anchored || [];
   const emptyTomas = PLAN_TOMAS.filter((t) => !anchoredList.some((a) => a.planSlot === t.id));
   if (!emptyTomas.length) return { items: [], nota: 'Todas las tomas ya tienen algo planificado.' };
   const anchoredDesc = anchoredList.map((a) => `${a.planSlot}: ${a.name} (P${Math.round(a.protein || 0)})`);
 
-  const prompt = `Eres coach nutricional de Hugo (chileno, tuteo). Arma SOLO las tomas vacías de su día.
+  // Eligibilidad por toma: a la IA le pasamos, slot por slot, SOLO los alimentos válidos.
+  const slotEligible = (slotId) => (SLOT_GROUPS[slotId] || []).flatMap((g) => groups[g].map((it) => ({ ...it, rol: g })));
+  const bibliotecaPorToma = emptyTomas.map((t) => {
+    const ops = slotEligible(t.id).map((it) => ({ name: it.name, P: it.protein, kcal: it.kcal, fibra: it.fiber, rol: GROUP_LABEL[it.rol].split(' ')[0] }));
+    return `• ${t.id} (${t.time}, ${t.label}): ${JSON.stringify(ops)}`;
+  }).join('\n');
+
+  const prompt = `Eres coach nutricional de Hugo (chileno, tuteo). Arma SOLO las tomas vacías de su día, con comida COHERENTE con cada horario.
 TARGETS DEL DÍA: kcal máx ${T.kcalMax}, proteína mín ${T.proteinMin} g, fibra ${T.fiberTarget} g.
-REGLAS (método): cada toma ≥36 g de proteína; sin brechas >5 h entre tomas; NO nueces (jamás); no repetir el mismo alimento en el día; prioriza fibra; en colaciones prefiere opciones portables sin refrigeración; índice glicémico bajo. BANDA NO PUNTO: no rellenes hasta el techo de kcal, quedar 200-400 abajo está bien, NO propongas comida de más. El ejercicio NO abre margen.
-BIBLIOTECA (usa SOLO estos alimentos, por su "name" EXACTO): ${JSON.stringify(lib)}
+REGLAS (método): cada toma apunta a ≥36 g de proteína (combina ítems si hace falta); sin brechas >5 h; NO nueces (jamás); no repitas el mismo alimento en el día; prioriza fibra; colaciones portables sin refrigeración; índice glicémico bajo. BANDA NO PUNTO: no rellenes hasta el techo de kcal, quedar 200-400 abajo está bien. El ejercicio NO abre margen.
+COHERENCIA POR TOMA — esto es lo más importante: un plato principal (carne/pollo/pescado) NUNCA va al desayuno ni a una colación. El desayuno y las colaciones se arman con huevos, atún, yogur, quesillo y fruta. El almuerzo y la cena llevan el plato principal.
+Para cada toma elige SOLO de su lista de opciones (cada una ya filtrada para ese horario), por su "name" EXACTO:
+${bibliotecaPorToma}
 YA FIJO (no lo toques): ${anchoredDesc.length ? anchoredDesc.join('; ') : 'nada'}
-TOMAS A LLENAR (slot id · hora): ${emptyTomas.map((t) => `${t.id} ${t.time}`).join(', ')}
 Devuelve SOLO JSON, sin markdown ni backticks:
-{ "tomas": [ { "slot": "<id de la lista>", "items": [ { "name": "<name EXACTO de la biblioteca>" } ] } ], "nota": "1 línea tipo coach" }`;
+{ "tomas": [ { "slot": "<id de la lista>", "items": [ { "name": "<name EXACTO de su lista>" } ] } ], "nota": "1 línea tipo coach" }`;
 
   const text = await askClaude(prompt, apiKey, 900, MODEL_DEFAULT);
   const parsed = parseJsonLoose(text);
   if (!parsed || !Array.isArray(parsed.tomas)) throw new Error('La IA no devolvió un plan válido. Intenta de nuevo.');
-  const byName = new Map(lib.map((f) => [normalizeName(f.name), f]));
   const validSlots = new Set(emptyTomas.map((t) => t.id));
   const out = [];
   for (const t of parsed.tomas) {
     if (!validSlots.has(t?.slot)) continue;
+    const allowed = new Set(SLOT_GROUPS[t.slot] || []);
     for (const it of (t.items || [])) {
       const f = byName.get(normalizeName(it?.name || ''));
-      if (f) out.push({ planSlot: t.slot, name: f.name, kcal: f.kcal, protein: f.protein, carbs: f.carbs, fat: f.fat, fiber: f.fiber });
+      // Refuerzo: aunque la IA se salte la regla, descartamos un plato principal en
+      // desayuno/colación (o cualquier ítem fuera del grupo permitido para esa toma).
+      if (f && allowed.has(f.group)) out.push({ planSlot: t.slot, name: f.name, kcal: f.kcal, protein: f.protein, carbs: f.carbs, fat: f.fat, fiber: f.fiber });
     }
   }
   return { items: out, nota: String(parsed.nota || '') };
