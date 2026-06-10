@@ -9725,8 +9725,108 @@ function PlanPickerItem({ item, onPick }) {
   );
 }
 
+// Comida a mano para el planificador: Hugo escribe un alimento que NO está en su banco,
+// teclea (o estima con Claude) sus calorías/macros, y lo agrega al plan. Sin API key igual
+// funciona escribiendo los números a mano. El total de kcal se ve en vivo mientras edita.
+function PlanManualEntry({ apiKey, onAdd }) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState('');
+  const [portion, setPortion] = useState('');
+  const [m, setM] = useState({ kcal: '', protein: '', carbs: '', fat: '', fiber: '' });
+  const [estimating, setEstimating] = useState(false);
+  const [error, setError] = useState(null);
+  const [flash, setFlash] = useState(false);
+
+  const setField = (k, v) => setM((prev) => ({ ...prev, [k]: v }));
+  const num = (v) => Number(v) || 0;
+  const canAdd = name.trim() && num(m.kcal) > 0;
+
+  const reset = () => { setName(''); setPortion(''); setM({ kcal: '', protein: '', carbs: '', fat: '', fiber: '' }); setError(null); };
+
+  const estimate = async () => {
+    if (!apiKey) { setError('Configura tu API key en ⚙️ Ajustes para estimar (o escribe los números a mano).'); return; }
+    if (!name.trim()) { setError('Escribe primero qué comiste.'); return; }
+    setEstimating(true); setError(null);
+    try {
+      const desc = portion.trim() ? `${name.trim()} (${portion.trim()})` : name.trim();
+      const d = await estimateExtraMacros({ name: desc, apiKey });
+      setM({
+        kcal: String(Math.round(d.kcal || 0)), protein: String(Math.round(d.protein || 0)),
+        carbs: String(Math.round(d.carbs || 0)), fat: String(Math.round(d.fat || 0)),
+        fiber: String(Math.round((d.fiber || 0) * 10) / 10),
+      });
+      if (d.portion && !portion.trim()) setPortion(d.portion);
+    } catch (e) {
+      setError(String(e?.message || e));
+    } finally {
+      setEstimating(false);
+    }
+  };
+
+  const add = () => {
+    if (!canAdd) return;
+    const label = portion.trim() ? `${name.trim()} (${portion.trim()})` : name.trim();
+    onAdd({ name: label, kcal: num(m.kcal), protein: num(m.protein), carbs: num(m.carbs), fat: num(m.fat), fiber: num(m.fiber) });
+    reset();
+    setFlash(true); setTimeout(() => setFlash(false), 1400);
+  };
+
+  const fields = [
+    { k: 'kcal', label: 'kcal' }, { k: 'protein', label: 'P (g)' },
+    { k: 'carbs', label: 'C (g)' }, { k: 'fat', label: 'G (g)' }, { k: 'fiber', label: 'Fibra' },
+  ];
+
+  if (!open) {
+    return (
+      <button type="button" onClick={() => setOpen(true)}
+        className="w-full py-2 rounded-xl border border-dashed border-gray-300 dark:border-gray-700 text-sm font-semibold text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800">
+        ✏️ Comida a mano
+      </button>
+    );
+  }
+
+  return (
+    <div className="rounded-xl border border-gray-200 dark:border-gray-800 p-3 space-y-2 bg-gray-50 dark:bg-gray-800/40">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">✏️ Comida a mano</span>
+        <button type="button" onClick={() => { setOpen(false); reset(); }} className="text-gray-400 hover:text-gray-600 text-sm" aria-label="Cerrar">✕</button>
+      </div>
+      <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="¿Qué comiste? ej. Pan con palta"
+        className="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500" autoFocus />
+      <input type="text" value={portion} onChange={(e) => setPortion(e.target.value)} placeholder="Porción (opcional) ej. 1 taza, 150g"
+        className="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500" />
+      <button type="button" onClick={estimate} disabled={estimating || !name.trim()}
+        className="w-full py-2 rounded-lg bg-violet-500 text-white text-xs font-semibold hover:bg-violet-600 disabled:opacity-60">
+        {estimating ? 'Estimando…' : '✨ Estimar calorías con Claude'}
+      </button>
+      <div className="grid grid-cols-5 gap-1.5">
+        {fields.map((f) => (
+          <label key={f.k} className="block">
+            <span className="block text-[9px] uppercase text-gray-500 dark:text-gray-400 text-center mb-0.5">{f.label}</span>
+            <input type="number" inputMode="decimal" min="0" value={m[f.k]} onChange={(e) => setField(f.k, e.target.value)}
+              placeholder="0"
+              className="w-full px-1 py-1.5 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-xs text-center focus:outline-none focus:ring-2 focus:ring-emerald-500" />
+          </label>
+        ))}
+      </div>
+      {error && <p className="text-[11px] text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/20 px-2 py-1.5 rounded-lg">{error}</p>}
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[11px] text-gray-500 dark:text-gray-400">
+          {num(m.kcal) > 0 ? <><b className="text-gray-700 dark:text-gray-200">{num(m.kcal)} kcal</b> · P{num(m.protein)}</> : 'Estima o escribe las kcal'}
+        </span>
+        <button type="button" onClick={add} disabled={!canAdd}
+          className="px-4 py-1.5 rounded-lg bg-emerald-500 text-white text-sm font-semibold hover:bg-emerald-600 disabled:bg-gray-300 dark:disabled:bg-gray-700 disabled:text-gray-500">
+          Agregar
+        </button>
+      </div>
+      {flash && <p className="text-[11px] text-emerald-700 dark:text-emerald-300 text-center">✓ Agregado al plan</p>}
+    </div>
+  );
+}
+
 function PlanPickerModal({ state, onPick, onClose, slotLabel }) {
   const [q, setQ] = useState('');
+  const apiKey = state.settings?.anthropicApiKey;
   const recipes = (state.recipeBank || []).map((r) => ({
     name: r.name, kcal: r.totals?.kcal || 0, protein: r.totals?.protein || 0,
     carbs: r.totals?.carbs || 0, fat: r.totals?.fat || 0, fiber: r.totals?.fiber || 0,
@@ -9755,8 +9855,9 @@ function PlanPickerModal({ state, onPick, onClose, slotLabel }) {
           <h2 className="text-base font-bold">Agregar{slotLabel ? ` · ${slotLabel}` : ' al plan'}</h2>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-lg" aria-label="Cerrar">✕</button>
         </div>
-        <input type="text" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Buscar…"
+        <input type="text" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Buscar en tu banco…"
           className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500" autoFocus />
+        <PlanManualEntry apiKey={apiKey} onAdd={onPick} />
         <div className="flex-1 overflow-y-auto space-y-3 -mx-1 px-1">
           {filtered.length === 0 && <p className="text-sm text-gray-500 dark:text-gray-400 text-center py-6">Nada que mostrar.</p>}
           {filtered.map((g) => (
