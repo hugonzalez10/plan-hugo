@@ -1111,6 +1111,13 @@ const SEED_SNACKS = [
   { name: 'Quesillo 100g + galletas de arroz', kcal: 190, protein: 14, carbs: 20, fat: 6, fiber: 1, category: 'salado' },
   { name: 'Yogurt Colun Protein + Not Squares', kcal: 276, protein: 17, carbs: 28, fat: 9, fiber: 3, category: 'dulce' },
   { name: '1 lata atún solo', kcal: 120, protein: 26, carbs: 0, fat: 1, fiber: 0, category: 'salado' },
+  // — Arsenal desayunos/colaciones (alimentan desayuno + colaciones) —
+  { name: 'Avena 60g + scoop proteína', kcal: 350, protein: 32, carbs: 42, fat: 6, fiber: 6, category: 'dulce' },
+  { name: 'Pan integral 2 reb + palta + huevo', kcal: 300, protein: 14, carbs: 26, fat: 16, fiber: 6, category: 'salado' },
+  { name: 'Yogur griego natural 170g + chía + berries', kcal: 200, protein: 19, carbs: 18, fat: 6, fiber: 8, category: 'dulce' },
+  { name: '4 claras revueltas + champiñón', kcal: 95, protein: 15, carbs: 2, fat: 2, fiber: 2, category: 'salado' },
+  { name: 'Requesón 150g + fruta', kcal: 185, protein: 20, carbs: 18, fat: 4, fiber: 3, category: 'salado' },
+  { name: 'Batido proteína + leche descremada + plátano', kcal: 280, protein: 32, carbs: 30, fat: 4, fiber: 3, category: 'dulce' },
 ];
 
 const SEED_PROTEINS = [
@@ -1125,6 +1132,19 @@ const SEED_DESSERTS = [
   { name: 'Yogurt Colun light 125g', kcal: 70, protein: 6, carbs: 9, fat: 1, fiber: 0 },
   { name: 'Helado bajo cal 1 bola', kcal: 90, protein: 3, carbs: 14, fat: 2, fiber: 0 },
   { name: 'Chocolate amargo 70% (20g)', kcal: 120, protein: 1, carbs: 9, fat: 8, fiber: 2 },
+  { name: 'Gelatina light', kcal: 10, protein: 1, carbs: 0, fat: 0, fiber: 0 },
+  { name: 'Manzana con cáscara', kcal: 80, protein: 0, carbs: 21, fat: 0, fiber: 4 },
+];
+
+// Platos completos (proteína + guarnición + verdura) para almuerzo/cena: evitan que la
+// toma quede "pelada". Se cargan al recipeBank. totals = macros del plato armado.
+const SEED_RECIPES = [
+  { name: 'Pollo 150g + arroz integral + ensalada', occasion: 'almuerzo', totals: { kcal: 505, protein: 43, carbs: 48, fat: 12, fiber: 7 } },
+  { name: 'Salmón 150g + quinoa + brócoli',          occasion: 'cena',     totals: { kcal: 550, protein: 43, carbs: 40, fat: 22, fiber: 10 } },
+  { name: 'Posta 120g + puré de coliflor + verduras', occasion: 'almuerzo', totals: { kcal: 330, protein: 36, carbs: 18, fat: 13, fiber: 8 } },
+  { name: 'Merluza 180g al horno + papas + ensalada', occasion: 'cena',    totals: { kcal: 320, protein: 37, carbs: 30, fat: 6, fiber: 6 } },
+  { name: 'Lentejas guisadas + carne molida magra',  occasion: 'almuerzo', totals: { kcal: 380, protein: 36, carbs: 42, fat: 9, fiber: 15 } },
+  { name: 'Pavo molido 140g + zapallo italiano + arroz', occasion: 'cena', totals: { kcal: 420, protein: 36, carbs: 45, fat: 8, fiber: 5 } },
 ];
 
 // Tipos de regla soportados. config es específica por tipo.
@@ -1234,7 +1254,8 @@ function buildSeed() {
       notifications: { enabled: false, almuerzo: '13:30', agua: '16:00', cena: '20:30' },
     },
     weights: [],
-    recipeBank: [],
+    recipeBank: SEED_RECIPES.map((r) => ({ ...r, id: uuid(), builtin: true, createdAt: null })),
+    arsenalVersion: 1,
     bridge: { lastSyncAt: null, importedIds: [], pushedIds: [], removedBridgeIds: [] },
     aiCache: { coach: {}, weekly: {}, patterns: null, lastSubstitution: null },
   };
@@ -1325,6 +1346,21 @@ function migrateState(parsed) {
   };
   next.weights = Array.isArray(next.weights) ? next.weights : [];
   next.recipeBank = Array.isArray(next.recipeBank) ? next.recipeBank : [];
+
+  // Carga única del "arsenal v1": suma los seeds nuevos (desayunos/colaciones, recetas
+  // armadas, postres) SIN tocar lo que el usuario ya tiene, y sin resucitar nada que él
+  // haya borrado después (la marca arsenalVersion hace que corra solo una vez).
+  const mergeBuiltins = (existing, seeds, makeEntry) => {
+    const have = new Set((existing || []).map((x) => normalizeName(x.name)));
+    const add = seeds.filter((s) => !have.has(normalizeName(s.name))).map(makeEntry);
+    return [...(existing || []), ...add];
+  };
+  if (!(Number(next.arsenalVersion) >= 1)) {
+    next.snackBank = mergeBuiltins(next.snackBank, SEED_SNACKS, (s) => ({ carbs: 0, fat: 0, fiber: 0, ...s, id: uuid(), builtin: true }));
+    next.dessertBank = mergeBuiltins(next.dessertBank, SEED_DESSERTS, (d) => ({ carbs: 0, fat: 0, fiber: 0, ...d, id: uuid(), builtin: true }));
+    next.recipeBank = mergeBuiltins(next.recipeBank, SEED_RECIPES, (r) => ({ ...r, id: uuid(), builtin: true, createdAt: null }));
+    next.arsenalVersion = 1;
+  }
   next.bridge = (next.bridge && Array.isArray(next.bridge.importedIds))
     ? next.bridge
     : { lastSyncAt: next.bridge?.lastSyncAt || null, importedIds: [] };
@@ -10103,6 +10139,82 @@ Devuelve SOLO JSON, sin markdown ni backticks:
   return { items: out, nota: String(parsed.nota || '') };
 }
 
+// Hash estable de un string (djb2) → entero ≥0. Se usa para rotar la elección del
+// planificador por fecha, así cada día sale distinto sin azar (determinístico).
+function hashStr(s) {
+  let h = 5381;
+  const str = String(s || '');
+  for (let i = 0; i < str.length; i++) h = (((h << 5) + h) ^ str.charCodeAt(i)) | 0;
+  return Math.abs(h);
+}
+
+// "Armar con banco" SIN IA: llena las tomas vacías eligiendo del banco con las mismas
+// reglas de coherencia por horario (SLOT_GROUPS) y método (≥36g/toma, no repetir, fibra,
+// banda no punto). 100% local: no llama a Anthropic, no necesita API key. Determinístico
+// con rotación por fecha para que no salga idéntico todos los días.
+function planDayFromBank({ state, targets, anchored, dateKey }) {
+  const T = targets || DEFAULT_TARGETS;
+  const groups = { main: [], colacion: [], postre: [], receta: [] };
+  const toItem = (x, group) => ({ name: x.name, kcal: Math.round(x.kcal || 0), protein: Math.round(x.protein || 0), carbs: Math.round(x.carbs || 0), fat: Math.round(x.fat || 0), fiber: Math.round(x.fiber || 0), group });
+  (state.proteinBank || []).forEach((x) => { if (x && x.name) groups.main.push(toItem(x, 'main')); });
+  (state.snackBank || []).forEach((x) => { if (x && x.name) groups.colacion.push(toItem(x, 'colacion')); });
+  (state.dessertBank || []).forEach((x) => { if (x && x.name) groups.postre.push(toItem(x, 'postre')); });
+  (state.recipeBank || []).forEach((r) => { if (r && r.name) groups.receta.push(toItem({ name: r.name, ...(r.totals || {}) }, 'receta')); });
+
+  const anchoredList = anchored || [];
+  const emptyTomas = PLAN_TOMAS.filter((t) => !anchoredList.some((a) => a.planSlot === t.id));
+  if (!emptyTomas.length) return { items: [], nota: 'Todas las tomas ya tienen algo planificado.' };
+
+  const used = new Set(anchoredList.map((a) => normalizeName(a.name)));
+  let kcalRun = anchoredList.reduce((s, a) => s + (Number(a.kcal) || 0), 0);
+  const rot = hashStr(dateKey);
+  const out = [];
+
+  // Elige de un pool: descarta usados, ordena por la clave dada y rota entre los 3 mejores.
+  const pick = (pool, cmp, offset = 0) => {
+    const avail = pool.filter((it) => !used.has(normalizeName(it.name)));
+    if (!avail.length) return null;
+    const sorted = [...avail].sort(cmp);
+    const top = sorted.slice(0, Math.min(3, sorted.length));
+    return top[(rot + offset) % top.length];
+  };
+  const byProtFiber = (a, b) => (b.protein - a.protein) || (b.fiber - a.fiber);
+  const byFiber = (a, b) => (b.fiber - a.fiber) || (a.kcal - b.kcal);
+  // Eficiencia proteica: para "completar" a 36g, el ítem que más proteína aporta por kcal,
+  // así no doblamos con dos colaciones de 280 kcal y reventamos el techo.
+  const byLean = (a, b) => (b.protein / (b.kcal || 1)) - (a.protein / (a.kcal || 1));
+
+  emptyTomas.forEach((t, i) => {
+    const allowed = SLOT_GROUPS[t.id] || [];
+    let slotP = 0;
+    const add = (it) => {
+      if (!it) return;
+      out.push({ planSlot: t.id, name: it.name, kcal: it.kcal, protein: it.protein, carbs: it.carbs, fat: it.fat, fiber: it.fiber });
+      used.add(normalizeName(it.name)); slotP += it.protein; kcalRun += it.kcal;
+    };
+    if (allowed.includes('main')) {
+      // Plato principal: prioriza recetas armadas (con guarnición) sobre proteína pelada.
+      add(pick([...groups.receta, ...groups.main], byProtFiber, i));
+      // Complemento de fibra (fruta) si ya cumplió proteína y hay margen de kcal.
+      if (slotP >= MIN_PROTEIN_TOMA && kcalRun + 90 <= T.kcalMax) add(pick(groups.postre, byFiber, i));
+    } else {
+      // Desayuno/colación: arma desde colaciones. Solo completo con un segundo ítem si la
+      // toma viene FLOJA (<30g); si ya viene en 30-35g la dejo así (banda no punto: no
+      // sumo 185 kcal por 4g). El booster es el más eficiente en proteína/kcal y respeta el techo.
+      const BANK_PROTEIN_FLOOR = 30;
+      add(pick(groups.colacion, byProtFiber, i));
+      if (slotP < BANK_PROTEIN_FLOOR) {
+        const second = pick([...groups.colacion, ...groups.postre], byLean, i + 1);
+        if (second && second.protein >= 8 && kcalRun + second.kcal <= T.kcalMax) add(second);
+      }
+    }
+  });
+
+  const totalP = anchoredList.reduce((s, a) => s + (Number(a.protein) || 0), 0) + out.reduce((s, o) => s + o.protein, 0);
+  if (!out.length) return { items: [], nota: 'Tu banco no tiene alimentos para llenar estas tomas. Agrega ítems en Banco.' };
+  return { items: out, nota: `🎲 Armado del banco · ~${Math.round(totalP)}g proteína. Edítalo a gusto.` };
+}
+
 function PlanWeekView({ state, setState, targets }) {
   const weekKeys = useMemo(() => getWeekKeys(), []);
   const [picking, setPicking] = useState(null); // dateKey al que se está agregando
@@ -10112,26 +10224,40 @@ function PlanWeekView({ state, setState, targets }) {
   const days = state.days || {};
   const apiKey = state.settings?.anthropicApiKey;
 
+  // Vacía las tomas planificadas al lienzo del día (ambos botones terminan acá).
+  const applyPlanItems = (dk, items, nota) => {
+    setState((prev) => {
+      const d = { ...((prev.days || {})[dk] || {}) };
+      const cur = Array.isArray(d.plannedMeals) ? [...d.plannedMeals] : [];
+      for (const it of items) cur.push({ id: uuid(), ...it });
+      d.plannedMeals = cur;
+      if (nota) d.planNota = nota;
+      return { ...prev, days: { ...(prev.days || {}), [dk]: d } };
+    });
+  };
+
   const armarDia = async (dk) => {
-    if (!apiKey) { setArmarError({ dk, msg: 'Configura tu API key en ⚙️ Ajustes para usar la IA (o arma el plan a mano).' }); return; }
+    if (!apiKey) { setArmarError({ dk, msg: 'La IA necesita API key (⚙️ Ajustes). O usa "Armar con banco" acá abajo — ese es gratis.' }); return; }
     setArmando(dk); setArmarError(null);
     try {
       const planned = (days[dk]?.plannedMeals) || [];
       const { items, nota } = await suggestDayPlan({ state, targets, anchored: planned, apiKey });
       if (!items.length) { setArmarError({ dk, msg: nota || 'No se pudo armar nada con tu biblioteca actual.' }); return; }
-      setState((prev) => {
-        const d = { ...((prev.days || {})[dk] || {}) };
-        const cur = Array.isArray(d.plannedMeals) ? [...d.plannedMeals] : [];
-        for (const it of items) cur.push({ id: uuid(), ...it });
-        d.plannedMeals = cur;
-        if (nota) d.planNota = nota;
-        return { ...prev, days: { ...(prev.days || {}), [dk]: d } };
-      });
+      applyPlanItems(dk, items, nota);
     } catch (e) {
       setArmarError({ dk, msg: String(e?.message || e) });
     } finally {
       setArmando(null);
     }
+  };
+
+  // Armado local (sin IA, sin costo): elige del banco con las reglas del método.
+  const armarDiaBanco = (dk) => {
+    setArmarError(null);
+    const planned = (days[dk]?.plannedMeals) || [];
+    const { items, nota } = planDayFromBank({ state, targets, anchored: planned, dateKey: dk });
+    if (!items.length) { setArmarError({ dk, msg: nota || 'No se pudo armar con tu banco actual.' }); return; }
+    applyPlanItems(dk, items, nota);
   };
 
   const dotColor = (c) => c === 'red' ? 'bg-rose-500' : c === 'amber' ? 'bg-amber-500' : 'bg-emerald-500';
@@ -10273,10 +10399,17 @@ function PlanWeekView({ state, setState, targets }) {
               {day.planNota && a.hasItems && (
                 <p className="text-[11px] text-gray-600 dark:text-gray-400 italic">💬 {day.planNota}</p>
               )}
-              <button onClick={() => armarDia(dk)} disabled={armando === dk}
-                className="w-full py-2 rounded-xl bg-violet-500 text-white text-xs font-semibold hover:bg-violet-600 disabled:opacity-60">
-                {armando === dk ? 'Pensando un plan…' : '✨ Armar día con IA'}
-              </button>
+              <div className="flex gap-2">
+                <button onClick={() => armarDiaBanco(dk)} disabled={armando === dk}
+                  className="flex-1 py-2 rounded-xl bg-emerald-500 text-white text-xs font-semibold hover:bg-emerald-600 disabled:opacity-60">
+                  🎲 Armar con banco
+                </button>
+                <button onClick={() => armarDia(dk)} disabled={armando === dk}
+                  className="flex-1 py-2 rounded-xl bg-violet-500 text-white text-xs font-semibold hover:bg-violet-600 disabled:opacity-60">
+                  {armando === dk ? 'Pensando…' : '✨ Con IA'}
+                </button>
+              </div>
+              <p className="text-[10px] text-gray-400 dark:text-gray-500 text-center">🎲 Banco = gratis, sin internet · ✨ IA = combina y ajusta (usa tu API key)</p>
               {armarError && armarError.dk === dk && (
                 <p className="text-[11px] text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/20 px-2.5 py-1.5 rounded-lg">{armarError.msg}</p>
               )}
