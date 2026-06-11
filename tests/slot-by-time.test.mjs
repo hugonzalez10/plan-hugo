@@ -4,8 +4,9 @@
 //   · gs._entryFromParams estampa el slot AUSENTE al escribir (nombre → hora), sin pisar
 //     un 'extra' explícito de la skill.
 //   · app.extraPlanSlot cae a la hora del ts para comidas viejas ya guardadas sin mealSlot.
-// La tabla DEBE coincidir en skill ↔ gs ↔ app:
-//   <11:00 desayuno · 11:00–14:59 almuerzo · 15:00–18:59 colacion · 19:00–21:29 cena · 21:30+ antojo
+// La tabla DEBE coincidir en skill ↔ gs ↔ app (5 tomas, sin antojo; la colación AM cae antes
+// del almuerzo):
+//   <10:30 desayuno · 10:30–12:29 colacion1 · 12:30–15:29 almuerzo · 15:30–19:29 colacion2 · 19:30+ cena
 //   node --test
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -27,7 +28,7 @@ const planM = appSrc.match(/const PLAN_SLOTS = new Set\(\[[^\]]*\]\);/);
 const reM = appSrc.match(/const SLOT_NAME_RE = \{[\s\S]*?\n\};/);
 assert.ok(planM && reM, 'no se encontró PLAN_SLOTS/SLOT_NAME_RE en app.jsx');
 const { slotByTime, extraPlanSlot } = new Function(
-  `${planM[0]}; ${reM[0]}; ${fn('slotByTime')}; ${fn('extraPlanSlot')}; return { slotByTime, extraPlanSlot };`
+  `${planM[0]}; ${reM[0]}; ${fn('resolveColacion')}; ${fn('slotByTime')}; ${fn('extraPlanSlot')}; return { slotByTime, extraPlanSlot };`
 )();
 
 // Una fecha local con hora HH:MM (sin tocar el huso: el test corre en local, como la app).
@@ -35,9 +36,9 @@ const at = (h, m) => new Date(2026, 5, 10, h, m, 0);
 
 // ── Fronteras de la tabla (app.slotByTime ↔ gs._slotByTime por time string) ──────────
 const BOUNDARIES = [
-  [10, 59, 'desayuno'], [11, 0, 'almuerzo'], [14, 59, 'almuerzo'],
-  [15, 0, 'colacion'], [18, 59, 'colacion'], [19, 0, 'cena'],
-  [21, 29, 'cena'], [21, 30, 'antojo'], [23, 15, 'antojo'], [0, 5, 'desayuno'],
+  [10, 29, 'desayuno'], [10, 30, 'colacion1'], [12, 29, 'colacion1'],
+  [12, 30, 'almuerzo'], [15, 29, 'almuerzo'], [15, 30, 'colacion2'],
+  [19, 29, 'colacion2'], [19, 30, 'cena'], [23, 15, 'cena'], [0, 5, 'desayuno'],
 ];
 
 test('slotByTime (app) y _slotByTime (gs) coinciden en las fronteras', () => {
@@ -67,9 +68,9 @@ test('_entryFromParams: comida sin time pero con ts de cena → mealSlot cena', 
 });
 
 test('_entryFromParams: nombre con prefijo gana sobre la hora', () => {
-  // "Colacion 1 - ..." a las 13:30 (hora de almuerzo) → debe quedar colacion por el nombre.
+  // "Colacion 1 - ..." a las 13:30 (hora de almuerzo) → debe quedar colacion1 por el nombre.
   const e = gs._entryFromParams({ section: 'meals', name: 'Colacion 1 - barra', time: '13:30', kcal: 200 });
-  assert.equal(e.mealSlot, 'colacion');
+  assert.equal(e.mealSlot, 'colacion1');
 });
 
 test('_entryFromParams: mealSlot "extra" explícito NO se pisa', () => {
@@ -88,9 +89,9 @@ test('_entryFromParams: solo estampa en section meals, no en otras', () => {
 });
 
 // ── app.extraPlanSlot: cae a la hora del ts para comidas viejas sin mealSlot ──────────
-test('extraPlanSlot: extra del chat sin mealSlot, con ts de colación → colacion', () => {
+test('extraPlanSlot: extra del chat sin mealSlot, con ts de colación tarde → colacion2', () => {
   const x = { source: 'skill-chat', name: 'Charqui 20g', ts: at(16, 0).getTime() };
-  assert.equal(extraPlanSlot(x), 'colacion');
+  assert.equal(extraPlanSlot(x), 'colacion2');
 });
 
 test('extraPlanSlot: mealSlot "extra" explícito no se reclasifica por hora', () => {

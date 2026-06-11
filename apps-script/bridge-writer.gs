@@ -156,9 +156,16 @@ var UPLOAD_TITLE = 'plan-hugo-bridge.upload.json';
 //     obligó a reconstruir a mano. Nunca se poda.
 //   · meals/workouts/checks/water → 30: crecen rápido (varias entradas/día) y la app no
 //     necesita el log viejo; 30 días cubre cualquier "cómo voy" + colchón.
-var RETENTION    = { weights: 0, meals: 30, workouts: 30, checks: 30, water: 30 };
+//   · energy → 0: serie compacta {date, kcalIn, trendWeightKg} (~3 números/día) que el TDEE
+//     adaptativo de la app necesita para reconstruir el gasto. Como meals se poda a 30 días,
+//     sin esto el historial de ingesta para estimar gasto se perdería entre dispositivos.
+//     Nunca se poda; mergea por fecha (no duplica).
+var RETENTION    = { weights: 0, meals: 30, workouts: 30, checks: 30, water: 30, energy: 0 };
 var SNAPSHOT_RETENTION_DAYS = 30; // los snapshots por fecha siguen la misma ventana que meals
-var SECTIONS     = ['meals', 'weights', 'workouts', 'checks', 'water'];
+var SECTIONS     = ['meals', 'weights', 'workouts', 'checks', 'water', 'energy'];
+// Campos de la sección `energy` que se mergean por fecha (latest gana). Mantener en sync con
+// buildEnergySeries() de app.jsx.
+var ENERGY_MERGE_FIELDS = ['kcalIn', 'trendWeightKg'];
 var WINDOW_MS    = 5 * 60 * 1000; // ventana de dedup por contenido (meals/workouts)
 // Campos de composición que se mergean sobre la medición del día (no duplica peso).
 // Lista COMPLETA alineada con WEIGHT_FIELDS + STRING_FIELDS + SEGMENT_FIELDS de app.jsx:
@@ -456,47 +463,60 @@ function _sig(sec, e) {
   if (sec === 'meals')    return _norm(e.name) + '|' + _norm(e.mealSlot || 'extra') + '|' + (e.date || '');
   if (sec === 'workouts') return _norm(e.name) + '|' + (e.date || '');
   if (sec === 'weights')  return (e.date || '');
+  if (sec === 'energy')   return (e.date || '');
   if (sec === 'checks')   return _norm(e.meal) + '|' + (e.date || '');
   return null;
 }
 
 // Slots del plan + prefijos con que la skill nombra un reemplazo de comida ("Desayuno -
 // ...", "Colacion 1 - ...", "Cena - ..."). DEBE coincidir con SLOT_NAME_RE de app.jsx.
-var PLAN_SLOTS_GS = ['desayuno', 'almuerzo', 'colacion', 'cena', 'antojo'];
+var PLAN_SLOTS_GS = ['desayuno', 'almuerzo', 'colacion1', 'colacion2', 'cena'];
 var SLOT_NAME_RE_GS = {
   desayuno: /^desayuno\b/i,
   almuerzo: /^almuerzo\b/i,
-  colacion: /^colaci[oó]n/i,
+  colacion1: /^colaci[oó]n\s*1\b/i,
+  colacion2: /^colaci[oó]n\s*2\b/i,
   cena: /^cena\b/i,
-  antojo: /^antojo\b/i,
 };
+// Colación 1 (mañana) vs 2 (tarde) según la hora; corte 15:00. Espejo de resolveColacion() de app.jsx.
+function _resolveColacion(m) {
+  var mins = null;
+  if (m && m.time) { var t = /^(\d{1,2}):(\d{2})/.exec(m.time); if (t) mins = (+t[1]) * 60 + (+t[2]); }
+  if (mins == null && m && m.ts != null) { var d = new Date(Number(m.ts)); mins = d.getHours() * 60 + d.getMinutes(); }
+  if (mins != null && mins < 15 * 60) return 'colacion1';
+  return 'colacion2';
+}
 // La sección del plan que un meal REEMPLAZA, o null si es un extra genuino. Prefiere
-// mealSlot; cae al nombre solo para skill-chat. Espejo de extraPlanSlot() de app.jsx.
+// mealSlot ('colacion' a secas → 1/2 por hora); cae al nombre solo para skill-chat. Espejo
+// de extraPlanSlot() de app.jsx.
 function _mealSlot(m) {
   if (!m) return null;
+  if (m.mealSlot === 'colacion') return _resolveColacion(m);
   if (PLAN_SLOTS_GS.indexOf(m.mealSlot) >= 0) return m.mealSlot;
   if (m.source === 'skill-chat' && m.name) {
     for (var i = 0; i < PLAN_SLOTS_GS.length; i++) {
       var slot = PLAN_SLOTS_GS[i];
       if (SLOT_NAME_RE_GS[slot].test(m.name)) return slot;
     }
+    if (/^colaci[oó]n/i.test(m.name)) return _resolveColacion(m); // "Colación - ..." sin número
   }
   return null;
 }
 // Slot del plan según la hora del registro (time "HH:MM" o, si falta, el ts). Espejo de
-// slotByTime() de app.jsx; la tabla DEBE coincidir con la de la skill (food-tracker). Usa la
-// zona horaria del script (appsscript.json → America/Santiago).
+// slotByTime() de app.jsx; la tabla DEBE coincidir con la de la skill (food-tracker). La
+// colación AM (11:00) cae ANTES del almuerzo. Usa la zona horaria del script
+// (appsscript.json → America/Santiago).
 function _slotByTime(time, ts) {
   var mins = null;
   var m = time && /^(\d{1,2}):(\d{2})/.exec(time);
   if (m) mins = (+m[1]) * 60 + (+m[2]);
   else if (ts != null) { var d = new Date(Number(ts)); mins = d.getHours() * 60 + d.getMinutes(); }
   if (mins == null) return null;
-  if (mins < 11 * 60) return 'desayuno';
-  if (mins < 15 * 60) return 'almuerzo';
-  if (mins < 19 * 60) return 'colacion';
-  if (mins < 21 * 60 + 30) return 'cena';
-  return 'antojo';
+  if (mins < 10 * 60 + 30) return 'desayuno';
+  if (mins < 12 * 60 + 30) return 'colacion1';
+  if (mins < 15 * 60 + 30) return 'almuerzo';
+  if (mins < 19 * 60 + 30) return 'colacion2';
+  return 'cena';
 }
 // ¿Ese día ya tiene un registro real de comida para la sección del check? Si sí, el
 // check es redundante: el extra es la comida y marcar además el plan sumaría kcal
@@ -558,8 +578,15 @@ function _contentUnion(bridge, sec, entries, assignId) {
         WEIGHT_MERGE_FIELDS.forEach(function (k) {
           if (e[k] != null && e[k] !== '') cur[k] = e[k];
         });
+      } else if (sec === 'energy') {
+        // Misma fecha → actualiza kcalIn/trendWeightKg (latest gana). El día se recalcula en
+        // la app a medida que registra, así que el último valor del día es el bueno.
+        var curE = bridge[sec][hitIdx];
+        ENERGY_MERGE_FIELDS.forEach(function (k) {
+          if (e[k] != null && e[k] !== '') curE[k] = e[k];
+        });
       }
-      return; // dedup: ya existe (o mergeado, en weights)
+      return; // dedup: ya existe (o mergeado, en weights/energy)
     }
     // Anti-doble-conteo: un check de una sección que ese día YA tiene comida registrada
     // es redundante (el extra es la comida; el check sumaría el plan fijo fantasma). Como

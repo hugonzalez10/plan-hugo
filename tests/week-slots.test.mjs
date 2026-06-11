@@ -29,7 +29,7 @@ const FIXED_MEALS = constLit('const FIXED_MEALS = \\[', '\\];');
 const { computeDayTotals } = new Function([
   FIXED_MEALS, planM[0], reM[0],
   fn('mealItemsFor'), fn('sumField'), fn('getMealItemTicks'),
-  fn('slotByTime'), fn('extraPlanSlot'), fn('computeDayTotals'),
+  fn('resolveColacion'), fn('slotByTime'), fn('extraPlanSlot'), fn('computeDayTotals'),
   'return { computeDayTotals };',
 ].join('\n'))();
 
@@ -65,9 +65,9 @@ test('extra sin mealSlot pero con ts de cena alimenta hasDinner (datos viejos)',
   assert.equal(t.dinnerLabel, 'Atún quinoa');
 });
 
-test('el banco sigue funcionando: snack del banco sin extras', () => {
+test('el banco sigue funcionando: snack del banco sin extras (colación 1)', () => {
   const snackBank = [{ id: 's1', name: 'Yogurt proteico', protein: 30, kcal: 190, carbs: 21, fat: 7, fiber: 7 }];
-  const day = { snackId: 's1', eaten: { colacion: true }, extras: [] };
+  const day = { snackId1: 's1', eaten: { colacion1: true }, extras: [] };
   const t = run(day, snackBank);
   assert.equal(t.hasSnack, true);
   assert.equal(t.snackLabel, 'Yogurt proteico');
