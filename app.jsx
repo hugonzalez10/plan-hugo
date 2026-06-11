@@ -829,6 +829,14 @@ function useGistAutoSync(state, setState) {
   // Estado interno crudo: lo fijan los efectos. 'conflict'/'error' son "pegajosos"
   // hasta el próximo intento exitoso.
   const [raw, setRaw] = useState('idle');
+  // Reintento automático: mientras quede en 'error' y haya cambios sin subir, reintenta cada
+  // 30s en vez de quedarse rojo para siempre hasta que el usuario edite algo.
+  const [retryTick, setRetryTick] = useState(0);
+  useEffect(() => {
+    if (!enabled || raw !== 'error') return;
+    const id = setInterval(() => setRetryTick((n) => n + 1), 30000);
+    return () => clearInterval(id);
+  }, [enabled, raw]);
 
   // SUBIR (debounced) cuando el equipo está "sucio"
   useEffect(() => {
@@ -853,7 +861,7 @@ function useGistAutoSync(state, setState) {
       finally { busyRef.current = false; }
     }, 2500);
     return () => clearTimeout(t);
-  }, [enabled, dataSig, lastPushedSig, lastRemoteUpdatedAt, pat, gistId]);
+  }, [enabled, dataSig, lastPushedSig, lastRemoteUpdatedAt, pat, gistId, retryTick]);
 
   // BAJAR al abrir / volver a primer plano (solo si limpio + nube más nueva)
   useEffect(() => {
@@ -1054,11 +1062,17 @@ function calcMifflinStJeor({ sex, weightKg, heightCm, age }) {
   return sex === 'F' ? base - 161 : base + 5;
 }
 
-function calcTargets(profile) {
+function calcTargets(profile, opts = {}) {
   if (!profile) return DEFAULT_TARGETS;
   const bmr = calcMifflinStJeor(profile);
   const factor = ACTIVITY_FACTORS[profile.activityLevel] ?? 1.55;
-  const tdee = bmr != null ? bmr * factor : null;
+  const formulaTdee = bmr != null ? bmr * factor : null;
+  // TDEE adaptativo (gasto reconstruido del balance energético) manda sobre Mifflin cuando hay
+  // datos suficientes; si no, cae a la fórmula. Reemplaza el factor de actividad poblacional
+  // por TU gasto real medido (decisión del usuario).
+  const adaptiveTdee = opts && Number.isFinite(opts.adaptiveTdee) && opts.adaptiveTdee > 0 ? opts.adaptiveTdee : null;
+  const tdee = adaptiveTdee != null ? adaptiveTdee : formulaTdee;
+  const tdeeBasis = adaptiveTdee != null ? 'adaptive' : (formulaTdee != null ? 'formula' : 'none');
   let kcalTarget;
   if (profile.kcalTarget != null) {
     kcalTarget = profile.kcalTarget;
@@ -1097,7 +1111,101 @@ function calcTargets(profile) {
     carbsTarget, fatTarget, fiberTarget, waterTarget,
     bmr: bmr != null ? Math.round(bmr) : null,
     tdee: tdee != null ? Math.round(tdee) : null,
+    formulaTdee: formulaTdee != null ? Math.round(formulaTdee) : null,
+    tdeeBasis,
   };
+}
+
+// TDEE adaptativo: reconstruye el gasto real desde el balance energético observado, en vez de
+// confiar en Mifflin × factor de actividad (ruido poblacional). Sobre una ventana móvil,
+//   gasto ≈ ingesta_media − pendiente_peso(kg/día) × 7700
+// (si bajaste de peso, la pendiente es negativa → gastaste más de lo que comiste → suma). La
+// pendiente sale de una REGRESIÓN sobre todos los pesos de la ventana (robusta y simétrica, no
+// dos lecturas sueltas). Se ancla en las mediciones REALES dentro de la ventana, porque Hugo se
+// pesa cada 3-4 días, no justo hace windowDays. Devuelve null si faltan datos; el caller cae a
+// la fórmula. Guardrails: ≥minDays de span medido, cobertura mínima de días registrados, y
+// clamp a un rango sano respecto a Mifflin para descartar basura.
+function computeAdaptiveTDEE(state, refDate = todayKey(), options = {}) {
+  const { windowDays = 28, minDays = 14, minCoverage = 0.6 } = options;
+  const profile = state?.userProfile;
+  if (!profile) return null;
+  const days = state?.days || {};
+  const weights = state?.weights || [];
+
+  const windowStartKey = (() => {
+    const d = new Date(refDate + 'T12:00:00');
+    d.setDate(d.getDate() - (windowDays - 1));
+    return todayKey(d);
+  })();
+  // Pesos reales dentro de la ventana, anclando el span en la primera y última medición.
+  const series = weightSeries(weights).filter((p) => p.key >= windowStartKey && p.key <= refDate);
+  if (series.length < 2) return null;
+  const firstKey = series[0].key;
+  const lastKey = series[series.length - 1].key;
+  const spanDays = daysBetween(firstKey, lastKey);
+  if (spanDays < minDays) return null;                 // sin ≥2 semanas de span medido, no estimar
+  const slopePerDay = linRegSlopePerDay(series);       // kg/día (negativo = bajando)
+  if (slopePerDay == null) return null;
+
+  // Ingesta media SOLO sobre días con registro (kcalIn>0) dentro del span medido; los días en
+  // blanco no son "comí 0".
+  const formulaTargets = calcTargets(profile); // sin adaptiveTdee → no recursivo; solo para kcalIn
+  let kcalSum = 0, logged = 0;
+  const spanCount = spanDays + 1;
+  for (let i = 0; i < spanCount; i++) {
+    const d = new Date(lastKey + 'T12:00:00');
+    d.setDate(d.getDate() - i);
+    const k = todayKey(d);
+    const day = days[k];
+    if (!day) continue;
+    const t = computeDayTotals(day, state.snackBank || [], state.proteinBank || [], formulaTargets, state.dessertBank || [], state.antojoCustomItems || []);
+    const kcalIn = Number(t.kcalIn) || 0;
+    if (kcalIn > 0) { kcalSum += kcalIn; logged++; }
+  }
+  const coverage = logged / spanCount;
+  if (logged < minDays || coverage < minCoverage) return null;
+  const meanKcalIn = kcalSum / logged;
+
+  const tdee = meanKcalIn - slopePerDay * KCAL_PER_KG_FAT;
+
+  // Clamp de sanidad: rechaza valores absurdos (datos sucios, peso mal tipeado).
+  const formulaTdee = formulaTargets.tdee;
+  let clamped = tdee;
+  if (formulaTdee) clamped = Math.min(formulaTdee * 1.4, Math.max(formulaTdee * 0.7, tdee));
+  else clamped = Math.min(5000, Math.max(1200, tdee));
+  if (!Number.isFinite(clamped) || clamped <= 0) return null;
+
+  return {
+    tdee: Math.round(clamped),
+    basis: 'adaptive',
+    days: spanDays,
+    coverage: Number(coverage.toFixed(2)),
+    loggedDays: logged,
+    meanKcalIn: Math.round(meanKcalIn),
+    weeklyKg: Number((slopePerDay * 7).toFixed(2)),
+    clampedFromRaw: Math.round(clamped) !== Math.round(tdee),
+  };
+}
+
+// Serie compacta de balance energético por día: { date, kcalIn, trendWeightKg }. Es lo que la
+// app empuja al bridge (sección `energy`, never-pruned) para que el historial de ingesta+peso
+// sobreviva a la poda de meals (30 días) y esté disponible en otros dispositivos. Acotada a
+// `windowDays` para no reenviar todo cada vez. Reusa computeDayTotals + trendWeightAt.
+function buildEnergySeries(state, windowDays = 180) {
+  const days = state?.days || {};
+  const targets = calcTargets(state?.userProfile);
+  const series = weightSeries(state?.weights || []);
+  const cutoff = shiftDate(todayKey(), -windowDays);
+  const out = [];
+  for (const k of Object.keys(days).sort()) {
+    if (k < cutoff) continue;
+    const t = computeDayTotals(days[k], state.snackBank || [], state.proteinBank || [], targets, state.dessertBank || [], state.antojoCustomItems || []);
+    const kcalIn = Math.round(Number(t.kcalIn) || 0);
+    const trend = trendWeightAt(series, k);
+    if (kcalIn <= 0 && trend == null) continue; // día sin nada que guardar
+    out.push({ date: k, kcalIn, trendWeightKg: trend != null ? Number(trend.toFixed(2)) : null });
+  }
+  return out;
 }
 
 const KCAL_PER_KG_FAT = 7700;
@@ -1456,6 +1564,8 @@ function loadState() {
   } catch {}
   const seed = buildSeed();
   if (hadData) seed.__corruptionDetected = true;
+  else seed.__freshStart = true; // sin datos locales: puede ser device nuevo O purga de Safari →
+  // el mount de usePersistentState intentará rescatar del espejo IndexedDB.
   return seed;
 }
 
@@ -1473,6 +1583,12 @@ function saveState(state) {
     if (prev) localStorage.setItem(BACKUP_STORAGE_KEY, prev);
   } catch {}
 
+  // Espejo durable en IndexedDB (fire-and-forget): se escribe incluso si el localStorage falla
+  // por cuota, porque IndexedDB tiene cuota mayor y es la red de rescate. EXCEPTO cuando el
+  // estado es un seed de arranque (__freshStart): guardarlo clobberearía el espejo bueno justo
+  // antes de que el rescate al montar lo lea (el save effect corre en el mismo mount).
+  if (!state.__freshStart) idbPut(json);
+
   try {
     localStorage.setItem(STORAGE_KEY, json);
     // Verificación: releer y confirmar que quedó completo.
@@ -1487,6 +1603,73 @@ function saveState(state) {
     } catch {}
     return 'failed';
   }
+}
+
+// ─── Espejo durable en IndexedDB ─────────────────────────────────────────────
+// localStorage sigue siendo el store PRIMARIO (síncrono, simple). IndexedDB es un ESPEJO más
+// durable (mayor cuota, menos propenso a la purga de Safari en iOS) que se escribe en cada save
+// y se usa como RESCATE: si al arrancar el localStorage aparece vacío (purgado) pero IndexedDB
+// conserva el estado, se rehidrata. IndexedDB NUNCA pisa un localStorage bueno: solo rescata.
+const IDB_NAME = 'plan-hugo';
+const IDB_STORE = 'kv';
+const IDB_KEY = 'state';
+let _idbPromise = null;
+function idbOpen() {
+  if (_idbPromise) return _idbPromise;
+  _idbPromise = new Promise((resolve) => {
+    try {
+      if (typeof indexedDB === 'undefined') { resolve(null); return; }
+      const req = indexedDB.open(IDB_NAME, 1);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE);
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => resolve(null);
+    } catch { resolve(null); }
+  });
+  return _idbPromise;
+}
+function idbPut(value) {
+  return idbOpen().then((db) => {
+    if (!db) return false;
+    return new Promise((resolve) => {
+      try {
+        const tx = db.transaction(IDB_STORE, 'readwrite');
+        tx.objectStore(IDB_STORE).put(value, IDB_KEY);
+        tx.oncomplete = () => resolve(true);
+        tx.onerror = () => resolve(false);
+        tx.onabort = () => resolve(false);
+      } catch { resolve(false); }
+    });
+  });
+}
+function idbGet() {
+  return idbOpen().then((db) => {
+    if (!db) return null;
+    return new Promise((resolve) => {
+      try {
+        const tx = db.transaction(IDB_STORE, 'readonly');
+        const req = tx.objectStore(IDB_STORE).get(IDB_KEY);
+        req.onsuccess = () => resolve(req.result ?? null);
+        req.onerror = () => resolve(null);
+      } catch { resolve(null); }
+    });
+  });
+}
+
+// Decisión PURA de rescate: dado el estado cargado de localStorage y el JSON del espejo IDB,
+// devuelve el estado a usar o null si no hay que rescatar. Solo rescata si arrancamos sin datos
+// locales (__freshStart) y el espejo trae datos reales. Idempotente y sin I/O (testeable).
+function recoverFromMirror(localState, mirrorJson) {
+  if (!localState || !localState.__freshStart) return null; // datos locales buenos → no tocar
+  if (!mirrorJson) return null;
+  let parsed;
+  try { parsed = migrateState(JSON.parse(mirrorJson)); } catch { return null; }
+  if (!parsed) return null;
+  const hasData = !!(parsed.userProfile || (parsed.days && Object.keys(parsed.days).length > 0)
+    || (Array.isArray(parsed.weights) && parsed.weights.length > 0));
+  return hasData ? parsed : null;
 }
 
 // ─── Puente chat → app: lee el JSON que la skill deja en Drive vía Apps Script ───
@@ -1720,8 +1903,26 @@ function mergeBridge(state, bridge) {
     }
   }
 
+  // Serie `energy` (balance energético por día) que el bridge retiene para siempre. Se mergea
+  // por fecha en state.energy (latest gana) SIN tocar el log de comidas: alimenta el TDEE
+  // adaptativo en dispositivos cuyo `days` no tiene el historial (meals podadas a 30 días).
+  let energy = Array.isArray(state.energy) ? [...state.energy] : [];
+  if (Array.isArray(bridge.energy) && bridge.energy.length) {
+    const byDate = new Map(energy.map((e) => [e.date, e]));
+    for (const e of bridge.energy) {
+      if (!e || !e.date) continue;
+      const cur = byDate.get(e.date);
+      byDate.set(e.date, {
+        date: e.date,
+        kcalIn: e.kcalIn != null ? Number(e.kcalIn) : (cur?.kcalIn ?? null),
+        trendWeightKg: e.trendWeightKg != null ? Number(e.trendWeightKg) : (cur?.trendWeightKg ?? null),
+      });
+    }
+    energy = Array.from(byDate.values()).sort((a, b) => a.date.localeCompare(b.date));
+  }
+
   const nextState = {
-    ...state, days, weights,
+    ...state, days, weights, energy,
     bridge: {
       ...(state.bridge || {}),
       lastSyncAt: new Date().toISOString(),
@@ -1923,6 +2124,62 @@ function getRuleWeekKeys(refDate = new Date()) {
   return keys;
 }
 
+// Núcleo del SMA por ventana temporal: promedia las `y` de los puntos cuyo `x` (ms) cae en
+// (evalT - windowMs, evalT]. Asume `points` ordenado ascendente por x. null si la ventana
+// queda vacía. Lo comparten trendWeightAt (peso-tendencia) y computeSMA (gráfico).
+function smaAt(points, evalT, windowMs) {
+  if (!points || !points.length || !Number.isFinite(evalT)) return null;
+  const cutoff = evalT - windowMs;
+  let sum = 0, count = 0;
+  for (let i = points.length - 1; i >= 0; i--) {
+    if (points[i].x > evalT) continue;   // puntos futuros respecto al de evaluación
+    if (points[i].x < cutoff) break;     // fuera de la ventana (resto es aún más viejo)
+    sum += points[i].y;
+    count++;
+  }
+  return count > 0 ? sum / count : null;
+}
+
+// Serie de pesos limpia y ordenada por fecha ascendente: [{ x:ms, y:kg, key:'YYYY-MM-DD' }].
+function weightSeries(weights) {
+  return (weights || [])
+    .filter((w) => w && w.weightKg != null && w.date)
+    .map((w) => ({ x: new Date(w.date + 'T12:00:00').getTime(), y: Number(w.weightKg), key: w.date }))
+    .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y))
+    .sort((a, b) => a.x - b.x);
+}
+
+// Peso-tendencia (SMA temporal) evaluado en `dateKey`: el valor "denoised" del peso ese día,
+// promediando las mediciones de los últimos `windowDays`. Es la señal que deben usar la tasa
+// de pérdida y el ajuste, en vez del peso crudo (que el agua corporal mueve ±1.5 kg).
+// null si no hay mediciones en la ventana. Acepta weights crudos o una serie ya construida.
+function trendWeightAt(weights, dateKey, windowDays = 10) {
+  const series = (Array.isArray(weights) && weights.length && weights[0] && 'x' in weights[0] && 'y' in weights[0])
+    ? weights
+    : weightSeries(weights);
+  if (!series.length) return null;
+  const evalT = dateKey ? new Date(dateKey + 'T12:00:00').getTime() : series[series.length - 1].x;
+  return smaAt(series, evalT, windowDays * 86400000);
+}
+
+// Pendiente de regresión lineal por mínimos cuadrados, en kg/día (y=kg, x=tiempo). Usa TODOS
+// los puntos (no solo los extremos), así que es robusta al ruido diario. Acepta weights crudos
+// o una serie ya construida. null si <2 puntos o varianza nula.
+function linRegSlopePerDay(series) {
+  const pts = (Array.isArray(series) && series.length && series[0] && 'x' in series[0] && 'y' in series[0])
+    ? series : weightSeries(series);
+  if (!pts || pts.length < 2) return null;
+  const x0 = pts[0].x;
+  let n = 0, sx = 0, sy = 0, sxx = 0, sxy = 0;
+  for (const p of pts) {
+    const xd = (p.x - x0) / 86400000; // días desde el primer punto
+    n++; sx += xd; sy += p.y; sxx += xd * xd; sxy += xd * p.y;
+  }
+  const denom = n * sxx - sx * sx;
+  if (denom === 0) return null;
+  return (n * sxy - sx * sy) / denom; // kg/día (negativo = bajando)
+}
+
 // Peso promedio de una semana (lunes-domingo que contiene refDate). null si no hay datos.
 function weekAvgWeight(weights, refDate) {
   const keys = new Set(getRuleWeekKeys(refDate));
@@ -1938,10 +2195,14 @@ function weekAvgWeight(weights, refDate) {
 // status: 'fast' (>0.8%, riesgo masa magra) | 'ok' (0.5-0.7%) | 'slow' (<0.4%) | 'mid'.
 function computeWeeklyLossRate(weights, refDateKey) {
   const ref = refDateKey ? new Date(refDateKey + 'T12:00:00') : new Date();
-  const curr = weekAvgWeight(weights, ref);
   const prevRef = new Date(ref);
   prevRef.setDate(prevRef.getDate() - 7);
-  const prev = weekAvgWeight(weights, prevRef);
+  // Peso-tendencia (denoised) para que la tarjeta de tasa use la MISMA señal suavizada que el
+  // ajuste; cae al promedio de semana calendario si la ventana de tendencia queda vacía.
+  const refKey = refDateKey || todayKey(ref);
+  const prevKey = todayKey(prevRef);
+  const curr = trendWeightAt(weights, refKey) ?? weekAvgWeight(weights, ref);
+  const prev = trendWeightAt(weights, prevKey) ?? weekAvgWeight(weights, prevRef);
   if (curr == null || prev == null || prev === 0) return null;
   const deltaKg = curr - prev; // negativo = bajó
   const pctPerWeek = (-deltaKg / prev) * 100; // positivo = pérdida
@@ -2258,9 +2519,15 @@ function computePlanAdjustment(state, refDate = todayKey(), options = {}) {
   if (days < minDays) return null;       // <14 días: no evaluar (ignora TDEE dinámico)
   if (!first.weightKg) return null;
 
+  // Tendencia robusta: pendiente de regresión sobre TODOS los pesos de la ventana, no el delta
+  // crudo entre dos lecturas sueltas (el agua corporal mueve ±1.5 kg y disparaba falsos
+  // "bajas muy rápido"). realDeltaKg queda solo para mostrar.
+  const series = weightSeries(inWindow);
+  const slopePerDay = linRegSlopePerDay(series);
   const realDeltaKg = Number((last.weightKg - first.weightKg).toFixed(2));
-  const weeklyKg = (realDeltaKg / days) * 7;              // negativo = pérdida
-  const pctPerWeek = (-weeklyKg / first.weightKg) * 100;  // positivo = pérdida
+  const weeklyKg = slopePerDay != null ? slopePerDay * 7 : (realDeltaKg / days) * 7; // negativo = pérdida
+  const baseWeight = trendWeightAt(series, last.date) ?? first.weightKg;
+  const pctPerWeek = (-weeklyKg / baseWeight) * 100;     // positivo = pérdida
   const currentDeficit = Number.isFinite(profile.kcalDeficit) ? profile.kcalDeficit : 400;
 
   if (pctPerWeek > WEEKLY_LOSS.fastPct) {
@@ -2712,6 +2979,24 @@ function usePersistentState() {
     const result = saveState(state);
     setSaveError(result === 'ok' ? null : 'No se pudo guardar en este dispositivo — probablemente falta espacio. Libera datos del sitio o exporta un respaldo antes de seguir.');
   }, [state]);
+
+  // Rescate desde el espejo IndexedDB: si arrancamos sin datos locales (Safari pudo purgar el
+  // localStorage) pero IndexedDB conserva el estado, rehidratamos. Solo al montar; no pisa si el
+  // usuario ya empezó a escribir (recoverFromMirror exige __freshStart).
+  useEffect(() => {
+    let cancelled = false;
+    idbGet().then((mirrorJson) => {
+      if (cancelled) return;
+      setState((prev) => {
+        const recovered = recoverFromMirror(prev, mirrorJson);
+        if (recovered) return recovered; // rescatado: trae datos reales, sin __freshStart
+        if (prev.__freshStart) { const n = { ...prev }; delete n.__freshStart; return n; } // limpia el marcador
+        return prev;
+      });
+    });
+    return () => { cancelled = true; };
+  }, []);
+
   return [state, setState, saveError];
 }
 
@@ -5584,6 +5869,12 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
     updateDay({ extras: [...(day.extras || []), ...cloned] });
   };
 
+  // Copia de un toque los extras del día anterior (menos fricción que abrir "Repetir un día"
+  // y elegir). Disponible solo si ayer tiene algo registrado.
+  const yesterdayKey = shiftDate(today, -1);
+  const yesterdayExtras = state.days?.[yesterdayKey]?.extras || [];
+  const copyYesterday = () => { if (yesterdayExtras.length) repeatItems(yesterdayExtras); };
+
   // Enforcement de reglas: acumula violaciones, muestra modal único si hay
   const [pendingViolation, setPendingViolation] = useState(null);
   const [suggestSlot, setSuggestSlot] = useState(null); // 'snack' | 'dinner' | 'dessert_almuerzo' | 'dessert_cena' | null
@@ -5909,11 +6200,18 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
 
         <RecentsRow recents={recents} onPick={addRecent} />
 
-        <button onClick={() => setShowRepeat(true)}
-          className="w-full py-2.5 rounded-2xl bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 text-gray-600 dark:text-gray-300 font-semibold text-sm hover:border-emerald-400 flex items-center justify-center gap-2">
-          <span>🔁</span>
-          <span>Repetir un día</span>
-        </button>
+        <div className="grid grid-cols-2 gap-2">
+          <button onClick={copyYesterday} disabled={!yesterdayExtras.length}
+            className="py-2.5 rounded-2xl bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 text-gray-600 dark:text-gray-300 font-semibold text-sm hover:border-emerald-400 flex items-center justify-center gap-2 disabled:opacity-40 disabled:hover:border-gray-200 dark:disabled:hover:border-gray-800">
+            <span>📋</span>
+            <span>Copiar ayer{yesterdayExtras.length ? ` (${yesterdayExtras.length})` : ''}</span>
+          </button>
+          <button onClick={() => setShowRepeat(true)}
+            className="py-2.5 rounded-2xl bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 text-gray-600 dark:text-gray-300 font-semibold text-sm hover:border-emerald-400 flex items-center justify-center gap-2">
+            <span>🔁</span>
+            <span>Repetir un día</span>
+          </button>
+        </div>
 
         <ComparisonCard comparison={comparison} />
 
@@ -7423,6 +7721,86 @@ function SettingsModal({ state, setState, onClose }) {
     }
   };
 
+  // CSV por día (fecha, kcal in, macros, agua, peso medido, peso-tendencia) para abrir en
+  // Sheets/Excel. Reusa computeDayTotals + trendWeightAt: misma señal suavizada que la app.
+  const exportCsv = () => {
+    try {
+      const days = state.days || {};
+      const targets = calcTargets(state.userProfile, { adaptiveTdee: computeAdaptiveTDEE(state)?.tdee });
+      const series = weightSeries(state.weights || []);
+      const measured = new Map(series.map((p) => [p.key, p.y]));
+      const cell = (v) => {
+        const s = String(v ?? '');
+        return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+      };
+      const header = ['fecha', 'kcal_in', 'proteina_g', 'carbos_g', 'grasa_g', 'fibra_g', 'agua_ml', 'peso_kg', 'peso_tendencia_kg'];
+      const lines = [header.join(',')];
+      for (const k of Object.keys(days).sort()) {
+        const t = computeDayTotals(days[k] || {}, state.snackBank || [], state.proteinBank || [], targets, state.dessertBank || [], state.antojoCustomItems || []);
+        const trend = trendWeightAt(series, k);
+        lines.push([
+          k, Math.round(t.kcalIn || 0), Math.round(t.protein || 0), Math.round(t.carbs || 0),
+          Math.round(t.fat || 0), Math.round(t.fiber || 0), Math.round(t.waterMl || 0),
+          measured.has(k) ? measured.get(k) : '', trend != null ? trend.toFixed(2) : '',
+        ].map(cell).join(','));
+      }
+      const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `plan-hugo-dias-${todayKey()}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      alert('Error al exportar CSV: ' + e.message);
+    }
+  };
+
+  // Importa un respaldo .json (el que genera Exportar JSON) y REEMPLAZA el estado del
+  // dispositivo. Preserva las credenciales actuales (el export las quita en sanitize).
+  const importJsonFile = () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'application/json,.json';
+    input.onchange = () => {
+      const file = input.files && input.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          const obj = JSON.parse(String(reader.result || ''));
+          if (!obj || typeof obj !== 'object' || (!obj.days && !obj.weights && !obj.userProfile)) {
+            alert('El archivo no parece un respaldo de Plan Hugo.');
+            return;
+          }
+          if (!confirm('Esto REEMPLAZA los datos de este dispositivo con el respaldo importado. ¿Continuar?')) return;
+          setState((prev) => ({ ...prev, ...obj, settings: { ...(prev.settings || {}), ...(obj.settings || {}) } }));
+          alert('Respaldo importado. Revísalo y guarda.');
+        } catch (e) {
+          alert('No se pudo leer el JSON: ' + e.message);
+        }
+      };
+      reader.readAsText(file);
+    };
+    input.click();
+  };
+
+  // Restaura la copia rotatoria local (plan-hugo-v3-bak) que saveState mantiene antes de cada
+  // escritura. Red de seguridad si el estado actual quedó mal pero el backup sigue bueno.
+  const restoreLocalBackup = () => {
+    let raw = null;
+    try { raw = localStorage.getItem(BACKUP_STORAGE_KEY); } catch {}
+    if (!raw) { alert('No hay respaldo local (plan-hugo-v3-bak) en este dispositivo.'); return; }
+    let obj = null;
+    try { obj = JSON.parse(raw); } catch { alert('El respaldo local está dañado.'); return; }
+    if (!obj || typeof obj !== 'object') { alert('El respaldo local no es válido.'); return; }
+    if (!confirm('¿Restaurar la copia local anterior (plan-hugo-v3-bak)? Reemplaza el estado actual de este dispositivo.')) return;
+    setState(() => obj);
+    alert('Respaldo local restaurado.');
+  };
+
   // Orden de pestañas: mismo settings.tabOrder que el arrastre de la barra; acá lo movemos
   // con ↑↓ (sirve en móvil, donde arrastrar la barra inferior es latoso).
   const moveTab = (i, delta) => {
@@ -7465,14 +7843,22 @@ function SettingsModal({ state, setState, onClose }) {
             </button>
           </div>
           {profile && (() => {
-            const t = calcTargets(profile);
+            const adaptive = computeAdaptiveTDEE(state);
+            const t = calcTargets(profile, { adaptiveTdee: adaptive?.tdee });
             return (
-              <div className="grid grid-cols-4 gap-1 text-center pt-1">
-                <div><div className="text-[9px] uppercase text-gray-500">kcal</div><div className="text-xs font-bold">{t.kcalMax}</div></div>
-                <div><div className="text-[9px] uppercase text-gray-500">P</div><div className="text-xs font-bold">{t.proteinMin}g</div></div>
-                <div><div className="text-[9px] uppercase text-gray-500">C</div><div className="text-xs font-bold">{t.carbsTarget}g</div></div>
-                <div><div className="text-[9px] uppercase text-gray-500">G</div><div className="text-xs font-bold">{t.fatTarget}g</div></div>
-              </div>
+              <>
+                <div className="grid grid-cols-4 gap-1 text-center pt-1">
+                  <div><div className="text-[9px] uppercase text-gray-500">kcal</div><div className="text-xs font-bold">{t.kcalMax}</div></div>
+                  <div><div className="text-[9px] uppercase text-gray-500">P</div><div className="text-xs font-bold">{t.proteinMin}g</div></div>
+                  <div><div className="text-[9px] uppercase text-gray-500">C</div><div className="text-xs font-bold">{t.carbsTarget}g</div></div>
+                  <div><div className="text-[9px] uppercase text-gray-500">G</div><div className="text-xs font-bold">{t.fatTarget}g</div></div>
+                </div>
+                <div className="text-[10px] text-gray-500 dark:text-gray-400 pt-1.5 text-center">
+                  {adaptive
+                    ? `Gasto real estimado ${adaptive.tdee} kcal · de tus últimos ${adaptive.days} días (${adaptive.loggedDays} con registro)`
+                    : `Gasto por fórmula ${t.formulaTdee || '—'} kcal · registra ≥14 días para estimar tu gasto real`}
+                </div>
+              </>
             );
           })()}
         </div>
@@ -7654,8 +8040,20 @@ function SettingsModal({ state, setState, onClose }) {
               className="py-2.5 px-3 rounded-xl border border-gray-300 dark:border-gray-700 text-sm font-medium text-left hover:bg-gray-50 dark:hover:bg-gray-800">
               📤 Exportar JSON
             </button>
+            <button type="button" onClick={exportCsv}
+              className="py-2.5 px-3 rounded-xl border border-gray-300 dark:border-gray-700 text-sm font-medium text-left hover:bg-gray-50 dark:hover:bg-gray-800">
+              📊 Exportar CSV
+            </button>
+            <button type="button" onClick={importJsonFile}
+              className="py-2.5 px-3 rounded-xl border border-gray-300 dark:border-gray-700 text-sm font-medium text-left hover:bg-gray-50 dark:hover:bg-gray-800">
+              📥 Importar JSON
+            </button>
+            <button type="button" onClick={restoreLocalBackup}
+              className="py-2.5 px-3 rounded-xl border border-gray-300 dark:border-gray-700 text-sm font-medium text-left hover:bg-gray-50 dark:hover:bg-gray-800">
+              ↩️ Restaurar respaldo
+            </button>
             <button type="button" onClick={resetAll}
-              className="py-2.5 px-3 rounded-xl border border-rose-300 dark:border-rose-700 text-sm font-medium text-left text-rose-700 dark:text-rose-300 hover:bg-rose-50 dark:hover:bg-rose-900/20">
+              className="col-span-2 py-2.5 px-3 rounded-xl border border-rose-300 dark:border-rose-700 text-sm font-medium text-left text-rose-700 dark:text-rose-300 hover:bg-rose-50 dark:hover:bg-rose-900/20">
               🗑️ Resetear todo
             </button>
           </div>
@@ -7678,20 +8076,11 @@ function SettingsModal({ state, setState, onClose }) {
 
 function computeSMA(points, windowDays = 7) {
   if (!points.length) return [];
-  const out = [];
   const windowMs = windowDays * 86400000;
-  for (let i = 0; i < points.length; i++) {
-    const t = points[i].x;
-    const cutoff = t - windowMs;
-    let sum = 0, count = 0;
-    for (let j = i; j >= 0; j--) {
-      if (points[j].x < cutoff) break;
-      sum += points[j].y;
-      count++;
-    }
-    out.push({ x: t, y: count > 0 ? sum / count : points[i].y });
-  }
-  return out;
+  return points.map((p) => {
+    const y = smaAt(points, p.x, windowMs);
+    return { x: p.x, y: y != null ? y : p.y };
+  });
 }
 
 const SMA_METRICS = new Set([
@@ -11034,11 +11423,32 @@ function App() {
     document.documentElement.classList.toggle('dark', effective === 'dark');
   }, [state.theme]);
 
+  // Almacenamiento persistente: iOS Safari puede purgar el localStorage de PWAs tras ~7 días
+  // sin uso. persist() reduce esa purga (best-effort; ignora si la API no está disponible).
+  useEffect(() => {
+    try {
+      if (navigator.storage?.persist && navigator.storage?.persisted) {
+        navigator.storage.persisted()
+          .then((already) => { if (!already) navigator.storage.persist().catch(() => {}); })
+          .catch(() => {});
+      }
+    } catch {}
+  }, []);
+
   const setTheme = useCallback((t) => setState((prev) => ({ ...prev, theme: t })), [setState]);
   const effectiveTheme = state.theme || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
   const toggleTheme = () => setTheme(effectiveTheme === 'dark' ? 'light' : 'dark');
 
-  const targets = useMemo(() => calcTargets(state.userProfile), [state.userProfile]);
+  // TDEE adaptativo (gasto real reconstruido) → base de las metas. Se recalcula cuando cambian
+  // los días, pesos o el perfil. Si no hay datos suficientes, calcTargets cae a Mifflin.
+  const adaptiveTdee = useMemo(
+    () => computeAdaptiveTDEE(state),
+    [state.days, state.weights, state.userProfile, state.snackBank, state.proteinBank, state.dessertBank]
+  );
+  const targets = useMemo(
+    () => calcTargets(state.userProfile, { adaptiveTdee: adaptiveTdee?.tdee }),
+    [state.userProfile, adaptiveTdee]
+  );
   const needsOnboarding = !state.userProfile;
 
   // Scheduler de notificaciones (hook que vive mientras la app esté abierta)
@@ -11160,6 +11570,26 @@ function App() {
     }, 1800);
     return () => clearTimeout(id);
   }, [bridgePost, configBody]);
+
+  // Empuje app→bridge de la serie `energy` ({date, kcalIn, trendWeightKg}). El bridge la
+  // retiene para siempre (RETENTION.energy=0) y la mergea por fecha, así el historial de
+  // balance sobrevive a la poda de meals y propaga a otros dispositivos. Mismo patrón POST.
+  const energyBody = useMemo(() => {
+    if (!state.userProfile) return null;
+    const series = buildEnergySeries(state);
+    return series.length ? JSON.stringify({ energy: series }) : null;
+  }, [state.days, state.weights, state.snackBank, state.proteinBank, state.dessertBank, state.antojoCustomItems, state.userProfile]);
+  useEffect(() => {
+    if (!bridgeUrl || !energyBody) return;
+    const id = setTimeout(() => {
+      fetch(bridgePost, {
+        method: 'POST', mode: 'no-cors', keepalive: true,
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: energyBody,
+      }).catch(() => {});
+    }, 2100);
+    return () => clearTimeout(id);
+  }, [bridgePost, energyBody]);
 
   // Empuje app→bridge de entradas creadas en la app (extras, ejercicios, pesos) para que el
   // chat y el bridge las vean (bidireccional). El servidor reasigna el id y dedup por contenido,

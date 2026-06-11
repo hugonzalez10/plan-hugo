@@ -156,9 +156,16 @@ var UPLOAD_TITLE = 'plan-hugo-bridge.upload.json';
 //     obligó a reconstruir a mano. Nunca se poda.
 //   · meals/workouts/checks/water → 30: crecen rápido (varias entradas/día) y la app no
 //     necesita el log viejo; 30 días cubre cualquier "cómo voy" + colchón.
-var RETENTION    = { weights: 0, meals: 30, workouts: 30, checks: 30, water: 30 };
+//   · energy → 0: serie compacta {date, kcalIn, trendWeightKg} (~3 números/día) que el TDEE
+//     adaptativo de la app necesita para reconstruir el gasto. Como meals se poda a 30 días,
+//     sin esto el historial de ingesta para estimar gasto se perdería entre dispositivos.
+//     Nunca se poda; mergea por fecha (no duplica).
+var RETENTION    = { weights: 0, meals: 30, workouts: 30, checks: 30, water: 30, energy: 0 };
 var SNAPSHOT_RETENTION_DAYS = 30; // los snapshots por fecha siguen la misma ventana que meals
-var SECTIONS     = ['meals', 'weights', 'workouts', 'checks', 'water'];
+var SECTIONS     = ['meals', 'weights', 'workouts', 'checks', 'water', 'energy'];
+// Campos de la sección `energy` que se mergean por fecha (latest gana). Mantener en sync con
+// buildEnergySeries() de app.jsx.
+var ENERGY_MERGE_FIELDS = ['kcalIn', 'trendWeightKg'];
 var WINDOW_MS    = 5 * 60 * 1000; // ventana de dedup por contenido (meals/workouts)
 // Campos de composición que se mergean sobre la medición del día (no duplica peso).
 // Lista COMPLETA alineada con WEIGHT_FIELDS + STRING_FIELDS + SEGMENT_FIELDS de app.jsx:
@@ -456,6 +463,7 @@ function _sig(sec, e) {
   if (sec === 'meals')    return _norm(e.name) + '|' + _norm(e.mealSlot || 'extra') + '|' + (e.date || '');
   if (sec === 'workouts') return _norm(e.name) + '|' + (e.date || '');
   if (sec === 'weights')  return (e.date || '');
+  if (sec === 'energy')   return (e.date || '');
   if (sec === 'checks')   return _norm(e.meal) + '|' + (e.date || '');
   return null;
 }
@@ -558,8 +566,15 @@ function _contentUnion(bridge, sec, entries, assignId) {
         WEIGHT_MERGE_FIELDS.forEach(function (k) {
           if (e[k] != null && e[k] !== '') cur[k] = e[k];
         });
+      } else if (sec === 'energy') {
+        // Misma fecha → actualiza kcalIn/trendWeightKg (latest gana). El día se recalcula en
+        // la app a medida que registra, así que el último valor del día es el bueno.
+        var curE = bridge[sec][hitIdx];
+        ENERGY_MERGE_FIELDS.forEach(function (k) {
+          if (e[k] != null && e[k] !== '') curE[k] = e[k];
+        });
       }
-      return; // dedup: ya existe (o mergeado, en weights)
+      return; // dedup: ya existe (o mergeado, en weights/energy)
     }
     // Anti-doble-conteo: un check de una sección que ese día YA tiene comida registrada
     // es redundante (el extra es la comida; el check sumaría el plan fijo fantasma). Como
