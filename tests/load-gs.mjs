@@ -28,9 +28,9 @@ const factory = new Function(`
   ${stubs}
   ${src}
   return {
-    _norm, _sig, _entryTs, _contentUnion, _totals, _prune, _mergeInto, _reconcile, _authed,
+    _norm, _sig, _entryTs, _contentUnion, _totals, _prune, _mergeInto, _updateInto, _reconcile, _authed,
     _mealSlot, _slotByTime, _entryFromParams, _checkRedundant,
-    SECTIONS, WINDOW_MS,
+    SECTIONS, WINDOW_MS, RETENTION, SNAPSHOT_RETENTION_DAYS,
   };
 `);
 

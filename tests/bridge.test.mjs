@@ -6,9 +6,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { gs } from './load-gs.mjs';
 
-const { _norm, _sig, _entryTs, _contentUnion, _totals, _mergeInto, _authed, WINDOW_MS } = gs;
+const { _norm, _sig, _entryTs, _contentUnion, _totals, _mergeInto, _updateInto, _prune, _authed, RETENTION, WINDOW_MS } = gs;
 
-const emptyBridge = () => ({ meals: [], weights: [], workouts: [], checks: [], snapshots: {}, config: {} });
+const emptyBridge = () => ({ meals: [], weights: [], workouts: [], checks: [], water: [], snapshots: {}, config: {} });
 
 // ── _norm: idéntica a normalizeName de app.jsx (minúsculas, trim, colapsa espacios,
 //    conserva acentos). Si esto diverge entre app y .gs, el dedup se rompe. ──────────
@@ -194,4 +194,61 @@ test('_authed: token desactivado → deja pasar todo', () => {
   assert.equal(_authed({ parameter: { k: 'lo-que-sea' } }), true);
   assert.equal(_authed({ parameter: {} }), true);
   assert.equal(_authed({}), true);
+});
+
+// ── _updateInto: merge NO destructivo para COMPLETAR/CORREGIR una entrada ─────────
+test('_updateInto weights: completa por date sin borrar lo existente ni duplicar', () => {
+  const b = emptyBridge();
+  b.weights.push({ id: 'w1', date: '2026-06-04', weightKg: 104.8, bodyFatPct: 32.3 });
+  const res = _updateInto(b, 'weights', { date: '2026-06-04' }, { fatKg: 33.8, ffmi: 21.8, bodyType: 'Obesidad' });
+  assert.equal(res.ok, true);
+  assert.equal(res.updated, 1);
+  assert.equal(b.weights.length, 1);               // no duplica
+  assert.equal(b.weights[0].weightKg, 104.8);      // conserva lo previo
+  assert.equal(b.weights[0].fatKg, 33.8);          // agrega lo nuevo
+  assert.equal(b.weights[0].bodyType, 'Obesidad');
+});
+
+test('_updateInto: selecciona por id si viene; no reescribe el id', () => {
+  const b = emptyBridge();
+  b.meals.push({ id: 'm1', date: '2026-06-09', name: 'Pan', kcal: 100 });
+  const res = _updateInto(b, 'meals', { id: 'm1' }, { kcal: 120, id: 'HACK' });
+  assert.equal(res.ok, true);
+  assert.equal(b.meals[0].kcal, 120);
+  assert.equal(b.meals[0].id, 'm1');               // id es autoridad del servidor
+});
+
+test('_updateInto: no encuentra → not_found, sin tocar nada', () => {
+  const b = emptyBridge();
+  const res = _updateInto(b, 'weights', { date: '2099-01-01' }, { fatKg: 1 });
+  assert.equal(res.ok, false);
+  assert.equal(res.reason, 'not_found');
+});
+
+test('_updateInto: ignora valores vacíos/null (no pisa con vacío)', () => {
+  const b = emptyBridge();
+  b.weights.push({ id: 'w1', date: '2026-06-04', weightKg: 104.8 });
+  const res = _updateInto(b, 'weights', { date: '2026-06-04' }, { weightKg: '', fatKg: null, ffmi: 21.8 });
+  assert.equal(res.fields, 1);                     // solo ffmi
+  assert.equal(b.weights[0].weightKg, 104.8);      // no lo pisó con ''
+});
+
+// ── _prune: retención por sección (weights nunca; el resto, RETENTION[s] días) ────
+const ymdDaysAgo = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return d.toISOString().slice(0, 10); };
+
+test('_prune: weights NO se poda aunque sea muy viejo', () => {
+  assert.equal(RETENTION.weights, 0);              // contrato: 0 = sin poda
+  const b = emptyBridge();
+  b.weights.push({ id: 'w1', date: ymdDaysAgo(400) });
+  _prune(b);
+  assert.equal(b.weights.length, 1);
+});
+
+test('_prune: meals viejas (>30d) se podan; las recientes quedan', () => {
+  const b = emptyBridge();
+  b.meals.push({ id: 'm-old', date: ymdDaysAgo(40), name: 'vieja', kcal: 100 });
+  b.meals.push({ id: 'm-new', date: ymdDaysAgo(5),  name: 'nueva', kcal: 100 });
+  _prune(b);
+  const ids = b.meals.map((m) => m.id);
+  assert.deepEqual(ids, ['m-new']);
 });

@@ -8,8 +8,8 @@
 //     (CANONICAL_ID) y SIEMPRE se sobrescribe en sitio; los duplicados se barren.
 //
 //  2) LENTITUD: la skill solo manda la ENTRADA NUEVA (~300 bytes) y este script
-//     hace el merge del lado del servidor: agrega, poda lo viejo (>10 días),
-//     guarda y devuelve los totales del día ya sumados.
+//     hace el merge del lado del servidor: agrega, poda lo viejo (retención por
+//     sección: weights nunca, el resto 30 días), guarda y devuelve los totales del día.
 //
 //  3) AUTO-HEAL (red de seguridad): si la skill se salta el flujo y vuelve a hacer
 //     `create_file` de un `plan-hugo-bridge.json` (o deja un `.upload.json`
@@ -40,6 +40,13 @@
 //  GET  /exec?w=delete&section=..&id=..→ borra de una sección la entrada con ese id y
 //                                       devuelve { ok, deleted:<n>, section, id }. Para
 //                                       limpiar errores desde el chat.
+//  GET  /exec?w=update&section=..&date=..(o&id=..)&campo=valor&...
+//                                     → MERGE no destructivo sobre la entrada que matchea
+//                                       (por id, o por date si no hay id). Solo escribe los
+//                                       campos provistos; no borra los demás ni reasigna id.
+//                                       Para COMPLETAR/CORREGIR una medición sin duplicarla.
+//                                       Responde { ok, updated:1, fields:<n>,... } o
+//                                       { ok:false, reason:'not_found' }.
 //  GET  /exec?delta=<json url-enc>   → aplica un payload/delta JSON entero por GET.
 //  POST /exec  (body = delta|bridge) → escritura por POST (runtimes con curl/Bash).
 //                                       Aplica el delta directo al canónico y
@@ -74,6 +81,9 @@
 //      "entries":[ { ...una o varias entradas... } ] }
 //    section ∈ meals | weights | workouts | checks
 //  Borrado:  { "op":"delete", "section":"meals", "id":"<id>" }
+//  Update :  { "op":"update", "section":"weights", "date":"<date>"(o "id":"<id>"),
+//             "fields":{ ...campos a mergear... } }  (también acepta los campos planos
+//             en el propio payload si omites el sobre `fields`).
 //  También acepta un BRIDGE COMPLETO ({meals,weights,...}) → unión por contenido.
 //
 //  ── Dedup por CONTENIDO + autoridad del id en el servidor ────────────────────
@@ -140,7 +150,14 @@ function _authed(e) {
 var CANONICAL_ID = '1YN3F48EZoRWSpOabwDqoXzKrGkTqIa2t';
 var BRIDGE_TITLE = 'plan-hugo-bridge.json';
 var UPLOAD_TITLE = 'plan-hugo-bridge.upload.json';
-var PRUNE_DAYS   = 10;
+// Retención por sección, en días. 0 (o ausente) = NO podar nunca.
+//   · weights → 0: el historial de peso/composición es la serie de tendencia (lo que da
+//     las pendientes de pérdida); es livianísimo (~1 fila/día, ~30 números) y perderlo nos
+//     obligó a reconstruir a mano. Nunca se poda.
+//   · meals/workouts/checks/water → 30: crecen rápido (varias entradas/día) y la app no
+//     necesita el log viejo; 30 días cubre cualquier "cómo voy" + colchón.
+var RETENTION    = { weights: 0, meals: 30, workouts: 30, checks: 30, water: 30 };
+var SNAPSHOT_RETENTION_DAYS = 30; // los snapshots por fecha siguen la misma ventana que meals
 var SECTIONS     = ['meals', 'weights', 'workouts', 'checks', 'water'];
 var WINDOW_MS    = 5 * 60 * 1000; // ventana de dedup por contenido (meals/workouts)
 // Campos de composición que se mergean sobre la medición del día (no duplica peso).
@@ -209,12 +226,15 @@ function _daysAgoKey(n) {
 }
 
 function _prune(bridge) {
-  var cutoff = _daysAgoKey(PRUNE_DAYS);
   SECTIONS.forEach(function (s) {
+    var days = RETENTION[s];
+    if (!days || days <= 0) return; // 0 / ausente = no podar (weights)
+    var cutoff = _daysAgoKey(days);
     bridge[s] = bridge[s].filter(function (e) { return !e || !e.date || e.date >= cutoff; });
   });
   if (bridge.snapshots) {
-    Object.keys(bridge.snapshots).forEach(function (d) { if (d < cutoff) delete bridge.snapshots[d]; });
+    var snapCutoff = _daysAgoKey(SNAPSHOT_RETENTION_DAYS);
+    Object.keys(bridge.snapshots).forEach(function (d) { if (d < snapCutoff) delete bridge.snapshots[d]; });
   }
 }
 
@@ -573,6 +593,52 @@ function _applyDelete(section, id) {
   }
 }
 
+// ── UPDATE no destructivo (PURO, sin I/O) ────────────────────────────────────
+// Busca UNA entrada de `section` por id (o, si no, por date) y le hace merge de los
+// campos provistos: solo escribe los que vienen con valor (no null/''), nunca borra los
+// demás. No reescribe el id. Necesario para COMPLETAR/CORREGIR mediciones (p.ej. una
+// captura parcial del 04/06 a la que después le llega el detalle) sin duplicar la fila
+// —que es lo que pasaba con op:add (solo agrega)— ni perder los campos ya guardados.
+// `sel` = { id?, date? }. Devuelve { ok, updated, section, id, date } o { ok:false, reason }.
+function _updateInto(bridge, section, sel, fields) {
+  if (SECTIONS.indexOf(section) < 0) return { ok: false, reason: 'bad-section' };
+  if (!fields || typeof fields !== 'object') return { ok: false, reason: 'no-fields' };
+  sel = sel || {};
+  var arr = bridge[section];
+  var idx = -1;
+  if (sel.id != null && sel.id !== '') {
+    var target = String(sel.id);
+    for (var i = 0; i < arr.length; i++) { if (arr[i] && String(arr[i].id) === target) { idx = i; break; } }
+  }
+  if (idx < 0 && sel.date) {
+    for (var j = 0; j < arr.length; j++) { if (arr[j] && arr[j].date === sel.date) { idx = j; break; } }
+  }
+  if (idx < 0) return { ok: false, reason: 'not_found' };
+  var entry = arr[idx];
+  var n = 0;
+  Object.keys(fields).forEach(function (k) {
+    if (k === 'id') return; // el id es autoridad del servidor, no se reescribe por update
+    var v = fields[k];
+    if (v != null && v !== '') { entry[k] = v; n++; }
+  });
+  return { ok: true, updated: 1, fields: n, section: section, id: entry.id, date: entry.date };
+}
+
+// Wrapper bajo lock de _updateInto: read-modify-write del canónico. Solo escribe si
+// efectivamente actualizó algo. No pasa por _apply (evita anidar locks, como _applyDelete).
+function _applyUpdate(section, sel, fields) {
+  var lock = LockService.getScriptLock();
+  try { lock.waitLock(20000); } catch (e) { return { ok: false, reason: 'busy' }; }
+  try {
+    var bridge = _readCanonical();
+    var res = _updateInto(bridge, section, sel, fields);
+    if (res.ok) _writeCanonical(bridge);
+    return res;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 // ── Aplicación bajo lock ─────────────────────────────────────────────────────
 // El lock serializa toda mutación del canónico: snapshot, config y commit hacen
 // read-modify-write sobre el MISMO archivo; sin lock uno pisa al otro.
@@ -686,6 +752,19 @@ function _entryFromParams(p) {
   return entry;
 }
 
+// Campos tipados para w=update por GET: reusa el casteo de _entryFromParams pero quita
+// las claves de control (w/section/source) y la selección (id/today). `date` se conserva
+// porque para weights ES la entrada a actualizar (no se reescribe a sí misma: _updateInto
+// solo asigna si trae valor, y si selecciona por date, asignar la misma date es no-op).
+function _fieldsFromParams(p) {
+  var entry = _entryFromParams(p);
+  delete entry.source; // _entryFromParams inyecta 'skill-chat' por defecto; un update no toca source salvo que venga explícito
+  if (p.source == null || p.source === '') {} else entry.source = p.source;
+  delete entry.id;
+  delete entry.today;
+  return entry;
+}
+
 // ── LECTURA (la app) + TOTALES + COMMIT/HEAL por GET ─────────────────────────
 function doGet(e) {
   if (!_authed(e)) return _json({ ok: false, reason: 'unauthorized' });
@@ -695,6 +774,9 @@ function doGet(e) {
   }
   if (p.w === 'delete' && p.section && p.id != null) {
     return _json(_applyDelete(p.section, p.id));
+  }
+  if (p.w === 'update' && p.section && (p.id != null || p.date)) {
+    return _json(_applyUpdate(p.section, { id: p.id, date: p.date }, _fieldsFromParams(p)));
   }
   if (p.delta)   return _json(_apply(JSON.parse(p.delta)));
   if (p.commit)  return _json(_commitFromUpload(p.commit));
@@ -723,6 +805,19 @@ function doPost(e) {
   // Borrado por POST (op:'delete') con su propio lock; no pasa por _apply para no
   // anidar locks.
   if (payload && payload.op === 'delete') return _json(_applyDelete(payload.section, payload.id));
+  // Update por POST (op:'update'): selección por id|date + campos. Acepta los campos en
+  // `payload.fields` o, si no viene ese sobre, toma los del propio payload (quitando
+  // op/section/id/date), para tolerar el shape plano { op,section,date, ...campos }.
+  if (payload && payload.op === 'update' && payload.section) {
+    var fields = payload.fields;
+    if (!fields) {
+      fields = {};
+      Object.keys(payload).forEach(function (k) {
+        if (['op', 'section', 'id', 'date', 'fields'].indexOf(k) < 0) fields[k] = payload[k];
+      });
+    }
+    return _json(_applyUpdate(payload.section, { id: payload.id, date: payload.date }, fields));
+  }
   return _json(_apply(payload));
 }
 

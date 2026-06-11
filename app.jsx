@@ -1608,7 +1608,7 @@ function mergeBridge(state, bridge) {
   // nunca quita, así que una corrección del chat (p.ej. anular una comida de fecha errónea)
   // neteaba en el bridge pero seguía inflando el total local —el bug de divergencia app↔bridge.
   // Solo se reconcilian días que el bridge cubre (≥1 meal): si bridge.meals viene vacío o el
-  // día ya se podó por antigüedad (PRUNE_DAYS), no se toca nada (a prueba de fallos de fetch).
+  // día ya se podó por antigüedad (retención del bridge: meals 30d), no se toca nada (a prueba de fallos de fetch).
   // Los extras de la app (manual/photo/repeat/...) llevan otro source y uuid local: intactos.
   const bridgeMealIds = new Set();
   const bridgeMealDates = new Set();
@@ -1648,27 +1648,32 @@ function mergeBridge(state, bridge) {
     const date = bridgeDateKey(wt);
     const idx = weights.findIndex((x) => x.date === date);
     if (idx >= 0) {
-      // Ya hay medición local de ese día (dedup por fecha). Enriquecer campos UNA sola vez:
-      // si re-corriéramos el merge en cada sync, la nota se duplicaría (`nota · nota · …`).
-      // Por eso aquí sí se usa importedIds como freno del enriquecimiento; el id queda marcado
-      // y nunca se re-agrega.
-      if (!importedIds.has(wt.id)) {
-        const merged = { ...weights[idx] };
-        for (const wf of WEIGHT_FIELDS) {
-          if (wt[wf.key] != null) merged[wf.key] = wt[wf.key];
-        }
-        for (const sf of STRING_FIELDS) {
-          if (wt[sf.key] != null) merged[sf.key] = wt[sf.key];
-        }
-        for (const seg of SEGMENT_FIELDS) {
-          if (wt[seg.key] != null) merged[seg.key] = wt[seg.key];
-        }
-        if (wt.note) merged.note = merged.note ? `${merged.note} · ${wt.note}` : wt.note;
-        if (wt.rawExtracted) merged.rawExtracted = { ...(merged.rawExtracted || {}), ...wt.rawExtracted };
-        if (wt.time && !merged.time) merged.time = wt.time;
-        weights[idx] = merged;
-        added.weights++;
+      // Ya hay medición local de ese día (dedup por fecha). Mergeamos los campos que el bridge
+      // traiga en CADA sync —no solo la primera vez— para que un `w=update` que COMPLETA o
+      // corrige una medición se propague aunque su id ya esté en importedIds (antes el freno
+      // por importedIds hacía el enriquecimiento de una sola pasada y los updates no llegaban).
+      // La asignación de campos es idempotente; solo aplicamos `changed` cuando el valor del
+      // bridge difiere del local, así un sync sin novedades no churna ni cuenta como import. El
+      // único riesgo no idempotente era duplicar la nota (`nota · nota · …`): se evita
+      // comprobando que no esté ya contenida.
+      const cur = weights[idx];
+      const merged = { ...cur };
+      let changed = false;
+      for (const wf of WEIGHT_FIELDS) {
+        if (wt[wf.key] != null && wt[wf.key] !== merged[wf.key]) { merged[wf.key] = wt[wf.key]; changed = true; }
       }
+      for (const sf of STRING_FIELDS) {
+        if (wt[sf.key] != null && wt[sf.key] !== merged[sf.key]) { merged[sf.key] = wt[sf.key]; changed = true; }
+      }
+      for (const seg of SEGMENT_FIELDS) {
+        if (wt[seg.key] != null && wt[seg.key] !== merged[seg.key]) { merged[seg.key] = wt[seg.key]; changed = true; }
+      }
+      if (wt.note && !String(merged.note || '').includes(wt.note)) {
+        merged.note = merged.note ? `${merged.note} · ${wt.note}` : wt.note; changed = true;
+      }
+      if (wt.rawExtracted) merged.rawExtracted = { ...(merged.rawExtracted || {}), ...wt.rawExtracted };
+      if (wt.time && !merged.time) { merged.time = wt.time; changed = true; }
+      if (changed) { weights[idx] = merged; added.weights++; }
       importedIds.add(wt.id);
       continue;
     }

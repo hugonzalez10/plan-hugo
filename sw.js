@@ -4,7 +4,7 @@
  * NO interceptamos llamadas a api.anthropic.com.
  */
 
-const CACHE_NAME = 'plan-hugo-v24-recetas-mano-plan-semana-compras';
+const CACHE_NAME = 'plan-hugo-v25-bridge-update-retencion-weights';
 const CORE_URLS = [
   './index.html',
   './app.js',
