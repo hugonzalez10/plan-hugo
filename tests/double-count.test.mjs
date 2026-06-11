@@ -19,17 +19,18 @@ const appSrc = readFileSync(join(here, '..', 'app.jsx'), 'utf8');
 // Extrae PLAN_SLOTS + SLOT_NAME_RE + extraPlanSlot de app.jsx (todo JS puro, sin JSX).
 const planM = appSrc.match(/const PLAN_SLOTS = new Set\(\[[^\]]*\]\);/);
 const reM = appSrc.match(/const SLOT_NAME_RE = \{[\s\S]*?\n\};/);
+const rcM = appSrc.match(/function resolveColacion\s*\([^)]*\)\s*\{[\s\S]*?\n\}/);
 const fnM = appSrc.match(/function extraPlanSlot\s*\([^)]*\)\s*\{[\s\S]*?\n\}/);
-assert.ok(planM && reM && fnM, 'no se encontró extraPlanSlot/PLAN_SLOTS/SLOT_NAME_RE en app.jsx');
+assert.ok(planM && reM && rcM && fnM, 'no se encontró extraPlanSlot/PLAN_SLOTS/SLOT_NAME_RE/resolveColacion en app.jsx');
 const extraPlanSlot = new Function(
-  `${planM[0]}; ${reM[0]}; ${fnM[0]}; return extraPlanSlot;`
+  `${planM[0]}; ${reM[0]}; ${rcM[0]}; ${fnM[0]}; return extraPlanSlot;`
 )();
 
 const CASES = [
   { in: { mealSlot: 'cena', name: 'Lentejas' },                    out: 'cena' },          // mealSlot manda
   { in: { mealSlot: null, source: 'skill-chat', name: 'Desayuno - yogur griego 0% + ISO 100' }, out: 'desayuno' },
-  { in: { mealSlot: null, source: 'skill-chat', name: 'Colacion 1 - Colun Protein + 2 huevos' }, out: 'colacion' },
-  { in: { mealSlot: null, source: 'skill-chat', name: 'Colación nocturna' },               out: 'colacion' }, // con tilde
+  { in: { mealSlot: null, source: 'skill-chat', name: 'Colacion 1 - Colun Protein + 2 huevos' }, out: 'colacion1' },
+  { in: { mealSlot: null, source: 'skill-chat', name: 'Colación nocturna' },               out: 'colacion2' }, // sin número → tarde por defecto
   { in: { mealSlot: null, source: 'skill-chat', name: 'Almuerzo en restaurante' },         out: 'almuerzo' },
   { in: { mealSlot: 'extra', source: 'skill-chat', name: 'Media mousse proteica' },        out: null },       // extra genuino
   { in: { mealSlot: null, source: 'app', name: 'Desayuno casero' },                        out: null },       // no skill-chat → no inferir
@@ -86,7 +87,7 @@ const FIXED_MEALS = constLit('const FIXED_MEALS = \\[', '\\];');
 const bundle = [
   FIXED_MEALS, planM[0], reM[0],
   fn('mealItemsFor'), fn('sumField'), fn('getMealItemTicks'),
-  fn('extraPlanSlot'), fn('computeDayTotals'),
+  fn('resolveColacion'), fn('slotByTime'), fn('extraPlanSlot'), fn('computeDayTotals'),
   'return { computeDayTotals };',
 ].join('\n');
 const { computeDayTotals } = new Function(bundle)();
@@ -114,8 +115,8 @@ test('no-regresión: almuerzo tildado SIN extra cuenta la porción fija', () => 
 test('colación: snack del banco tildado + extra del chat NO suma dos veces', () => {
   const snackBank = [{ id: 's1', protein: 30, kcal: 190, carbs: 21, fat: 7, fiber: 7 }];
   const day = {
-    snackId: 's1', eaten: { colacion: true },
-    extras: [{ id: 'x2', mealSlot: 'colacion', source: 'skill-chat', name: 'Colación', kcal: 190, protein: 30, carbs: 21, fat: 7, fiber: 7 }],
+    snackId1: 's1', eaten: { colacion1: true },
+    extras: [{ id: 'x2', mealSlot: 'colacion1', source: 'skill-chat', name: 'Colación 1', kcal: 190, protein: 30, carbs: 21, fat: 7, fiber: 7 }],
   };
   assert.equal(run(day, snackBank).protein, 30); // solo el extra, no snack+extra=60
 });

@@ -18,10 +18,6 @@ const FIXED_MEALS = [
       { id: 'fruta',          label: 'Fruta',                        kcal: 80,  protein: 1,  carbs: 21, fat: 0,  fiber: 3 },
       { id: 'yogurt-granola', label: 'Yogurt + 30g granola',         kcal: 170, protein: 4,  carbs: 29, fat: 4,  fiber: 4 },
     ] },
-  { id: 'antojo', label: 'Antojo nocturno', time: '22:00', emoji: '🍫', extensible: true,
-    items: [
-      { id: 'not-squares', label: 'Not Squares Peanut Butter', kcal: 138, protein: 6, carbs: 14, fat: 7, fiber: 2 },
-    ] },
 ];
 
 function mealItemsFor(meal, customAntojoItems) {
@@ -1211,28 +1207,67 @@ function buildEnergySeries(state, windowDays = 180) {
 const KCAL_PER_KG_FAT = 7700;
 const MAX_IMAGES = 10;
 
+// — Arsenal de Hugo (arsenalVersion 2). Se define aparte para poder mergearlo en
+//   instalaciones existentes SIN resucitar builtins viejos que el usuario haya borrado
+//   (la migración v2 mergea solo este delta, no el SEED completo). Además se spreadea
+//   dentro de los SEED_* de abajo para que las instalaciones nuevas lo traigan de fábrica.
+//   Notas respetadas: el yogur griego va SIEMPRE mezclado (no se agrega "solo"); los
+//   bastones de zanahoria, la chía suelta y la creatina no son "tomas" → no entran al banco.
+const ARSENAL_V2_SNACKS = [
+  { name: 'ISO 100 whey (1 scoop)', kcal: 110, protein: 25, carbs: 2, fat: 1, fiber: 0, tags: ['portable', 'sin-refrigeración'] },
+  { name: 'Colún Protein (botella)', kcal: 160, protein: 18, carbs: 18, fat: 2, fiber: 0, tags: ['portable'] },
+  { name: 'Yogurt protein Colún', kcal: 100, protein: 11, carbs: 12, fat: 1, fiber: 0, tags: ['portable'] },
+  { name: 'Yogur griego 0% 200g + frambuesa + whey + chía', kcal: 250, protein: 35, carbs: 20, fat: 5, fiber: 6, tags: ['portable'] },
+  { name: 'Charqui 40g', kcal: 130, protein: 25, carbs: 2, fat: 3, fiber: 0, category: 'salado', tags: ['portable', 'sin-refrigeración'] },
+  { name: 'Loncoleche Protein', kcal: 160, protein: 15, carbs: 20, fat: 3, fiber: 0, tags: ['portable', 'sin-refrigeración'] },
+  { name: 'Edamame seco Skukli 40g', kcal: 154, protein: 17, carbs: 13, fat: 6, fiber: 10, category: 'salado', tags: ['portable', 'sin-refrigeración'] },
+  { name: 'Quest Bar', kcal: 200, protein: 21, carbs: 22, fat: 8, fiber: 14, tags: ['portable', 'sin-refrigeración'] },
+];
+
+const ARSENAL_V2_PROTEINS = [
+  { name: 'Atún en lata en agua (2 latas)', kcal: 240, protein: 52, carbs: 0, fat: 2, fiber: 0 },
+];
+
+const ARSENAL_V2_DESSERTS = [
+  { name: 'Jalea protein', kcal: 60, protein: 10, carbs: 4, fat: 0, fiber: 0 },
+  { name: 'Brownie proteico casero (1 porción)', kcal: 118, protein: 11, carbs: 8, fat: 5, fiber: 1 },
+  { name: 'Pera', kcal: 90, protein: 1, carbs: 24, fat: 0, fiber: 5 },
+  { name: 'Plátano', kcal: 105, protein: 1, carbs: 27, fat: 0, fiber: 3 },
+  { name: 'Uvas (1 taza)', kcal: 100, protein: 1, carbs: 27, fat: 0, fiber: 1 },
+  { name: 'Frambuesa congelada (1 taza)', kcal: 65, protein: 2, carbs: 15, fat: 1, fiber: 8 },
+];
+
 const SEED_SNACKS = [
-  { name: '2 huevos duros', kcal: 180, protein: 13, carbs: 1, fat: 12, fiber: 0, category: 'salado' },
-  { name: '2 huevos duros + 1 yogurt Colun', kcal: 270, protein: 24, carbs: 10, fat: 14, fiber: 0, category: 'salado' },
-  { name: 'Atún en lata + 4 galletas de arroz', kcal: 280, protein: 25, carbs: 30, fat: 6, fiber: 1, category: 'salado' },
-  { name: '100g pavo en láminas + 1 fruta', kcal: 230, protein: 22, carbs: 22, fat: 4, fiber: 3, category: 'salado' },
-  { name: 'Quesillo 100g + galletas de arroz', kcal: 190, protein: 14, carbs: 20, fat: 6, fiber: 1, category: 'salado' },
-  { name: 'Yogurt Colun Protein + Not Squares', kcal: 276, protein: 17, carbs: 28, fat: 9, fiber: 3, category: 'dulce' },
-  { name: '1 lata atún solo', kcal: 120, protein: 26, carbs: 0, fat: 1, fiber: 0, category: 'salado' },
+  { name: '2 huevos duros', kcal: 180, protein: 13, carbs: 1, fat: 12, fiber: 0, category: 'salado', tags: ['portable'] },
+  { name: '2 huevos duros + 1 yogurt Colun', kcal: 270, protein: 24, carbs: 10, fat: 14, fiber: 0, category: 'salado', tags: ['portable'] },
+  { name: 'Atún en lata + 4 galletas de arroz', kcal: 280, protein: 25, carbs: 30, fat: 6, fiber: 1, category: 'salado', tags: ['portable', 'sin-refrigeración'] },
+  { name: '100g pavo en láminas + 1 fruta', kcal: 230, protein: 22, carbs: 22, fat: 4, fiber: 3, category: 'salado', tags: ['portable'] },
+  { name: 'Quesillo 100g + galletas de arroz', kcal: 190, protein: 14, carbs: 20, fat: 6, fiber: 1, category: 'salado', tags: ['portable'] },
+  { name: 'Yogurt Colun Protein + Not Squares', kcal: 276, protein: 17, carbs: 28, fat: 9, fiber: 3, category: 'dulce', tags: ['portable'] },
+  { name: '1 lata atún solo', kcal: 120, protein: 26, carbs: 0, fat: 1, fiber: 0, category: 'salado', tags: ['portable', 'sin-refrigeración'] },
   // — Arsenal desayunos/colaciones (alimentan desayuno + colaciones) —
   { name: 'Avena 60g + scoop proteína', kcal: 350, protein: 32, carbs: 42, fat: 6, fiber: 6, category: 'dulce' },
-  { name: 'Pan integral 2 reb + palta + huevo', kcal: 300, protein: 14, carbs: 26, fat: 16, fiber: 6, category: 'salado' },
-  { name: 'Yogur griego natural 170g + chía + berries', kcal: 200, protein: 19, carbs: 18, fat: 6, fiber: 8, category: 'dulce' },
+  { name: 'Pan integral 2 reb + palta + huevo', kcal: 300, protein: 14, carbs: 26, fat: 16, fiber: 6, category: 'salado', tags: ['portable'] },
+  { name: 'Yogur griego natural 170g + chía + berries', kcal: 200, protein: 19, carbs: 18, fat: 6, fiber: 8, category: 'dulce', tags: ['portable'] },
   { name: '4 claras revueltas + champiñón', kcal: 95, protein: 15, carbs: 2, fat: 2, fiber: 2, category: 'salado' },
-  { name: 'Requesón 150g + fruta', kcal: 185, protein: 20, carbs: 18, fat: 4, fiber: 3, category: 'salado' },
-  { name: 'Batido proteína + leche descremada + plátano', kcal: 280, protein: 32, carbs: 30, fat: 4, fiber: 3, category: 'dulce' },
+  { name: 'Requesón 150g + fruta', kcal: 185, protein: 20, carbs: 18, fat: 4, fiber: 3, category: 'salado', tags: ['portable'] },
+  { name: 'Batido proteína + leche descremada + plátano', kcal: 280, protein: 32, carbs: 30, fat: 4, fiber: 3, category: 'dulce', tags: ['portable'] },
+  ...ARSENAL_V2_SNACKS,
 ];
+
+// Mapa nombre→tags derivado de los literales: única fuente de verdad para retro-rellenar las
+// etiquetas (portable / sin-refrigeración) en snacks builtin ya guardados que nacieron sin
+// tags (el merge solo agrega items nuevos, no actualiza los existentes). Ver migración v3.
+const SNACK_TAGS = Object.fromEntries(
+  SEED_SNACKS.filter((s) => Array.isArray(s.tags) && s.tags.length).map((s) => [normalizeName(s.name), s.tags])
+);
 
 const SEED_PROTEINS = [
   { name: 'Salmón 150g', kcal: 280, protein: 35, carbs: 0, fat: 16, fiber: 0 },
   { name: 'Pollo 150g', kcal: 250, protein: 38, carbs: 0, fat: 10, fiber: 0 },
   { name: 'Filete vacuno 120g', kcal: 240, protein: 32, carbs: 0, fat: 12, fiber: 0 },
   { name: 'Libre (sábado)', kcal: 450, protein: 25, carbs: 40, fat: 22, fiber: 3 },
+  ...ARSENAL_V2_PROTEINS,
 ];
 
 const SEED_DESSERTS = [
@@ -1242,6 +1277,7 @@ const SEED_DESSERTS = [
   { name: 'Chocolate amargo 70% (20g)', kcal: 120, protein: 1, carbs: 9, fat: 8, fiber: 2 },
   { name: 'Gelatina light', kcal: 10, protein: 1, carbs: 0, fat: 0, fiber: 0 },
   { name: 'Manzana con cáscara', kcal: 80, protein: 0, carbs: 21, fat: 0, fiber: 4 },
+  ...ARSENAL_V2_DESSERTS,
 ];
 
 // Platos completos (proteína + guarnición + verdura) para almuerzo/cena: evitan que la
@@ -1359,11 +1395,11 @@ function buildSeed() {
       saveImages: false,
       bridgeUrl: null,
       bridgeToken: null,
-      notifications: { enabled: false, almuerzo: '13:30', agua: '16:00', cena: '20:30' },
+      notifications: { enabled: false, colacion1: '11:00', almuerzo: '13:30', colacion2: '18:00', agua: '16:00', cena: '20:30' },
     },
     weights: [],
     recipeBank: SEED_RECIPES.map((r) => ({ ...r, id: uuid(), builtin: true, createdAt: null })),
-    arsenalVersion: 1,
+    arsenalVersion: 3,
     bridge: { lastSyncAt: null, importedIds: [], pushedIds: [], removedBridgeIds: [] },
     aiCache: { coach: {}, weekly: {}, patterns: null, lastSubstitution: null },
   };
@@ -1442,7 +1478,7 @@ function migrateState(parsed) {
   next.settings = {
     anthropicApiKey: next.settings.anthropicApiKey ?? null,
     saveImages: next.settings.saveImages ?? false,
-    notifications: next.settings.notifications || { enabled: false, almuerzo: '13:30', agua: '16:00', cena: '20:30' },
+    notifications: next.settings.notifications || { enabled: false, colacion1: '11:00', almuerzo: '13:30', colacion2: '18:00', agua: '16:00', cena: '20:30' },
     githubPAT: next.settings.githubPAT ?? null,
     syncGistId: next.settings.syncGistId ?? null,
     lastSyncAt: next.settings.lastSyncAt ?? null,
@@ -1469,6 +1505,28 @@ function migrateState(parsed) {
     next.dessertBank = mergeBuiltins(next.dessertBank, SEED_DESSERTS, (d) => ({ carbs: 0, fat: 0, fiber: 0, ...d, id: uuid(), builtin: true }));
     next.recipeBank = mergeBuiltins(next.recipeBank, SEED_RECIPES, (r) => ({ ...r, id: uuid(), builtin: true, createdAt: null }));
     next.arsenalVersion = 1;
+  }
+  // Carga única del "arsenal v2": suma el arsenal de Hugo (proteínas/colaciones/postres
+  // nuevos) sin tocar lo existente. Mergea SOLO el delta ARSENAL_V2_* (no el SEED completo)
+  // para no resucitar builtins viejos que el usuario haya borrado. A diferencia de v1, acá
+  // sí se mergea proteinBank (el atún de cena sin cocción cae ahí).
+  if (!(Number(next.arsenalVersion) >= 2)) {
+    next.snackBank = mergeBuiltins(next.snackBank, ARSENAL_V2_SNACKS, (s) => ({ carbs: 0, fat: 0, fiber: 0, ...s, id: uuid(), builtin: true }));
+    next.proteinBank = mergeBuiltins(next.proteinBank, ARSENAL_V2_PROTEINS, (p) => ({ carbs: 0, fat: 0, fiber: 0, ...p, id: uuid(), builtin: true }));
+    next.dessertBank = mergeBuiltins(next.dessertBank, ARSENAL_V2_DESSERTS, (d) => ({ carbs: 0, fat: 0, fiber: 0, ...d, id: uuid(), builtin: true }));
+    next.arsenalVersion = 2;
+  }
+  // Arsenal v3: las dos colaciones (11h transportable / 18h transportable + sin nevera) usan
+  // las etiquetas de transporte para ordenar el banco. Retro-rellena esas tags en los snacks
+  // builtin ya guardados que nacieron sin ellas (el merge solo agrega, no actualiza). Solo
+  // toca builtin SIN tags propias, para no pisar lo que Hugo haya etiquetado a mano.
+  if (!(Number(next.arsenalVersion) >= 3)) {
+    next.snackBank = (next.snackBank || []).map((s) => {
+      if (!s || !s.builtin || (Array.isArray(s.tags) && s.tags.length)) return s;
+      const t = SNACK_TAGS[normalizeName(s.name)];
+      return t ? { ...s, tags: [...t] } : s;
+    });
+    next.arsenalVersion = 3;
   }
   next.bridge = (next.bridge && Array.isArray(next.bridge.importedIds))
     ? next.bridge
@@ -1498,19 +1556,30 @@ function migrateState(parsed) {
     const cleanExtras = Array.isArray(v.extras)
       ? dedupeDayExtras(v.extras).map((x) => ({ carbs: 0, fat: 0, fiber: 0, ...x }))
       : [];
-    // Si ya hay comida registrada de colación/cena, el slot está cumplido aunque
-    // se haya importado antes de existir la detección automática.
     const eaten = { ...(v.eaten || {}) };
-    for (const slot of ['colacion', 'cena']) {
-      if (cleanExtras.some((x) => x.mealSlot === slot)) eaten[slot] = true;
+    // Migración a 2 colaciones: el snack/colación único histórico pasa a ser la colación 1
+    // (la mañana). Idem su "comido" y su "no comí". Idempotente: tras la 1ª pasada snackId1
+    // ya existe y eaten.colacion queda borrado.
+    let snackId1 = v.snackId1 ?? null;
+    const snackId2 = v.snackId2 ?? null;
+    if (snackId1 == null && v.snackId != null) snackId1 = v.snackId;
+    if (eaten.colacion1 == null && eaten.colacion != null) eaten.colacion1 = eaten.colacion;
+    delete eaten.colacion;
+    const skipped = (Array.isArray(v.skipped) ? v.skipped : []).map((s) => (s === 'colacion' ? 'colacion1' : s));
+    // Si ya hay comida registrada de una colación/cena, el slot está cumplido aunque se haya
+    // importado antes de existir la detección automática (resuelve el paraguas 'colacion' → 1/2).
+    for (const x of cleanExtras) {
+      const s = extraPlanSlot(x);
+      if (s === 'colacion1' || s === 'colacion2' || s === 'cena') eaten[s] = true;
     }
     migratedDays[k] = {
       ...v,
       water: v.water || { ml: 0 },
       extras: cleanExtras,
       eaten,
+      snackId1, snackId2,
       nudgesDismissed: Array.isArray(v.nudgesDismissed) ? v.nudgesDismissed : [],
-      skipped: Array.isArray(v.skipped) ? v.skipped : [],
+      skipped,
       dessertAlmuerzoId: v.dessertAlmuerzoId ?? null,
       dessertCenaId: v.dessertCenaId ?? null,
       notes: v.notes && typeof v.notes === 'object' ? v.notes : null,
@@ -1744,16 +1813,17 @@ function mergeBridge(state, bridge) {
   const added = { meals: 0, weights: 0, workouts: 0, checks: 0, water: 0 };
 
   const ensureDay = (dk) => {
-    const base = days[dk] || { eaten: {}, snackId: null, proteinId: null, water: { ml: 0 }, skipped: [], nudgesDismissed: [], dessertAlmuerzoId: null, dessertCenaId: null, notes: null };
+    const base = days[dk] || { eaten: {}, snackId1: null, snackId2: null, proteinId: null, water: { ml: 0 }, skipped: [], nudgesDismissed: [], dessertAlmuerzoId: null, dessertCenaId: null, notes: null };
     days[dk] = { ...base, extras: [...(base.extras || [])], exercise: [...(base.exercise || [])] };
     return days[dk];
   };
 
-  // Slots que, al venir del bridge, marcan la sección como cumplida. Solo colación/cena:
-  // no tienen ítems fijos con kcal, así que marcar `eaten` no duplica calorías (las kcal
-  // vienen del extra). Marcar desayuno/almuerzo/antojo sí dispararía el fallback legacy de
-  // getMealItemTicks y sumaría kcal fantasma, por eso se excluyen.
-  const BRIDGE_SLOT_DETECT = new Set(['colacion', 'cena']);
+  // Slots que, al venir del bridge, marcan la sección como cumplida: solo colaciones/cena
+  // (no tienen ítems fijos con kcal, así que marcar `eaten` no duplica calorías —las kcal
+  // vienen del extra). Marcar desayuno/almuerzo sí dispararía el fallback legacy de
+  // getMealItemTicks y sumaría kcal fantasma, por eso se excluyen. El slot se resuelve con
+  // extraPlanSlot, que mapea el paraguas 'colacion' a colacion1/colacion2 por la hora.
+  const BRIDGE_EATEN_SLOTS = new Set(['colacion1', 'colacion2', 'cena']);
   for (const m of bridge.meals) {
     if (m.id == null || removedBridgeIds.has(m.id)) continue;
     const slot = m.mealSlot || 'extra';
@@ -1780,7 +1850,8 @@ function mergeBridge(state, bridge) {
       carbs: num(m.carbs), fat: num(m.fat), fiber: num(m.fiber),
       mealSlot: slot, source: 'skill-chat',
     });
-    if (BRIDGE_SLOT_DETECT.has(slot)) d.eaten = { ...(d.eaten || {}), [slot]: true };
+    const detected = extraPlanSlot({ mealSlot: slot, name: m.name, ts: m.ts, source: 'skill-chat' });
+    if (BRIDGE_EATEN_SLOTS.has(detected)) d.eaten = { ...(d.eaten || {}), [detected]: true };
     importedIds.add(m.id); added.meals++;
   }
 
@@ -1890,15 +1961,17 @@ function mergeBridge(state, bridge) {
   // los bridges antiguos no traen `checks`. Cada check se aplica una sola vez (id en
   // importedIds), para no re-marcar si Hugo lo destilda manualmente en la app.
   if (Array.isArray(bridge.checks)) {
-    const FIXED_MEAL_SLOTS = new Set(['desayuno', 'almuerzo', 'colacion', 'cena', 'antojo', 'dessertAlmuerzo', 'dessertCena']);
+    const FIXED_MEAL_SLOTS = new Set(['desayuno', 'almuerzo', 'colacion1', 'colacion2', 'cena', 'dessertAlmuerzo', 'dessertCena']);
     for (const c of bridge.checks) {
       if (c == null || c.id == null || importedIds.has(c.id)) continue;
-      if (!FIXED_MEAL_SLOTS.has(c.meal)) continue;
+      // El check 'colacion' (paraguas de la skill) se resuelve a colacion1/2 por la hora.
+      const meal = c.meal === 'colacion' ? resolveColacion(c) : c.meal;
+      if (!FIXED_MEAL_SLOTS.has(meal)) continue;
       const d = ensureDay(bridgeDateKey(c));
       // Si esa sección ya tiene un registro real del chat, NO marcar el fijo como comido:
       // el extra es la comida y marcar el plan sumaría kcal fantasma (ver computeDayTotals).
-      const alreadyLogged = (d.extras || []).some((x) => extraPlanSlot(x) === c.meal);
-      if (!alreadyLogged) d.eaten = { ...(d.eaten || {}), [c.meal]: true };
+      const alreadyLogged = (d.extras || []).some((x) => extraPlanSlot(x) === meal);
+      if (!alreadyLogged) d.eaten = { ...(d.eaten || {}), [meal]: true };
       importedIds.add(c.id); added.checks++;
     }
   }
@@ -1992,31 +2065,37 @@ function computeDayTotals(day, snackBank, proteinBank, targets, dessertBank, cus
     }
   }
 
-  const snack = day?.snackId ? snackBank.find((s) => s.id === day.snackId) : null;
+  const snack1 = day?.snackId1 ? snackBank.find((s) => s.id === day.snackId1) : null;
+  const snack2 = day?.snackId2 ? snackBank.find((s) => s.id === day.snackId2) : null;
   const dinner = day?.proteinId ? proteinBank.find((p) => p.id === day.proteinId) : null;
   const dessertA = day?.dessertAlmuerzoId ? dBank.find((d) => d.id === day.dessertAlmuerzoId) : null;
   const dessertC = day?.dessertCenaId ? dBank.find((d) => d.id === day.dessertCenaId) : null;
-  const snackEaten = snack && e.colacion && !loggedSlots.has('colacion') ? [snack] : [];
+  const snack1Eaten = snack1 && e.colacion1 && !loggedSlots.has('colacion1') ? [snack1] : [];
+  const snack2Eaten = snack2 && e.colacion2 && !loggedSlots.has('colacion2') ? [snack2] : [];
   const dinnerEaten = dinner && e.cena && !loggedSlots.has('cena') ? [dinner] : [];
   const dessertAEaten = dessertA && e.dessertAlmuerzo ? [dessertA] : [];
   const dessertCEaten = dessertC && e.dessertCena ? [dessertC] : [];
 
-  // Comidas del chat (extras) que caen en colación / cena, por mealSlot, nombre u hora
+  // Comidas del chat (extras) que caen en cada colación / cena, por mealSlot, nombre u hora
   // (ver extraPlanSlot). La vista semanal antes solo miraba el banco (snack/dinner) y por eso
   // ignoraba las colaciones/cenas registradas por chat; estos campos hacen que la semana, los
   // días completos, los colores y el promedio las cuenten.
-  const colacionExtras = extras.filter((x) => extraPlanSlot(x) === 'colacion');
+  const colacion1Extras = extras.filter((x) => extraPlanSlot(x) === 'colacion1');
+  const colacion2Extras = extras.filter((x) => extraPlanSlot(x) === 'colacion2');
   const cenaExtras = extras.filter((x) => extraPlanSlot(x) === 'cena');
-  const hasSnack = !!snack || colacionExtras.length > 0;
+  const hasSnack1 = !!snack1 || colacion1Extras.length > 0;
+  const hasSnack2 = !!snack2 || colacion2Extras.length > 0;
   const hasDinner = !!dinner || cenaExtras.length > 0;
-  const snackLabel = snack ? snack.name : (colacionExtras.length ? colacionExtras.map((x) => x.name).join(' + ') : null);
+  const snack1Label = snack1 ? snack1.name : (colacion1Extras.length ? colacion1Extras.map((x) => x.name).join(' + ') : null);
+  const snack2Label = snack2 ? snack2.name : (colacion2Extras.length ? colacion2Extras.map((x) => x.name).join(' + ') : null);
+  const snackLabel = [snack1Label, snack2Label].filter(Boolean).join(' · ') || null;
   const dinnerLabel = dinner ? dinner.name : (cenaExtras.length ? cenaExtras.map((x) => x.name).join(' + ') : null);
 
   const exercise = day?.exercise || [];
   // Porción del PLAN (fijos + banco): lo que NO se empuja a meals[] del bridge. Los extras
   // y el ejercicio sí van a meals[]/workouts[], así que el snapshot debe llevar solo esto
   // para que el bridge sume sin solape (partición aditiva, no Math.max). Ver snapPayload.
-  const planEaten = [...eatenFixedItems, ...snackEaten, ...dinnerEaten, ...dessertAEaten, ...dessertCEaten];
+  const planEaten = [...eatenFixedItems, ...snack1Eaten, ...snack2Eaten, ...dinnerEaten, ...dessertAEaten, ...dessertCEaten];
   const allEaten = [...planEaten, ...extras];
 
   const kcalIn = sumField(allEaten, 'kcal');
@@ -2047,10 +2126,12 @@ function computeDayTotals(day, snackBank, proteinBank, targets, dessertBank, cus
     fat, fatRemaining: T.fatTarget - fat,
     fiber, fiberRemaining: T.fiberTarget - fiber,
     waterMl, waterRemaining: T.waterTarget - waterMl,
-    hasSnack, hasDinner, snackLabel, dinnerLabel,
+    hasSnack1, hasSnack2, snack1Label, snack2Label, hasDinner, snackLabel, dinnerLabel,
+    // compat: agregado de ambas colaciones para consumidores que aún miran "snack" (semana, racha)
+    hasSnack: hasSnack1 || hasSnack2,
     hasDessertA: !!dessertA, hasDessertC: !!dessertC,
-    eatenAny: !!(eatenFixedItems.length || e.colacion || e.cena || e.dessertAlmuerzo || e.dessertCena || extras.length || exercise.length || (Array.isArray(day?.skipped) && day.skipped.length)),
-    snack, dinner, dessertA, dessertC, extras, exercise,
+    eatenAny: !!(eatenFixedItems.length || e.colacion1 || e.colacion2 || e.cena || e.dessertAlmuerzo || e.dessertCena || extras.length || exercise.length || (Array.isArray(day?.skipped) && day.skipped.length)),
+    snack1, snack2, dinner, dessertA, dessertC, extras, exercise,
   };
 }
 
@@ -2063,7 +2144,11 @@ function normalizeName(name) {
 // "📝 Registrado"; el resto cae en 'extra' → lista "Extras del día". Usa la misma
 // inferencia que extraPlanSlot (mealSlot → nombre → hora del ts) para que el detalle del
 // día y la vista semanal concuerden, incluso con comidas viejas del chat sin mealSlot.
-const PLAN_SLOTS = new Set(['desayuno', 'almuerzo', 'colacion', 'cena', 'antojo']);
+// Slots del plan diario en orden cronológico. Dos colaciones: colacion1 (mañana, 11:00) y
+// colacion2 (tarde, 18:00). El 'colacion' a secas del bridge/skill es un PARAGUAS que se
+// resuelve a colacion1/colacion2 por la hora del registro (ver resolveColacion). Ya no hay
+// 'antojo' como sección: lo de muy tarde se pliega a cena.
+const PLAN_SLOTS = new Set(['desayuno', 'almuerzo', 'colacion1', 'colacion2', 'cena']);
 function extraSlotBucket(x) {
   return extraPlanSlot(x) || 'extra';
 }
@@ -2074,32 +2159,45 @@ function extraSlotBucket(x) {
 const SLOT_NAME_RE = {
   desayuno: /^desayuno\b/i,
   almuerzo: /^almuerzo\b/i,
-  colacion: /^colaci[oó]n/i,
+  colacion1: /^colaci[oó]n\s*1\b/i,
+  colacion2: /^colaci[oó]n\s*2\b/i,
   cena: /^cena\b/i,
-  antojo: /^antojo\b/i,
 };
-// La sección del plan que un extra REEMPLAZA, o null si es un extra genuino (suma aparte).
-// Prefiere mealSlot (lo que ahora etiqueta la skill); cae al nombre solo para skill-chat.
-// Cuando devuelve un slot, computeDayTotals suprime el plan/banco de esa sección.
-// Slot del plan según la hora del registro. Espejo de _slotByTime() de bridge-writer.gs;
-// la tabla DEBE coincidir con la de la skill (food-tracker).
+// Colación 1 (mañana) vs 2 (tarde) según la hora del registro; corte a las 15:00. Sin ts
+// usable, default a colación 2 (la tarde concentra más colaciones registradas por chat).
+function resolveColacion(x) {
+  if (x?.ts != null) {
+    const d = new Date(x.ts);
+    if (!isNaN(d)) return (d.getHours() * 60 + d.getMinutes()) < 15 * 60 ? 'colacion1' : 'colacion2';
+  }
+  return 'colacion2';
+}
+// Slot del plan según la hora del registro. La colación AM (11:00) cae ANTES del almuerzo;
+// lo de muy tarde se pliega a cena. Inferencia de último recurso para comidas del chat sin
+// mealSlot; las colaciones explícitas las resuelve resolveColacion/SLOT_NAME_RE.
 function slotByTime(d) {
   if (!d || isNaN(d)) return null;
   const mins = d.getHours() * 60 + d.getMinutes();
-  if (mins < 11 * 60) return 'desayuno';
-  if (mins < 15 * 60) return 'almuerzo';
-  if (mins < 19 * 60) return 'colacion';
-  if (mins < 21 * 60 + 30) return 'cena';
-  return 'antojo';
+  if (mins < 10 * 60 + 30) return 'desayuno';
+  if (mins < 12 * 60 + 30) return 'colacion1';
+  if (mins < 15 * 60 + 30) return 'almuerzo';
+  if (mins < 19 * 60 + 30) return 'colacion2';
+  return 'cena';
 }
+// La sección del plan que un extra REEMPLAZA, o null si es un extra genuino (suma aparte).
+// Prefiere mealSlot (lo que etiqueta la skill); el 'colacion' paraguas → 1/2 por hora; cae al
+// nombre y luego al ts solo para skill-chat. Cuando devuelve un slot, computeDayTotals
+// suprime el plan/banco de esa sección.
 function extraPlanSlot(x) {
-  if (PLAN_SLOTS.has(x?.mealSlot)) return x.mealSlot;
+  const ms = x?.mealSlot;
+  if (ms === 'colacion') return resolveColacion(x);   // paraguas de la skill → colacion1/2 por hora
+  if (PLAN_SLOTS.has(ms)) return ms;                  // desayuno/almuerzo/colacion1/colacion2/cena directos
   if (x?.source === 'skill-chat' && x?.name) {
     for (const slot of PLAN_SLOTS) if (SLOT_NAME_RE[slot].test(x.name)) return slot;
+    if (/^colaci[oó]n/i.test(x.name)) return resolveColacion(x); // "Colación - ..." sin número
   }
   // Último recurso para comidas viejas del chat sin mealSlot: inferir por la hora del ts.
-  // Guardado por mealSlot ausente para no pisar un 'extra' explícito de la skill.
-  if (x?.source === 'skill-chat' && x?.mealSlot == null && x?.ts != null) {
+  if (x?.source === 'skill-chat' && ms == null && x?.ts != null) {
     const s = slotByTime(new Date(x.ts));
     if (s) return s;
   }
@@ -2239,10 +2337,12 @@ function countCategoryInWeek(state, category, refDate = new Date()) {
     const e = day.eaten || {};
 
     if (category === 'dulce') {
-      // Colación dulce
-      if (day.snackId && e.colacion) {
-        const snack = snackBank.find((s) => s.id === day.snackId);
-        if (isItemDulce(snack, 'snack')) count++;
+      // Colaciones dulces (ambas tomas)
+      for (const [idKey, eatKey] of [['snackId1', 'colacion1'], ['snackId2', 'colacion2']]) {
+        if (day[idKey] && e[eatKey]) {
+          const snack = snackBank.find((s) => s.id === day[idKey]);
+          if (isItemDulce(snack, 'snack')) count++;
+        }
       }
       // Postres almuerzo + cena (todos los postres cuentan)
       if (day.dessertAlmuerzoId && e.dessertAlmuerzo) count++;
@@ -2404,10 +2504,12 @@ function generateShoppingList(state, options = {}) {
   for (const [k, day] of Object.entries(days)) {
     if (!day || k < start || k > refDate) continue;
     const e = day.eaten || {};
-    // Snacks
-    if (day.snackId && e.colacion) {
-      const it = snackBank.find((s) => s.id === day.snackId);
-      if (it) addUsage(it, 'colacion');
+    // Snacks (ambas colaciones)
+    for (const [idKey, eatKey] of [['snackId1', 'colacion1'], ['snackId2', 'colacion2']]) {
+      if (day[idKey] && e[eatKey]) {
+        const it = snackBank.find((s) => s.id === day[idKey]);
+        if (it) addUsage(it, 'colacion');
+      }
     }
     // Proteínas cena
     if (day.proteinId && e.cena) {
@@ -2937,9 +3039,11 @@ function useNotificationScheduler(notifSettings) {
     };
 
     const slots = [
-      { key: 'almuerzo', label: 'Almuerzo', body: '¿Ya almorzaste? Recuerda marcar tu comida.', time: notifSettings.almuerzo },
-      { key: 'agua',     label: 'Agua',     body: 'Recordatorio de hidratación: revisa tu meta de agua.', time: notifSettings.agua },
-      { key: 'cena',     label: 'Cena',     body: 'Recordatorio de cena: marca tu cena al terminar.', time: notifSettings.cena },
+      { key: 'colacion1', label: 'Colación 1', body: 'Colación de la mañana: lleva algo transportable.', time: notifSettings.colacion1 },
+      { key: 'almuerzo',  label: 'Almuerzo',   body: '¿Ya almorzaste? Recuerda marcar tu comida.', time: notifSettings.almuerzo },
+      { key: 'colacion2', label: 'Colación 2', body: 'Colación de la tarde: algo transportable y sin refrigerar.', time: notifSettings.colacion2 },
+      { key: 'agua',      label: 'Agua',       body: 'Recordatorio de hidratación: revisa tu meta de agua.', time: notifSettings.agua },
+      { key: 'cena',      label: 'Cena',       body: 'Recordatorio de cena: marca tu cena al terminar.', time: notifSettings.cena },
     ];
 
     const tick = () => {
@@ -4503,10 +4607,10 @@ function ExtrasSection({ day, onUpdate, apiKey, tryWithRules, onRemoveExtra, onE
 
 const MEAL_SLOTS = [
   { id: 'desayuno', label: 'Desayuno', emoji: '🍳' },
+  { id: 'colacion1', label: 'Colación 1', emoji: '🥪' },
   { id: 'almuerzo', label: 'Almuerzo', emoji: '🍚' },
-  { id: 'colacion', label: 'Colación', emoji: '🥪' },
+  { id: 'colacion2', label: 'Colación 2', emoji: '🥪' },
   { id: 'cena', label: 'Cena', emoji: '🍽️' },
-  { id: 'antojo', label: 'Antojo', emoji: '🍫' },
   { id: 'extra', label: 'Extra', emoji: '➕' },
 ];
 
@@ -4788,7 +4892,8 @@ function CoachModal({ state, setState, dateKey, targets, onClose, onOpenSubstitu
       const slotsPendientes = [];
       if (!eaten.desayuno) slotsPendientes.push('desayuno');
       if (!eaten.almuerzo) slotsPendientes.push('almuerzo');
-      if (!eaten.colacion) slotsPendientes.push('colación');
+      if (!eaten.colacion1) slotsPendientes.push('colación 1');
+      if (!eaten.colacion2) slotsPendientes.push('colación 2');
       if (!eaten.cena) slotsPendientes.push('cena');
 
       const prompt = `Eres el coach nutricional de Hugo (geriatra chileno, hombre). Sé directo, conciso, sin alarmismo. USA TUTEO CHILENO (tú, tienes, puedes). NO uses voseo argentino (vos, tenés, podés). Nada de "che", "dale".
@@ -5644,10 +5749,21 @@ function HabitNudge({ day, totals, targets, isToday, onUpdate }) {
   const dismissed = day?.nudgesDismissed || [];
   const skippedSet = new Set(day?.skipped || []);
 
+  // Una sección registrada como extra (chat/bridge) cuenta como cumplida aunque NO marque
+  // eaten: almuerzo/desayuno no setean eaten para no sumar las kcal fantasma del plan fijo
+  // (ver mergeBridge/BRIDGE_SLOT_DETECT). Sin esto, el nudge "no marcaste el almuerzo"
+  // aparecía pese a tener el almuerzo en REGISTRADO.
+  const coveredByExtra = new Set();
+  for (const x of (day?.extras || [])) {
+    const slot = extraPlanSlot(x);
+    if (slot) coveredByExtra.add(slot);
+  }
+  const isDone = (slot) => !!eaten[slot] || coveredByExtra.has(slot) || skippedSet.has(slot);
+
   const T = targets || DEFAULT_TARGETS;
   const candidates = [];
 
-  if (timeMin >= 14 * 60 && !eaten.almuerzo && !skippedSet.has('almuerzo')) {
+  if (timeMin >= 14 * 60 && !isDone('almuerzo')) {
     candidates.push({
       id: 'almuerzo-pendiente',
       icon: '🍚',
@@ -5673,7 +5789,7 @@ function HabitNudge({ day, totals, targets, isToday, onUpdate }) {
       action: null,
     });
   }
-  if (timeMin >= 22 * 60 && !eaten.cena && !skippedSet.has('cena')) {
+  if (timeMin >= 22 * 60 && !isDone('cena')) {
     candidates.push({
       id: 'cena-pendiente',
       icon: '🍽️',
@@ -5792,7 +5908,6 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
   const dateObj = new Date(today + 'T12:00:00');
   const dow = dateObj.getDay();
   const dayName = DAY_NAMES[dow];
-  const snackTime = SCHEDULE_BY_DOW[dow];
   const day = state.days[today] || {};
   const eaten = day.eaten || {};
   const dateInputRef = React.useRef(null);
@@ -5826,18 +5941,18 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
   const dayExtras = day.extras || [];
   const desayunoExtras = dayExtras.filter((x) => extraSlotBucket(x) === 'desayuno');
   const almuerzoExtras = dayExtras.filter((x) => extraSlotBucket(x) === 'almuerzo');
-  const colacionExtras = dayExtras.filter((x) => extraSlotBucket(x) === 'colacion');
+  const colacion1Extras = dayExtras.filter((x) => extraSlotBucket(x) === 'colacion1');
+  const colacion2Extras = dayExtras.filter((x) => extraSlotBucket(x) === 'colacion2');
   const cenaExtras = dayExtras.filter((x) => extraSlotBucket(x) === 'cena');
-  const antojoExtras = dayExtras.filter((x) => extraSlotBucket(x) === 'antojo');
   const removeSlotExtra = (slot, id) => {
     const target = dayExtras.find((e) => e.id === id);
     const nextExtras = dayExtras.filter((e) => e.id !== id);
     const patch = { extras: nextExtras };
-    // Solo colación/cena marcan el slot como cumplido vía eaten; al quedar vacío y sin pick
-    // de banco, se vuelve a marcar pendiente. Desayuno/almuerzo/antojo no tocan eaten.
-    if (slot === 'colacion' || slot === 'cena') {
+    // Solo colaciones/cena marcan el slot como cumplido vía eaten; al quedar vacío y sin pick
+    // de banco, se vuelve a marcar pendiente. Desayuno/almuerzo no tocan eaten.
+    if (slot === 'colacion1' || slot === 'colacion2' || slot === 'cena') {
       const stillHasSlot = nextExtras.some((e) => extraSlotBucket(e) === slot);
-      const bankPick = slot === 'colacion' ? day.snackId : day.proteinId;
+      const bankPick = slot === 'colacion1' ? day.snackId1 : slot === 'colacion2' ? day.snackId2 : day.proteinId;
       if (!stillHasSlot && !bankPick) patch.eaten = { ...(day.eaten || {}), [slot]: false };
     }
     updateDay(patch);
@@ -5857,7 +5972,7 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
     const slot = extraSlotBucket(rest);
     const cur = day.extras || [];
     const patch = { extras: [...cur, { ...rest, id: uuid() }] };
-    if (slot === 'colacion' || slot === 'cena') patch.eaten = { ...(day.eaten || {}), [slot]: true };
+    if (slot === 'colacion1' || slot === 'colacion2' || slot === 'cena') patch.eaten = { ...(day.eaten || {}), [slot]: true };
     updateDay(patch);
     setUndoItem(null);
   };
@@ -5878,12 +5993,13 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
   // Enforcement de reglas: acumula violaciones, muestra modal único si hay
   const [pendingViolation, setPendingViolation] = useState(null);
   const [suggestSlot, setSuggestSlot] = useState(null); // 'snack' | 'dinner' | 'dessert_almuerzo' | 'dessert_cena' | null
+  const [snackSuggestTarget, setSnackSuggestTarget] = useState('colacion1'); // a qué colación va la sugerencia 'snack'
 
   const handleSuggestionSelected = (item) => {
     const slot = suggestSlot;
     setSuggestSlot(null);
     if (!slot || !item?.id) return;
-    if (slot === 'snack') selectSnack(item.id);
+    if (slot === 'snack') selectSnack(snackSuggestTarget, item.id);
     else if (slot === 'dinner') selectDinner(item.id);
     else if (slot === 'dessert_almuerzo') selectDessert('almuerzo', item.id);
     else if (slot === 'dessert_cena') selectDessert('cena', item.id);
@@ -5979,11 +6095,12 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
     });
   };
 
-  const selectSnack = (id) => {
-    const same = day.snackId === id;
+  const selectSnack = (slot, id) => {
+    const idKey = slot === 'colacion2' ? 'snackId2' : 'snackId1';
+    const same = day[idKey] === id;
     const cur = day.eaten || {};
-    const skippedNow = (day.skipped || []).filter((s) => s !== 'colacion');
-    const doSelect = () => updateDay({ snackId: same ? null : id, eaten: { ...cur, colacion: false }, skipped: skippedNow });
+    const skippedNow = (day.skipped || []).filter((s) => s !== slot);
+    const doSelect = () => updateDay({ [idKey]: same ? null : id, eaten: { ...cur, [slot]: false }, skipped: skippedNow });
     if (same) { doSelect(); return; }
     const snack = (state.snackBank || []).find((s) => s.id === id);
     if (isItemDulce(snack, 'snack')) {
@@ -6033,9 +6150,10 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
     }
     const patch = { skipped: newSkipped, eaten: newEaten };
     // Si se salta colación/cena, también limpiar selección del banco
-    if (slot === 'colacion' && !list.includes(slot)) patch.snackId = null;
+    if (slot === 'colacion1' && !list.includes(slot)) patch.snackId1 = null;
+    if (slot === 'colacion2' && !list.includes(slot)) patch.snackId2 = null;
     if (slot === 'cena' && !list.includes(slot)) patch.proteinId = null;
-    // Si se salta un meal fijo (desayuno/almuerzo/antojo), limpiar sus ticks de ítems
+    // Si se salta un meal fijo (desayuno/almuerzo), limpiar sus ticks de ítems
     if (!list.includes(slot) && FIXED_MEALS.some((m) => m.id === slot)) {
       const items = { ...(day.eatenItems || {}) };
       items[slot] = {};
@@ -6047,7 +6165,66 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
   const totals = computeDayTotals(day, state.snackBank, state.proteinBank, targets, state.dessertBank, state.antojoCustomItems || []);
   const desayuno = FIXED_MEALS[0];
   const almuerzo = FIXED_MEALS[1];
-  const antojo = FIXED_MEALS[2];
+
+  // Render de una colación (1 ó 2). Las aptas para llevar van primero; el resto del banco,
+  // bajo un separador. requireNoRefrig exige también 'sin-refrigeración' (colación 2 a las 18h,
+  // sin nevera). El picker escribe en snackId1/snackId2 y eaten.colacion1/colacion2.
+  const renderColacion = (slot, label, time, requireNoRefrig, slotExtras) => {
+    const idKey = slot === 'colacion2' ? 'snackId2' : 'snackId1';
+    const isSkipped = skippedSet.has(slot);
+    const hasTag = (s, t) => Array.isArray(s.tags) && s.tags.includes(t);
+    const apta = (s) => hasTag(s, 'portable') && (!requireNoRefrig || hasTag(s, 'sin-refrigeración'));
+    const bank = state.snackBank || [];
+    const aptas = bank.filter(apta);
+    const resto = bank.filter((s) => !apta(s));
+    const ordered = [...aptas, ...resto];
+    const reqLabel = requireNoRefrig ? 'transportable · sin refrigeración' : 'transportable';
+    return (
+      <div>
+        <div className="flex items-end justify-between mb-1">
+          <SectionHeader title={`${label} · ${time}`} hint={isSkipped ? `🚫 Hoy no tomé ${label.toLowerCase()}` : `Para llevar (${reqLabel})`} />
+          <div className="flex items-center gap-1.5">
+            {!isSkipped && (
+              <button onClick={() => { setSnackSuggestTarget(slot); setSuggestSlot('snack'); }}
+                className="px-2.5 py-1 rounded-full text-[11px] font-semibold bg-sky-100 dark:bg-sky-900/30 text-sky-700 dark:text-sky-300 hover:bg-sky-200 dark:hover:bg-sky-900/50">
+                🤔 ¿Qué como?
+              </button>
+            )}
+            <button onClick={() => toggleSkipped(slot)}
+              className={`px-2.5 py-1 rounded-full text-[11px] font-semibold ${
+                isSkipped
+                  ? 'bg-gray-200 dark:bg-gray-800 text-gray-700 dark:text-gray-300'
+                  : 'bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'
+              }`}>
+              {isSkipped ? '↩️ Deshacer' : '🚫 No comí'}
+            </button>
+          </div>
+        </div>
+        {!isSkipped && (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+            {ordered.map((s, i) => (
+              <React.Fragment key={s.id}>
+                {i === aptas.length && aptas.length > 0 && resto.length > 0 && (
+                  <div className="sm:col-span-2 text-[10px] font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-600 pt-1">
+                    Resto del banco (no aptas para llevar)
+                  </div>
+                )}
+                <SelectableCard item={s}
+                  selected={day[idKey] === s.id}
+                  eaten={day[idKey] === s.id && !!eaten[slot]}
+                  onClick={() => selectSnack(slot, s.id)}
+                  onToggleEaten={() => toggleEaten(slot)}
+                  showCategory targets={targets} />
+              </React.Fragment>
+            ))}
+          </div>
+        )}
+        {!isSkipped && (
+          <SlotLoggedItems items={slotExtras} onRemove={(id) => removeSlotExtra(slot, id)} onEdit={setEditTarget} />
+        )}
+      </div>
+    );
+  };
 
   const recents = useMemo(
     () => computeRecents(state.days || {}, 10),
@@ -6167,8 +6344,6 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
           <h1 className="text-2xl font-bold tracking-tight">{dayName}</h1>
           <p className="text-sm text-gray-500 dark:text-gray-400">
             {dateObj.toLocaleDateString('es-CL', { day: 'numeric', month: 'long', year: 'numeric' })}
-            {snackTime && <span> · Colación {snackTime}</span>}
-            {!snackTime && <span> · Día libre</span>}
           </p>
           {isToday && (
             <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">Tap en cada comida para marcarla como comida ✓</p>
@@ -6226,6 +6401,7 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
             onSkipToggle={() => toggleSkipped('desayuno')} targets={targets} />
           <SlotLoggedItems items={desayunoExtras} onRemove={(id) => removeSlotExtra('desayuno', id)} onEdit={setEditTarget} />
         </div>
+        {renderColacion('colacion1', 'Colación 1', '11:00', false, colacion1Extras)}
         <div>
           <MealCard meal={almuerzo} day={day} skipped={skippedSet.has('almuerzo')}
             onToggleItem={(itemId) => toggleMealItem('almuerzo', itemId)}
@@ -6236,42 +6412,7 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
         <DessertSection meal="almuerzo" dessertBank={state.dessertBank} day={day} eaten={eaten}
           onSelect={selectDessert} onToggleEaten={toggleDessertEaten} targets={targets}
           onSuggest={() => setSuggestSlot('dessert_almuerzo')} />
-        <div>
-          <div className="flex items-end justify-between mb-1">
-            <SectionHeader title={`Colación${snackTime ? ` · ${snackTime}` : ''}`} hint={skippedSet.has('colacion') ? '🚫 Hoy no tomé colación' : 'Selecciona del banco, luego marca cuando la comas'} />
-            <div className="flex items-center gap-1.5">
-              {!skippedSet.has('colacion') && (
-                <button onClick={() => setSuggestSlot('snack')}
-                  className="px-2.5 py-1 rounded-full text-[11px] font-semibold bg-sky-100 dark:bg-sky-900/30 text-sky-700 dark:text-sky-300 hover:bg-sky-200 dark:hover:bg-sky-900/50">
-                  🤔 ¿Qué como?
-                </button>
-              )}
-              <button onClick={() => toggleSkipped('colacion')}
-              className={`px-2.5 py-1 rounded-full text-[11px] font-semibold ${
-                skippedSet.has('colacion')
-                  ? 'bg-gray-200 dark:bg-gray-800 text-gray-700 dark:text-gray-300'
-                  : 'bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'
-              }`}>
-              {skippedSet.has('colacion') ? '↩️ Deshacer' : '🚫 No comí'}
-            </button>
-            </div>
-          </div>
-          {!skippedSet.has('colacion') && (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-              {state.snackBank.map((s) => (
-                <SelectableCard key={s.id} item={s}
-                  selected={day.snackId === s.id}
-                  eaten={day.snackId === s.id && !!eaten.colacion}
-                  onClick={() => selectSnack(s.id)}
-                  onToggleEaten={() => toggleEaten('colacion')}
-                  showCategory targets={targets} />
-              ))}
-            </div>
-          )}
-          {!skippedSet.has('colacion') && (
-            <SlotLoggedItems items={colacionExtras} onRemove={(id) => removeSlotExtra('colacion', id)} onEdit={setEditTarget} />
-          )}
-        </div>
+        {renderColacion('colacion2', 'Colación 2', '18:00', true, colacion2Extras)}
         <div>
           <div className="flex items-end justify-between mb-1">
             <SectionHeader title="Cena" hint={skippedSet.has('cena') ? '🚫 Hoy no cené' : 'Proteína + ensalada/verduras (sin arroz)'} />
@@ -6312,17 +6453,6 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
               onSelect={selectDessert} onToggleEaten={toggleDessertEaten} targets={targets}
               onSuggest={() => setSuggestSlot('dessert_cena')} />
           )}
-        </div>
-        <div>
-          <MealCard meal={antojo} day={day} skipped={skippedSet.has('antojo')}
-            customAntojoItems={state.antojoCustomItems || []}
-            onToggleItem={(itemId) => toggleMealItem('antojo', itemId)}
-            onMarkAll={(value) => markAllMealItems('antojo', value)}
-            onSkipToggle={() => toggleSkipped('antojo')}
-            onAddItem={addAntojoItem}
-            onRemoveItem={removeAntojoItem}
-            targets={targets} />
-          <SlotLoggedItems items={antojoExtras} onRemove={(id) => removeSlotExtra('antojo', id)} onEdit={setEditTarget} />
         </div>
         <ExtrasSection day={day} onUpdate={updateDay} apiKey={state.settings?.anthropicApiKey} tryWithRules={tryWithRules}
           onRemoveExtra={(id) => removeSlotExtra('extra', id)} onEditExtra={setEditTarget} />
@@ -7632,9 +7762,11 @@ function SettingsModal({ state, setState, onClose }) {
   const [bulkWorkouts, setBulkWorkouts] = useState(false);
   const [editProfile, setEditProfile] = useState(false);
 
-  const initialNotif = state.settings?.notifications || { enabled: false, almuerzo: '13:30', agua: '16:00', cena: '20:30' };
+  const initialNotif = state.settings?.notifications || { enabled: false, colacion1: '11:00', almuerzo: '13:30', colacion2: '18:00', agua: '16:00', cena: '20:30' };
   const [notifEnabled, setNotifEnabled] = useState(!!initialNotif.enabled);
+  const [notifColacion1, setNotifColacion1] = useState(initialNotif.colacion1 || '11:00');
   const [notifAlmuerzo, setNotifAlmuerzo] = useState(initialNotif.almuerzo || '13:30');
+  const [notifColacion2, setNotifColacion2] = useState(initialNotif.colacion2 || '18:00');
   const [notifAgua, setNotifAgua] = useState(initialNotif.agua || '16:00');
   const [notifCena, setNotifCena] = useState(initialNotif.cena || '20:30');
   const [notifPermStatus, setNotifPermStatus] = useState(typeof Notification !== 'undefined' ? Notification.permission : 'unsupported');
@@ -7695,7 +7827,7 @@ function SettingsModal({ state, setState, onClose }) {
         ...(prev.settings || {}),
         anthropicApiKey: key.trim() || null,
         saveImages,
-        notifications: { enabled: notifEnabled, almuerzo: notifAlmuerzo, agua: notifAgua, cena: notifCena },
+        notifications: { enabled: notifEnabled, colacion1: notifColacion1, almuerzo: notifAlmuerzo, colacion2: notifColacion2, agua: notifAgua, cena: notifCena },
       },
       rules: rulesDraft,
       userProfile: prev.userProfile
@@ -7936,20 +8068,30 @@ function SettingsModal({ state, setState, onClose }) {
           </label>
           {notifEnabled && notifPermStatus === 'granted' && (
             <>
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid grid-cols-2 gap-2">
+                <label className="block">
+                  <span className="text-[11px] font-medium text-gray-600 dark:text-gray-400">🥪 Colación 1</span>
+                  <input type="time" value={notifColacion1} onChange={(e) => setNotifColacion1(e.target.value)}
+                    className="mt-1 w-full px-2 py-1.5 text-sm rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800" />
+                </label>
                 <label className="block">
                   <span className="text-[11px] font-medium text-gray-600 dark:text-gray-400">🍚 Almuerzo</span>
                   <input type="time" value={notifAlmuerzo} onChange={(e) => setNotifAlmuerzo(e.target.value)}
                     className="mt-1 w-full px-2 py-1.5 text-sm rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800" />
                 </label>
                 <label className="block">
-                  <span className="text-[11px] font-medium text-gray-600 dark:text-gray-400">💧 Agua</span>
-                  <input type="time" value={notifAgua} onChange={(e) => setNotifAgua(e.target.value)}
+                  <span className="text-[11px] font-medium text-gray-600 dark:text-gray-400">🥪 Colación 2</span>
+                  <input type="time" value={notifColacion2} onChange={(e) => setNotifColacion2(e.target.value)}
                     className="mt-1 w-full px-2 py-1.5 text-sm rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800" />
                 </label>
                 <label className="block">
                   <span className="text-[11px] font-medium text-gray-600 dark:text-gray-400">🍽️ Cena</span>
                   <input type="time" value={notifCena} onChange={(e) => setNotifCena(e.target.value)}
+                    className="mt-1 w-full px-2 py-1.5 text-sm rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800" />
+                </label>
+                <label className="block">
+                  <span className="text-[11px] font-medium text-gray-600 dark:text-gray-400">💧 Agua</span>
+                  <input type="time" value={notifAgua} onChange={(e) => setNotifAgua(e.target.value)}
                     className="mt-1 w-full px-2 py-1.5 text-sm rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800" />
                 </label>
               </div>
