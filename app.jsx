@@ -284,14 +284,24 @@ Usa estos keys cuando estén disponibles (omite los que no aparezcan):
    - "30days" si es "30 días", "último mes"
    - "month" si es vista mensual
    - "all" si es histórico completo
+- exercises (SOLO si la captura lista los movimientos/ejercicios de UNA sesión, no en resúmenes
+  agregados): array de objetos, uno por ejercicio, con:
+   - name (nombre del ejercicio, ej. "Press banca", "Sentadilla", "Remo")
+   - muscle (grupo muscular principal que trabaja, en español y normalizado a UNO de:
+     "pecho", "espalda", "piernas", "hombros", "brazos", "core", "glúteos", "cardio".
+     Infiérelo del nombre del ejercicio aunque la captura no lo diga.)
+   - sets (número de series, entero) — null si no aparece
+   - reps (repeticiones por serie; número o string como "8-12") — null si no aparece
+   - weightKg (peso usado en kg, número) — null si es peso corporal o no aparece
 
 Reglas:
 - Valores numéricos sin unidades.
 - null si no aparece. No inventes.
 - Si ves "30.3K kg" interpreta como 30300.
 - Si ves "4491 kcal" como total, eso es kcal=4491.
+- Si NO ves un desglose por ejercicio (solo totales), omite "exercises".
 
-Ejemplo: {"kcal":3676,"minutes":371,"volumeKg":30300,"period":"today"}`;
+Ejemplo: {"kcal":3676,"minutes":371,"volumeKg":30300,"period":"today","exercises":[{"name":"Press banca","muscle":"pecho","sets":4,"reps":"10","weightKg":40},{"name":"Sentadilla","muscle":"piernas","sets":4,"reps":"8","weightKg":60}]}`;
 
 const PROMPT_EXTRACT_MEAL = `Eres un nutricionista experto. Estás analizando una FOTO de un plato de comida y/o una DESCRIPCIÓN en texto natural de lo que comió alguien.
 
@@ -391,7 +401,9 @@ async function extractMetricsFromImage(attachments, apiKey) {
 
 async function extractWorkoutFromImage(attachments, apiKey) {
   const list = Array.isArray(attachments) ? attachments : [attachments];
-  return extractFromAttachments(list, apiKey, PROMPT_EXTRACT_WORKOUT, { model: MODEL_CHEAP, maxTokens: 800 });
+  // MODEL_DEFAULT (mejor visión para tablas de Speediance) y más tokens para el desglose
+  // ejercicio-por-ejercicio.
+  return extractFromAttachments(list, apiKey, PROMPT_EXTRACT_WORKOUT, { model: MODEL_DEFAULT, maxTokens: 1500 });
 }
 
 const PROMPT_ESTIMATE_EXTRA = `Eres un nutricionista chileno. Estima los macros de un alimento individual o pequeño combo (un snack, una bebida, una galleta — no un plato completo).
@@ -2753,6 +2765,84 @@ function dayMetsTarget(totals, targets) {
     totals.kcal <= T.kcalRed &&
     totals.protein >= T.proteinYellow
   );
+}
+
+// Stats locales (sin IA) para la pestaña Ejercicios. Recorre el histórico de días y agrega
+// cada entrada de day.exercise[] como una "sesión". Calcula frecuencia, días entrenados,
+// tendencia semanal, volumen por grupo muscular (sets como proxy) y top de ejercicios.
+function computeExerciseStats(days, refDate, weeks = 8) {
+  const today = refDate || todayKey();
+  const start = shiftDate(today, -(weeks * 7 - 1));
+  const sessions = [];
+  for (const [dk, day] of Object.entries(days || {})) {
+    if (dk > today) continue;
+    const ex = Array.isArray(day?.exercise) ? day.exercise : [];
+    for (const w of ex) {
+      sessions.push({
+        date: dk,
+        name: w.name || 'Entrenamiento',
+        kcal: Number(w.kcal) || 0,
+        minutes: w.minutes != null ? Number(w.minutes) : null,
+        volumeKg: w.volumeKg != null ? Number(w.volumeKg) : null,
+        exercises: Array.isArray(w.exercises) ? w.exercises : [],
+      });
+    }
+  }
+  sessions.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0)); // recientes primero
+  const inWindow = sessions.filter((s) => s.date >= start);
+  const trainedDates = [...new Set(sessions.map((s) => s.date))].sort();
+  const trainedDatesWindow = new Set(inWindow.map((s) => s.date));
+
+  const lastDate = trainedDates.length ? trainedDates[trainedDates.length - 1] : null;
+  const daysSinceLast = lastDate ? daysBetween(lastDate, today) : null;
+  const ym = today.slice(0, 7);
+  const sessionsThisMonth = new Set(sessions.filter((s) => s.date.slice(0, 7) === ym).map((s) => s.date)).size;
+  const freqPerWeek = trainedDatesWindow.size / weeks;
+
+  // Tendencia: una barra por semana (de la más vieja a la más nueva)
+  const weekBuckets = [];
+  for (let i = weeks - 1; i >= 0; i--) {
+    const wEnd = shiftDate(today, -(i * 7));
+    const wStart = shiftDate(wEnd, -6);
+    const ws = sessions.filter((s) => s.date >= wStart && s.date <= wEnd);
+    weekBuckets.push({
+      label: wStart.slice(5),
+      sessions: new Set(ws.map((s) => s.date)).size,
+      kcal: ws.reduce((a, s) => a + s.kcal, 0),
+      volumeKg: ws.reduce((a, s) => a + (s.volumeKg || 0), 0),
+    });
+  }
+
+  // Volumen por grupo muscular (sets como proxy; 1 por ejercicio si no hay sets) + top ejercicios
+  const muscleSets = {};
+  const exNameCount = {};
+  for (const s of inWindow) {
+    for (const e of s.exercises) {
+      const m = (e.muscle || 'otros').toLowerCase();
+      const sets = Number(e.sets) > 0 ? Number(e.sets) : 1;
+      muscleSets[m] = (muscleSets[m] || 0) + sets;
+      const nm = (e.name || '').trim();
+      if (nm) exNameCount[nm] = (exNameCount[nm] || 0) + 1;
+    }
+  }
+  const muscleVolume = Object.entries(muscleSets).map(([muscle, sets]) => ({ muscle, sets })).sort((a, b) => b.sets - a.sets);
+  const topExercises = Object.entries(exNameCount).map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count).slice(0, 6);
+  const detailSessions = sessions.filter((s) => s.exercises.length > 0).length;
+
+  return {
+    totalSessions: sessions.length,
+    sessionsThisMonth,
+    trainedDates,
+    freqPerWeek,
+    daysSinceLast,
+    lastDate,
+    weekBuckets,
+    muscleVolume,
+    topExercises,
+    detailSessions,
+    weeks,
+    sessions,
+  };
 }
 
 function computeStreak(days, snackBank, proteinBank, targets, refDate, dessertBank, customAntojoItems) {
@@ -5418,10 +5508,31 @@ function WorkoutCaptureModal({ apiKey, onClose, onSave }) {
     today: 'Hoy', session: 'Sesión', '7days': 'Últimos 7 días', '30days': 'Últimos 30 días', month: 'Mes', all: 'Histórico',
   }[extracted?.period] || extracted?.period;
 
+  const exercises = Array.isArray(extracted?.exercises)
+    ? extracted.exercises.filter((e) => e && e.name).map((e) => ({
+        name: String(e.name).trim(),
+        muscle: e.muscle ? String(e.muscle).trim().toLowerCase() : null,
+        sets: e.sets != null && Number.isFinite(Number(e.sets)) ? Number(e.sets) : null,
+        reps: e.reps != null ? e.reps : null,
+        weightKg: e.weightKg != null && Number.isFinite(Number(e.weightKg)) ? Number(e.weightKg) : null,
+      }))
+    : [];
+  const canSave = !!extracted && !isAggregate && (extracted.kcal != null || exercises.length > 0);
+
   const confirm = () => {
-    if (!extracted || isAggregate || !extracted.kcal) return;
+    if (!canSave) return;
     const minutesNote = extracted.minutes ? ` · ${extracted.minutes} min` : '';
-    onSave({ id: uuid(), name: 'Entrenamiento Speediance' + minutesNote, kcal: Number(extracted.kcal) });
+    const out = {
+      id: uuid(),
+      ts: Date.now(),
+      name: 'Entrenamiento Speediance' + minutesNote,
+      kcal: extracted.kcal != null ? Number(extracted.kcal) : 0,
+      source: 'photo',
+    };
+    if (extracted.minutes != null) out.minutes = Number(extracted.minutes);
+    if (extracted.volumeKg != null) out.volumeKg = Number(extracted.volumeKg);
+    if (exercises.length) out.exercises = exercises;
+    onSave(out);
   };
 
   return (
@@ -5494,13 +5605,34 @@ function WorkoutCaptureModal({ apiKey, onClose, onSave }) {
               )}
             </div>
 
+            {exercises.length > 0 && (
+              <div className="rounded-xl border border-gray-200 dark:border-gray-800 divide-y divide-gray-100 dark:divide-gray-800">
+                <div className="px-3 py-2 text-[10px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                  {exercises.length} ejercicio{exercises.length === 1 ? '' : 's'} detectado{exercises.length === 1 ? '' : 's'}
+                </div>
+                {exercises.map((e, i) => (
+                  <div key={i} className="flex items-center gap-2 px-3 py-2">
+                    <span className="text-lg shrink-0">{emojiForExercise(e.name)}</span>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-medium truncate">{e.name}</div>
+                      <div className="text-[11px] text-gray-500 dark:text-gray-400">
+                        {e.muscle ? <span className="uppercase tracking-wide">{e.muscle}</span> : null}
+                        {(e.sets != null || e.reps != null) ? ` · ${e.sets ?? '?'}×${e.reps ?? '?'}` : ''}
+                        {e.weightKg != null ? ` · ${e.weightKg} kg` : ''}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
             {isAggregate ? (
               <div className="rounded-xl bg-amber-50 dark:bg-amber-900/30 p-3 text-xs text-amber-800 dark:text-amber-200">
                 ⚠️ Esta captura es un resumen de varios días ({periodLabel}). No se puede importar como ejercicio de hoy. Súbeme la captura del día específico o la sesión individual.
               </div>
             ) : (
-              <button onClick={confirm}
-                className="w-full py-2.5 rounded-xl bg-emerald-500 text-white font-semibold hover:bg-emerald-600">
+              <button onClick={confirm} disabled={!canSave}
+                className="w-full py-2.5 rounded-xl bg-emerald-500 text-white font-semibold hover:bg-emerald-600 disabled:bg-gray-300 dark:disabled:bg-gray-700 disabled:text-gray-500">
                 Agregar como ejercicio de hoy
               </button>
             )}
@@ -6016,13 +6148,15 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
   const [pendingViolation, setPendingViolation] = useState(null);
   const [suggestSlot, setSuggestSlot] = useState(null); // 'snack' | 'dinner' | 'dessert_almuerzo' | 'dessert_cena' | null
   const [snackSuggestTarget, setSnackSuggestTarget] = useState('colacion1'); // a qué colación va la sugerencia 'snack'
+  const [bankPicker, setBankPicker] = useState(null); // 'colacion1' | 'colacion2' | 'cena' | null — picker manual del banco
 
   const handleSuggestionSelected = (item) => {
     const slot = suggestSlot;
     setSuggestSlot(null);
     if (!slot || !item?.id) return;
-    if (slot === 'snack') selectSnack(snackSuggestTarget, item.id);
-    else if (slot === 'dinner') selectDinner(item.id);
+    // Elegir desde "¿Qué como?" registra en un toque (queda marcado como comido).
+    if (slot === 'snack') pickForSlot(snackSuggestTarget, item.id);
+    else if (slot === 'dinner') pickForSlot('cena', item.id);
     else if (slot === 'dessert_almuerzo') selectDessert('almuerzo', item.id);
     else if (slot === 'dessert_cena') selectDessert('cena', item.id);
   };
@@ -6139,6 +6273,24 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
     updateDay({ proteinId: same ? null : id, eaten: { ...cur, cena: false }, skipped: skippedNow });
   };
 
+  // Elige un ítem del banco para una toma (colación/cena) Y lo marca como comido en el mismo
+  // toque ("ir registrando"). A diferencia de selectSnack/selectDinner (que dejan eaten=false
+  // para el flujo "planear y luego marcar"), aquí registra de inmediato. Pasa por las reglas
+  // de dulces igual que selectSnack.
+  const pickForSlot = (slot, id) => {
+    const cur = day.eaten || {};
+    const skippedNow = (day.skipped || []).filter((s) => s !== slot);
+    if (slot === 'cena') {
+      updateDay({ proteinId: id, eaten: { ...cur, cena: true }, skipped: skippedNow });
+      return;
+    }
+    const idKey = slot === 'colacion2' ? 'snackId2' : 'snackId1';
+    const doPick = () => updateDay({ [idKey]: id, eaten: { ...cur, [slot]: true }, skipped: skippedNow });
+    const snack = (state.snackBank || []).find((s) => s.id === id);
+    if (isItemDulce(snack, 'snack')) tryWithRules(['add_dulce'], {}, doPick);
+    else doPick();
+  };
+
   const selectDessert = (meal, id) => {
     const field = meal === 'almuerzo' ? 'dessertAlmuerzoId' : 'dessertCenaId';
     const eatenKey = meal === 'almuerzo' ? 'dessertAlmuerzo' : 'dessertCena';
@@ -6194,23 +6346,24 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
   const renderColacion = (slot, label, time, requireNoRefrig, slotExtras) => {
     const idKey = slot === 'colacion2' ? 'snackId2' : 'snackId1';
     const isSkipped = skippedSet.has(slot);
-    const hasTag = (s, t) => Array.isArray(s.tags) && s.tags.includes(t);
-    const apta = (s) => hasTag(s, 'portable') && (!requireNoRefrig || hasTag(s, 'sin-refrigeración'));
-    const bank = state.snackBank || [];
-    const aptas = bank.filter(apta);
-    const resto = bank.filter((s) => !apta(s));
-    const ordered = [...aptas, ...resto];
     const reqLabel = requireNoRefrig ? 'transportable · sin refrigeración' : 'transportable';
+    const selectedItem = (state.snackBank || []).find((s) => s.id === day[idKey]);
     return (
       <div>
         <div className="flex items-end justify-between mb-1">
           <SectionHeader title={`${label} · ${time}`} hint={isSkipped ? `🚫 Hoy no tomé ${label.toLowerCase()}` : `Para llevar (${reqLabel})`} />
           <div className="flex items-center gap-1.5">
             {!isSkipped && (
-              <button onClick={() => { setSnackSuggestTarget(slot); setSuggestSlot('snack'); }}
-                className="px-2.5 py-1 rounded-full text-[11px] font-semibold bg-sky-100 dark:bg-sky-900/30 text-sky-700 dark:text-sky-300 hover:bg-sky-200 dark:hover:bg-sky-900/50">
-                🤔 ¿Qué como?
-              </button>
+              <>
+                <button onClick={() => setBankPicker(slot)}
+                  className="px-2.5 py-1 rounded-full text-[11px] font-semibold bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800">
+                  📋 Ver banco
+                </button>
+                <button onClick={() => { setSnackSuggestTarget(slot); setSuggestSlot('snack'); }}
+                  className="px-2.5 py-1 rounded-full text-[11px] font-semibold bg-sky-100 dark:bg-sky-900/30 text-sky-700 dark:text-sky-300 hover:bg-sky-200 dark:hover:bg-sky-900/50">
+                  🤔 ¿Qué como?
+                </button>
+              </>
             )}
             <button onClick={() => toggleSkipped(slot)}
               className={`px-2.5 py-1 rounded-full text-[11px] font-semibold ${
@@ -6223,23 +6376,19 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
           </div>
         </div>
         {!isSkipped && (
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-            {ordered.map((s, i) => (
-              <React.Fragment key={s.id}>
-                {i === aptas.length && aptas.length > 0 && resto.length > 0 && (
-                  <div className="sm:col-span-2 text-[10px] font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-600 pt-1">
-                    Resto del banco (no aptas para llevar)
-                  </div>
-                )}
-                <SelectableCard item={s}
-                  selected={day[idKey] === s.id}
-                  eaten={day[idKey] === s.id && !!eaten[slot]}
-                  onClick={() => selectSnack(slot, s.id)}
-                  onToggleEaten={() => toggleEaten(slot)}
-                  showCategory targets={targets} />
-              </React.Fragment>
-            ))}
-          </div>
+          selectedItem ? (
+            <SelectableCard item={selectedItem}
+              selected
+              eaten={!!eaten[slot]}
+              onClick={() => setBankPicker(slot)}
+              onToggleEaten={() => toggleEaten(slot)}
+              showCategory targets={targets} />
+          ) : (
+            <button onClick={() => setBankPicker(slot)}
+              className="w-full rounded-2xl border-2 border-dashed border-gray-200 dark:border-gray-800 p-4 text-sm text-gray-400 dark:text-gray-500 hover:border-emerald-300 dark:hover:border-emerald-700 hover:text-emerald-600 dark:hover:text-emerald-400 transition-colors">
+              + Elige del banco o usa 🤔 ¿Qué como?
+            </button>
+          )
         )}
         {!isSkipped && (
           <SlotLoggedItems items={slotExtras} onRemove={(id) => removeSlotExtra(slot, id)} onEdit={setEditTarget} />
@@ -6247,11 +6396,6 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
       </div>
     );
   };
-
-  const recents = useMemo(
-    () => computeRecents(state.days || {}, 10),
-    [state.days]
-  );
 
   const streak = useMemo(
     () => {
@@ -6283,20 +6427,6 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
     return () => clearTimeout(t);
   }, [undoItem]);
 
-  const addRecent = (r) => {
-    const cur = day.extras || [];
-    updateDay({
-      extras: [...cur, {
-        id: uuid(),
-        ts: Date.now(),
-        name: r.name,
-        kcal: r.kcal, protein: r.protein,
-        carbs: r.carbs, fat: r.fat, fiber: r.fiber,
-        source: 'recents',
-      }],
-    });
-  };
-
   return (
     <>
       <BentoTodayHero totals={totals} targets={targets} streak={streak} onStreakClick={() => setShowStreakModal(true)} weightSeries={state.weights} state={state} />
@@ -6315,6 +6445,15 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
           targets={targets}
           onSelect={handleSuggestionSelected}
           onClose={() => setSuggestSlot(null)}
+        />
+      )}
+      {bankPicker && (
+        <BankPickerModal
+          kind={bankPicker}
+          state={state}
+          targets={targets}
+          onSelect={(id) => { pickForSlot(bankPicker, id); setBankPicker(null); }}
+          onClose={() => setBankPicker(null)}
         />
       )}
       {editTarget && (
@@ -6395,8 +6534,6 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
           </button>
         )}
 
-        <RecentsRow recents={recents} onPick={addRecent} />
-
         <div className="grid grid-cols-2 gap-2">
           <button onClick={copyYesterday} disabled={!yesterdayExtras.length}
             className="py-2.5 rounded-2xl bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 text-gray-600 dark:text-gray-300 font-semibold text-sm hover:border-emerald-400 flex items-center justify-center gap-2 disabled:opacity-40 disabled:hover:border-gray-200 dark:disabled:hover:border-gray-800">
@@ -6440,10 +6577,16 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
             <SectionHeader title="Cena" hint={skippedSet.has('cena') ? '🚫 Hoy no cené' : 'Proteína + ensalada/verduras (sin arroz)'} />
             <div className="flex items-center gap-1.5">
               {!skippedSet.has('cena') && (
-                <button onClick={() => setSuggestSlot('dinner')}
-                  className="px-2.5 py-1 rounded-full text-[11px] font-semibold bg-sky-100 dark:bg-sky-900/30 text-sky-700 dark:text-sky-300 hover:bg-sky-200 dark:hover:bg-sky-900/50">
-                  🤔 ¿Qué como?
-                </button>
+                <>
+                  <button onClick={() => setBankPicker('cena')}
+                    className="px-2.5 py-1 rounded-full text-[11px] font-semibold bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800">
+                    📋 Ver banco
+                  </button>
+                  <button onClick={() => setSuggestSlot('dinner')}
+                    className="px-2.5 py-1 rounded-full text-[11px] font-semibold bg-sky-100 dark:bg-sky-900/30 text-sky-700 dark:text-sky-300 hover:bg-sky-200 dark:hover:bg-sky-900/50">
+                    🤔 ¿Qué como?
+                  </button>
+                </>
               )}
               <button onClick={() => toggleSkipped('cena')}
               className={`px-2.5 py-1 rounded-full text-[11px] font-semibold ${
@@ -6455,18 +6598,22 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
             </button>
             </div>
           </div>
-          {!skippedSet.has('cena') && (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-              {state.proteinBank.map((p) => (
-                <SelectableCard key={p.id} item={p}
-                  selected={day.proteinId === p.id}
-                  eaten={day.proteinId === p.id && !!eaten.cena}
-                  onClick={() => selectDinner(p.id)}
-                  onToggleEaten={() => toggleEaten('cena')}
-                  targets={targets} />
-              ))}
-            </div>
-          )}
+          {!skippedSet.has('cena') && (() => {
+            const selectedProtein = (state.proteinBank || []).find((p) => p.id === day.proteinId);
+            return selectedProtein ? (
+              <SelectableCard item={selectedProtein}
+                selected
+                eaten={!!eaten.cena}
+                onClick={() => setBankPicker('cena')}
+                onToggleEaten={() => toggleEaten('cena')}
+                targets={targets} />
+            ) : (
+              <button onClick={() => setBankPicker('cena')}
+                className="w-full rounded-2xl border-2 border-dashed border-gray-200 dark:border-gray-800 p-4 text-sm text-gray-400 dark:text-gray-500 hover:border-emerald-300 dark:hover:border-emerald-700 hover:text-emerald-600 dark:hover:text-emerald-400 transition-colors">
+                + Elige del banco o usa 🤔 ¿Qué como?
+              </button>
+            );
+          })()}
           {!skippedSet.has('cena') && (
             <SlotLoggedItems items={cenaExtras} onRemove={(id) => removeSlotExtra('cena', id)} onEdit={setEditTarget} />
           )}
@@ -6870,6 +7017,285 @@ Reglas:
             </p>
           )}
         </>
+      )}
+    </div>
+  );
+}
+
+// Pestaña Ejercicios: stats locales (siempre visibles) + evaluación crítica con Claude (a
+// pedido, cacheada). Las capturas se suben con WorkoutCaptureModal y guardan el detalle por
+// ejercicio que alimenta los desbalances/progresión.
+function ExercisesView({ state, setState, targets }) {
+  const apiKey = state.settings?.anthropicApiKey;
+  const [capturing, setCapturing] = useState(false);
+  const cached = state.aiCache?.exercise;
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [response, setResponse] = useState(cached?.response || null);
+
+  const stats = useMemo(() => computeExerciseStats(state.days || {}, todayKey(), 8), [state.days]);
+
+  const trainingHistory = useMemo(() => {
+    const start = shiftDate(todayKey(), -55);
+    return (stats.sessions || [])
+      .filter((s) => s.date >= start)
+      .map((s) => {
+        const dow = new Date(s.date + 'T12:00:00').getDay();
+        return {
+          fecha: s.date, dia: DAY_SHORT[dow], nombre: s.name,
+          kcal: Math.round(s.kcal), minutos: s.minutes, volumen_kg: s.volumeKg,
+          ejercicios: (s.exercises || []).map((e) => ({
+            nombre: e.name, musculo: e.muscle || null,
+            series: e.sets ?? null, reps: e.reps ?? null, peso_kg: e.weightKg ?? null,
+          })),
+        };
+      });
+  }, [stats.sessions]);
+
+  const sig = useMemo(() => hashSig(trainingHistory), [trainingHistory]);
+  const isStale = cached && cached.sig !== sig;
+  const cacheAgeMs = cached ? (Date.now() - new Date(cached.generatedAt).getTime()) : Infinity;
+  const cacheOld = cacheAgeMs > 7 * 86400000;
+
+  const addCapture = (item) => {
+    const today = todayKey();
+    setState((prev) => {
+      const prevDay = prev.days[today] || {};
+      const ex = Array.isArray(prevDay.exercise) ? prevDay.exercise : [];
+      return { ...prev, days: { ...prev.days, [today]: { ...prevDay, exercise: [...ex, { ...item, id: item.id ?? uuid(), ts: item.ts ?? Date.now() }] } } };
+    });
+    setCapturing(false);
+  };
+
+  const generate = async () => {
+    if (!apiKey) { setError('Configura tu API key en ⚙️ Ajustes primero.'); return; }
+    if (stats.totalSessions < 3) { setError(`Necesitas al menos 3 sesiones registradas. Tienes ${stats.totalSessions}.`); return; }
+    setLoading(true); setError(null);
+    try {
+      const prompt = `Eres un entrenador de fuerza chileno evaluando el entrenamiento de Hugo (geriatra de 36 años en plan de pérdida de peso). USA TUTEO CHILENO. Sé directo, honesto y crítico — no adules. Usa números reales del historial.
+
+FRECUENCIA: ${stats.freqPerWeek.toFixed(1)} sesiones/semana (últimas ${stats.weeks} semanas), ${stats.totalSessions} sesiones totales registradas, última hace ${stats.daysSinceLast ?? '?'} días.
+
+HISTORIAL (sesiones, recientes primero):
+${JSON.stringify(trainingHistory, null, 2)}
+
+Evalúa: consistencia/frecuencia, volumen por grupo muscular (¿desbalances? ¿algún músculo descuidado?), progresión (¿sube peso/volumen en el tiempo o está estancado?), y qué cambiarías.
+
+Devuelve SOLO JSON, sin markdown:
+{
+  "resumen": "1-2 frases del estado general",
+  "consistencia": "evaluación de la frecuencia con números",
+  "seguir": ["cosas que está haciendo bien y debe mantener"],
+  "mejorar": [ { "que": "qué cambiar", "porque": "por qué importa", "como": "cómo hacerlo, concreto" } ],
+  "desbalances": "grupos sobre/subtrabajados con números (o 'sin datos suficientes' si no hay desglose por ejercicio)",
+  "progresion": "¿está progresando? evidencia",
+  "nota_critica": "evaluación honesta y directa, sin adular",
+  "confidence": "alta|media|baja"
+}
+
+Reglas:
+- 2 a 4 items en "mejorar", los más importantes.
+- Si no hay desglose por ejercicio en el historial, dilo en desbalances/progresion y baja la confidence.
+- No inventes datos.`;
+      const text = await askClaude(prompt, apiKey, 1800);
+      const parsed = parseJsonLoose(text);
+      if (!parsed?.resumen && !parsed?.mejorar) { setError('No se pudo parsear la respuesta.'); return; }
+      setResponse(parsed);
+      setState((prev) => ({ ...prev, aiCache: { ...(prev.aiCache || {}), exercise: { sig, response: parsed, generatedAt: new Date().toISOString() } } }));
+    } catch (err) {
+      setError(err.message || 'Error al consultar Claude');
+    } finally { setLoading(false); }
+  };
+
+  // Chips de los últimos 28 días (verde si entrenó)
+  const trainedSet = new Set(stats.trainedDates);
+  const last28 = [];
+  for (let i = 27; i >= 0; i--) {
+    const d = shiftDate(todayKey(), -i);
+    last28.push({ date: d, trained: trainedSet.has(d), dow: new Date(d + 'T12:00:00').getDay() });
+  }
+  const maxWeekSessions = Math.max(1, ...stats.weekBuckets.map((w) => w.sessions));
+  const maxMuscle = Math.max(1, ...stats.muscleVolume.map((m) => m.sets));
+  const confColor = response?.confidence === 'alta' ? 'green' : response?.confidence === 'media' ? 'amber' : 'red';
+
+  return (
+    <div className="px-4 py-4 space-y-4">
+      <div className="px-1">
+        <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2"><span>🏋️</span>Ejercicios</h1>
+        <p className="text-sm text-gray-500 dark:text-gray-400">Tus rutinas, consistencia y evaluación crítica</p>
+      </div>
+
+      <button onClick={() => setCapturing(true)}
+        className="w-full py-3 rounded-2xl bg-emerald-500 text-white font-semibold text-sm hover:bg-emerald-600 flex items-center justify-center gap-2 shadow-sm">
+        <span className="text-base">📸</span><span>Subir captura de entrenamiento</span>
+      </button>
+
+      {stats.totalSessions === 0 ? (
+        <div className="rounded-2xl border-2 border-dashed border-gray-200 dark:border-gray-800 p-6 text-center text-sm text-gray-500 dark:text-gray-400">
+          Aún no hay entrenamientos registrados. Sube una captura cada día que entrenes y acá verás tu consistencia y una evaluación crítica de tu rutina.
+        </div>
+      ) : (
+        <>
+          {/* KPIs */}
+          <div className="grid grid-cols-2 gap-2">
+            <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-3">
+              <div className="text-2xl font-bold">{stats.freqPerWeek.toFixed(1)}<span className="text-xs font-normal text-gray-500 dark:text-gray-400"> /sem</span></div>
+              <div className="text-[11px] text-gray-500 dark:text-gray-400">Frecuencia ({stats.weeks} sem)</div>
+            </div>
+            <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-3">
+              <div className="text-2xl font-bold">{stats.sessionsThisMonth}</div>
+              <div className="text-[11px] text-gray-500 dark:text-gray-400">Sesiones este mes</div>
+            </div>
+            <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-3">
+              <div className="text-2xl font-bold">{stats.daysSinceLast === 0 ? 'Hoy' : stats.daysSinceLast != null ? `${stats.daysSinceLast}d` : '—'}</div>
+              <div className="text-[11px] text-gray-500 dark:text-gray-400">Desde la última</div>
+            </div>
+            <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-3">
+              <div className="text-2xl font-bold">{stats.totalSessions}</div>
+              <div className="text-[11px] text-gray-500 dark:text-gray-400">Sesiones totales</div>
+            </div>
+          </div>
+
+          {/* Días entrenados (últimos 28) */}
+          <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-2">
+            <div className="text-xs font-semibold text-gray-600 dark:text-gray-400">Días entrenados · últimas 4 semanas</div>
+            <div className="flex flex-wrap gap-1">
+              {last28.map((d) => (
+                <div key={d.date} title={d.date}
+                  className={`w-5 h-5 rounded ${d.trained ? 'bg-emerald-500' : 'bg-gray-100 dark:bg-gray-800'} ${(d.dow === 0 || d.dow === 6) && !d.trained ? 'ring-1 ring-gray-200 dark:ring-gray-700' : ''}`} />
+              ))}
+            </div>
+          </div>
+
+          {/* Tendencia semanal (sesiones) */}
+          <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-2">
+            <div className="text-xs font-semibold text-gray-600 dark:text-gray-400">Sesiones por semana</div>
+            <div className="flex items-end gap-1.5 h-20">
+              {stats.weekBuckets.map((w, i) => (
+                <div key={i} className="flex-1 flex flex-col items-center gap-1">
+                  <div className="w-full bg-emerald-500/80 rounded-t" style={{ height: `${Math.max(4, (w.sessions / maxWeekSessions) * 64)}px` }} title={`${w.sessions} sesiones`} />
+                  <div className="text-[9px] text-gray-400 dark:text-gray-500">{w.label}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Volumen por grupo muscular */}
+          {stats.muscleVolume.length > 0 && (
+            <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-2">
+              <div className="text-xs font-semibold text-gray-600 dark:text-gray-400">Volumen por grupo muscular · series ({stats.weeks} sem)</div>
+              {stats.muscleVolume.map((m) => (
+                <div key={m.muscle} className="flex items-center gap-2">
+                  <div className="w-20 text-xs capitalize shrink-0">{m.muscle}</div>
+                  <div className="flex-1 h-4 rounded bg-gray-100 dark:bg-gray-800 overflow-hidden">
+                    <div className="h-full bg-sky-500/80 rounded" style={{ width: `${(m.sets / maxMuscle) * 100}%` }} />
+                  </div>
+                  <div className="w-8 text-right text-xs font-semibold">{m.sets}</div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Top ejercicios */}
+          {stats.topExercises.length > 0 && (
+            <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-2">
+              <div className="text-xs font-semibold text-gray-600 dark:text-gray-400">Ejercicios más frecuentes</div>
+              <div className="flex flex-wrap gap-1.5">
+                {stats.topExercises.map((e) => (
+                  <span key={e.name} className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-[11px] bg-gray-100 dark:bg-gray-800">
+                    {emojiForExercise(e.name)} {e.name} <span className="text-gray-400">×{e.count}</span>
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {stats.detailSessions === 0 && (
+            <p className="text-[11px] text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/30 p-2 rounded-lg">
+              💡 Ninguna captura trae el desglose por ejercicio todavía. Sube capturas que listen los movimientos (series/reps/peso) para desbloquear el análisis de desbalances y progresión.
+            </p>
+          )}
+        </>
+      )}
+
+      {/* Evaluación crítica con Claude */}
+      <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-3">
+        <div className="text-sm font-bold">Evaluación crítica</div>
+        {!apiKey && (
+          <p className="text-xs text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/30 p-2 rounded-lg">⚠️ Configura tu API key en ⚙️ Ajustes primero.</p>
+        )}
+        <button onClick={generate} disabled={loading || !apiKey || stats.totalSessions < 3}
+          className="w-full py-2.5 rounded-xl bg-emerald-500 text-white font-semibold hover:bg-emerald-600 disabled:bg-gray-300 dark:disabled:bg-gray-700 disabled:text-gray-500">
+          {loading ? 'Evaluando tu rutina…' : (response ? (isStale || cacheOld ? 'Actualizar evaluación' : 'Regenerar') : 'Evaluar mi rutina con Claude ✨')}
+        </button>
+        {stats.totalSessions < 3 && (
+          <p className="text-[11px] text-gray-500 dark:text-gray-400">Necesitas al menos 3 sesiones registradas ({stats.totalSessions} hasta ahora).</p>
+        )}
+        {error && <p className="text-xs text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-900/30 p-2 rounded-lg">{error}</p>}
+      </div>
+
+      {response && (
+        <>
+          {response.confidence && (
+            <div className={`flex items-center gap-2 px-3 py-2 rounded-xl ${COLOR_CLASSES[confColor].bg}`}>
+              <span className="text-base">{response.confidence === 'alta' ? '✅' : response.confidence === 'media' ? 'ℹ️' : '⚠️'}</span>
+              <span className={`text-xs ${COLOR_CLASSES[confColor].text}`}>Confianza {response.confidence}{isStale && ' · datos cambiaron'}</span>
+            </div>
+          )}
+
+          {(response.resumen || response.consistencia) && (
+            <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-2">
+              {response.resumen && <p className="text-sm">{response.resumen}</p>}
+              {response.consistencia && <p className="text-xs text-gray-600 dark:text-gray-400">📅 {response.consistencia}</p>}
+            </div>
+          )}
+
+          {Array.isArray(response.seguir) && response.seguir.length > 0 && (
+            <div className="rounded-2xl border border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-900/20 p-4 space-y-1.5">
+              <div className="text-xs font-bold text-emerald-800 dark:text-emerald-200 uppercase tracking-wide">✅ Qué seguir</div>
+              {response.seguir.map((s, i) => (<p key={i} className="text-xs text-emerald-800 dark:text-emerald-200">• {s}</p>))}
+            </div>
+          )}
+
+          {Array.isArray(response.mejorar) && response.mejorar.map((m, i) => (
+            <div key={i} className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-2">
+              <h3 className="text-sm font-bold">🔧 {typeof m === 'string' ? m : m.que}</h3>
+              {m.porque && <p className="text-xs text-gray-600 dark:text-gray-400"><span className="font-semibold uppercase tracking-wide text-[10px] text-gray-500">Por qué</span><br />{m.porque}</p>}
+              {m.como && <p className="text-xs text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-900/20 p-2 rounded-lg">💡 {m.como}</p>}
+            </div>
+          ))}
+
+          {response.desbalances && (
+            <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-1">
+              <div className="text-xs font-bold uppercase tracking-wide text-gray-500">⚖️ Desbalances</div>
+              <p className="text-xs text-gray-700 dark:text-gray-300">{response.desbalances}</p>
+            </div>
+          )}
+
+          {response.progresion && (
+            <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-1">
+              <div className="text-xs font-bold uppercase tracking-wide text-gray-500">📈 Progresión</div>
+              <p className="text-xs text-gray-700 dark:text-gray-300">{response.progresion}</p>
+            </div>
+          )}
+
+          {response.nota_critica && (
+            <div className="rounded-2xl border border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-900/20 p-4 space-y-1">
+              <div className="text-xs font-bold uppercase tracking-wide text-amber-700 dark:text-amber-300">🎯 Nota crítica</div>
+              <p className="text-sm text-amber-900 dark:text-amber-100">{response.nota_critica}</p>
+            </div>
+          )}
+
+          {cached?.generatedAt && (
+            <p className="text-[10px] text-gray-500 dark:text-gray-400 text-center">
+              Generado {new Date(cached.generatedAt).toLocaleString('es-CL', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
+            </p>
+          )}
+        </>
+      )}
+
+      {capturing && (
+        <WorkoutCaptureModal apiKey={apiKey} onClose={() => setCapturing(false)} onSave={addCapture} />
       )}
     </div>
   );
@@ -9415,6 +9841,52 @@ function ShoppingListModal({ state, onClose }) {
   );
 }
 
+// Picker manual del banco para una toma (colación 1/2 o cena). Reemplaza la grilla inline que
+// antes volcaba todo el banco en la portada. Tocar una opción la registra (vía pickForSlot).
+function BankPickerModal({ kind, state, targets, onSelect, onClose }) {
+  const isCena = kind === 'cena';
+  const title = isCena ? 'Cena' : kind === 'colacion2' ? 'Colación 2' : 'Colación 1';
+  const requireNoRefrig = kind === 'colacion2';
+  const hasTag = (s, t) => Array.isArray(s.tags) && s.tags.includes(t);
+  const bank = isCena ? (state.proteinBank || []) : (state.snackBank || []);
+  let ordered = bank, aptasLen = 0;
+  if (!isCena) {
+    const apta = (s) => hasTag(s, 'portable') && (!requireNoRefrig || hasTag(s, 'sin-refrigeración'));
+    const aptas = bank.filter(apta);
+    const resto = bank.filter((s) => !apta(s));
+    ordered = [...aptas, ...resto];
+    aptasLen = aptas.length;
+  }
+  const hint = isCena ? 'Proteína + ensalada/verduras'
+    : requireNoRefrig ? 'Para llevar · sin refrigeración' : 'Para llevar';
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 p-4 overflow-y-auto">
+      <div className="w-full max-w-md bg-white dark:bg-gray-900 rounded-2xl shadow-xl border border-gray-200 dark:border-gray-800 p-5 space-y-3 my-4 max-h-[92vh] overflow-y-auto">
+        <div className="flex items-center justify-between">
+          <h2 className="text-lg font-bold">📋 Banco · {title}</h2>
+          <button onClick={onClose} className="w-8 h-8 rounded-full bg-gray-100 dark:bg-gray-800 text-sm">✕</button>
+        </div>
+        <p className="text-xs text-gray-500 dark:text-gray-400">{hint} · toca una opción para registrarla.</p>
+        <div className="grid grid-cols-1 gap-2.5">
+          {ordered.map((s, i) => (
+            <React.Fragment key={s.id}>
+              {!isCena && i === aptasLen && aptasLen > 0 && ordered.length > aptasLen && (
+                <div className="text-[10px] font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-600 pt-1">
+                  Resto del banco (no aptas para llevar)
+                </div>
+              )}
+              <SelectableCard item={s}
+                selected={false}
+                onClick={() => onSelect(s.id)}
+                showCategory={!isCena} targets={targets} />
+            </React.Fragment>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function SuggestSlotModal({ slot, state, targets, onSelect, onClose }) {
   const apiKey = state.settings?.anthropicApiKey;
   const [loading, setLoading] = useState(true);
@@ -11246,6 +11718,7 @@ const BENTO_TABS = [
   { id: 'plan',     label: 'Plan',     short: 'Plan', icon: '📋' },
   { id: 'idea',     label: 'Idea',     short: 'Idea', icon: '✨' },
   { id: 'insights', label: 'Insights', short: 'Stats',icon: '🧠' },
+  { id: 'exercise', label: 'Ejercicios', short: 'Gym', icon: '🏋️' },
   { id: 'weight',   label: 'Peso',     short: 'Peso', icon: '⚖️' },
   { id: 'bank',     label: 'Banco',    short: 'Banco',icon: '📚' },
 ];
@@ -11926,6 +12399,7 @@ function App() {
         {tab === 'plan' && <PlanWeekView state={state} setState={setState} targets={targets} />}
         {tab === 'idea' && <IdeaView state={state} setState={setState} targets={targets} />}
         {tab === 'insights' && <InsightsView state={state} setState={setState} targets={targets} />}
+        {tab === 'exercise' && <ExercisesView state={state} setState={setState} targets={targets} />}
         {tab === 'weight' && <WeightView state={state} setState={setState} targets={targets} />}
         {tab === 'bank' && <BankView state={state} setState={setState} />}
       </div>
@@ -11961,7 +12435,7 @@ function App() {
       }}>
         <span><kbd>⌘K</kbd> palette</span>
         <span style={{ opacity: 0.4 }}>·</span>
-        <span><kbd>1</kbd>–<kbd>6</kbd> tabs</span>
+        <span><kbd>1</kbd>–<kbd>7</kbd> tabs</span>
       </div>
     </div>
   );
