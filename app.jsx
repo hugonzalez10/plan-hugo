@@ -275,10 +275,19 @@ Extrae el resumen del entrenamiento o período mostrado.
 Devuelve SOLO un objeto JSON válido, sin texto adicional, sin markdown.
 
 Usa estos keys cuando estén disponibles (omite los que no aparezcan):
-- kcal (calorías quemadas TOTAL del período mostrado, número)
+- type ("strength" si es entrenamiento de fuerza con pesos/máquinas; "cardio" si es bici,
+  trote, remo, elíptica, caminata u otra actividad aeróbica con distancia/ritmo/potencia/FC)
+- activity (SOLO si type es "cardio": nombre corto de la actividad en español, ej. "Bicicleta",
+  "Trote", "Remo", "Elíptica", "Caminata")
+- kcal (calorías quemadas TOTAL del período mostrado, número. Si la captura muestra "activas" y
+  "totales", usa las TOTALES)
 - minutes (duración total en minutos, número entero)
-- volumeKg (volumen total de peso levantado en kg, número)
+- volumeKg (volumen total de peso levantado en kg, número — solo fuerza)
 - workouts (cantidad de entrenamientos del período, entero)
+- (SOLO cardio) distanceM (distancia total en METROS, número. "21.5 km" → 21500; "21534 m" → 21534)
+- (SOLO cardio) avgPowerW (potencia promedio en vatios/watts, número. "173 vatio" → 173)
+- (SOLO cardio) avgCadenceRpm (cadencia promedio en rpm, número)
+- (SOLO cardio) avgHr (frecuencia cardiaca promedio en lpm/ppm/bpm, número. "138 LPM" → 138)
 - date (YYYY-MM-DD si la captura menciona una fecha específica, sino null)
 - period (string indicando el alcance temporal):
    - "today" si la captura muestra "Hoy", "Día actual", o stats de una sesión única
@@ -315,8 +324,12 @@ Reglas:
 - Los ejercicios de solo "Duración" (00:00:30) son movilidad/estiramiento: muscle "movilidad",
   reps null, weightKg null.
 - Si NO ves un desglose por ejercicio (solo totales), omite "exercises".
+- Si es CARDIO (bici, trote, remo…), NO devuelvas "exercises" ni "volumeKg"; usa los keys de cardio.
+- Si varias capturas mezclan dos apps (ej. Apple Fitness + la app de la bici), combina en UNA
+  sola sesión tomando el valor más completo de cada métrica.
 
-Ejemplo: {"kcal":297,"minutes":32,"volumeKg":8462,"period":"today","exercises":[{"name":"Caja de cremallera delantera Squat","muscle":"piernas","sets":3,"reps":13,"weightKg":25,"volumeKg":1668,"oneRepMaxKg":33,"quality":"B"},{"name":"Cuerda de tricep cubilete","muscle":"brazos","sets":3,"reps":15,"weightKg":60,"volumeKg":1141,"oneRepMaxKg":96,"quality":"A"}]}`;
+Ejemplo fuerza: {"type":"strength","kcal":297,"minutes":32,"volumeKg":8462,"period":"today","exercises":[{"name":"Caja de cremallera delantera Squat","muscle":"piernas","sets":3,"reps":13,"weightKg":25,"volumeKg":1668,"oneRepMaxKg":33,"quality":"B"},{"name":"Cuerda de tricep cubilete","muscle":"brazos","sets":3,"reps":15,"weightKg":60,"volumeKg":1141,"oneRepMaxKg":96,"quality":"A"}]}
+Ejemplo cardio: {"type":"cardio","activity":"Bicicleta","kcal":629,"minutes":45,"period":"today","distanceM":21534,"avgPowerW":173,"avgCadenceRpm":58,"avgHr":138}`;
 
 const PROMPT_EXTRACT_MEAL = `Eres un nutricionista experto. Estás analizando una FOTO de un plato de comida y/o una DESCRIPCIÓN en texto natural de lo que comió alguien.
 
@@ -2793,14 +2806,23 @@ function computeExerciseStats(days, refDate, weeks = 8) {
     if (dk > today) continue;
     const ex = Array.isArray(day?.exercise) ? day.exercise : [];
     for (const w of ex) {
+      const exs = Array.isArray(w.exercises) ? w.exercises : [];
+      const type = w.type === 'cardio' ? 'cardio'
+        : w.type === 'strength' ? 'strength'
+        : ((w.distanceM != null || w.avgPowerW != null || w.avgCadenceRpm != null) && exs.length === 0 ? 'cardio' : 'strength');
       sessions.push({
         id: w.id,
         date: dk,
         name: w.name || 'Entrenamiento',
+        type,
         kcal: Number(w.kcal) || 0,
         minutes: w.minutes != null ? Number(w.minutes) : null,
         volumeKg: w.volumeKg != null ? Number(w.volumeKg) : null,
-        exercises: Array.isArray(w.exercises) ? w.exercises : [],
+        distanceM: w.distanceM != null ? Number(w.distanceM) : null,
+        avgPowerW: w.avgPowerW != null ? Number(w.avgPowerW) : null,
+        avgCadenceRpm: w.avgCadenceRpm != null ? Number(w.avgCadenceRpm) : null,
+        avgHr: w.avgHr != null ? Number(w.avgHr) : null,
+        exercises: exs,
       });
     }
   }
@@ -2814,6 +2836,13 @@ function computeExerciseStats(days, refDate, weeks = 8) {
   const ym = today.slice(0, 7);
   const sessionsThisMonth = new Set(sessions.filter((s) => s.date.slice(0, 7) === ym).map((s) => s.date)).size;
   const freqPerWeek = trainedDatesWindow.size / weeks;
+  // Frecuencia separada por tipo (días distintos con fuerza / con cardio, en la ventana)
+  const strengthDatesWindow = new Set(inWindow.filter((s) => s.type === 'strength').map((s) => s.date));
+  const cardioDatesWindow = new Set(inWindow.filter((s) => s.type === 'cardio').map((s) => s.date));
+  const freqStrengthPerWeek = strengthDatesWindow.size / weeks;
+  const freqCardioPerWeek = cardioDatesWindow.size / weeks;
+  const cardioSessions = sessions.filter((s) => s.type === 'cardio').length;
+  const strengthSessions = sessions.filter((s) => s.type === 'strength').length;
 
   // Tendencia: una barra por semana (de la más vieja a la más nueva)
   const weekBuckets = [];
@@ -2874,6 +2903,10 @@ function computeExerciseStats(days, refDate, weeks = 8) {
     sessionsThisMonth,
     trainedDates,
     freqPerWeek,
+    freqStrengthPerWeek,
+    freqCardioPerWeek,
+    cardioSessions,
+    strengthSessions,
     daysSinceLast,
     lastDate,
     weekBuckets,
@@ -5567,7 +5600,10 @@ function WorkoutCaptureModal({ apiKey, onClose, onSave }) {
         quality: e.quality ? String(e.quality).trim().toUpperCase().slice(0, 2) : null,
       }))
     : [];
-  const canSave = !!extracted && !isAggregate && (extracted.kcal != null || exercises.length > 0);
+  // Cardio si la IA lo marca, o si trae métricas de cardio sin desglose de fuerza.
+  const isCardio = extracted?.type === 'cardio'
+    || (exercises.length === 0 && (extracted?.distanceM != null || extracted?.avgPowerW != null || extracted?.avgCadenceRpm != null));
+  const canSave = !!extracted && !isAggregate && (extracted.kcal != null || exercises.length > 0 || isCardio);
 
   const confirm = () => {
     if (!canSave) return;
@@ -5577,13 +5613,20 @@ function WorkoutCaptureModal({ apiKey, onClose, onSave }) {
     const out = {
       id: uuid(),
       ts,
-      name: 'Entrenamiento Speediance' + minutesNote,
+      name: (isCardio ? (extracted.activity || 'Cardio') : 'Entrenamiento Speediance') + minutesNote,
       kcal: extracted.kcal != null ? Number(extracted.kcal) : 0,
+      type: isCardio ? 'cardio' : 'strength',
       source: 'photo',
     };
     if (extracted.minutes != null) out.minutes = Number(extracted.minutes);
     if (extracted.volumeKg != null) out.volumeKg = Number(extracted.volumeKg);
     if (exercises.length) out.exercises = exercises;
+    if (isCardio) {
+      if (extracted.distanceM != null) out.distanceM = Number(extracted.distanceM);
+      if (extracted.avgPowerW != null) out.avgPowerW = Number(extracted.avgPowerW);
+      if (extracted.avgCadenceRpm != null) out.avgCadenceRpm = Number(extracted.avgCadenceRpm);
+      if (extracted.avgHr != null) out.avgHr = Number(extracted.avgHr);
+    }
     onSave(out, targetDate);
   };
 
@@ -5654,6 +5697,23 @@ function WorkoutCaptureModal({ apiKey, onClose, onSave }) {
                   <span>🏋️ Volumen</span>
                   <span className="font-semibold">{extracted.volumeKg} kg</span>
                 </div>
+              )}
+              {isCardio && (
+                <div className="flex items-center justify-between text-xs pt-0.5">
+                  <span className="text-emerald-600 dark:text-emerald-400 font-semibold">🚴 Cardio{extracted.activity ? ` · ${extracted.activity}` : ''}</span>
+                </div>
+              )}
+              {isCardio && extracted.distanceM != null && (
+                <div className="flex items-center justify-between text-sm"><span>📏 Distancia</span><span className="font-semibold">{(extracted.distanceM / 1000).toFixed(2)} km</span></div>
+              )}
+              {isCardio && extracted.avgPowerW != null && (
+                <div className="flex items-center justify-between text-sm"><span>⚡ Potencia prom.</span><span className="font-semibold">{extracted.avgPowerW} W</span></div>
+              )}
+              {isCardio && extracted.avgCadenceRpm != null && (
+                <div className="flex items-center justify-between text-sm"><span>🔄 Cadencia prom.</span><span className="font-semibold">{extracted.avgCadenceRpm} rpm</span></div>
+              )}
+              {isCardio && extracted.avgHr != null && (
+                <div className="flex items-center justify-between text-sm"><span>❤️ FC prom.</span><span className="font-semibold">{extracted.avgHr} lpm</span></div>
               )}
             </div>
 
@@ -7125,8 +7185,10 @@ function ExercisesView({ state, setState, targets }) {
       .map((s) => {
         const dow = new Date(s.date + 'T12:00:00').getDay();
         return {
-          fecha: s.date, dia: DAY_SHORT[dow], nombre: s.name,
+          fecha: s.date, dia: DAY_SHORT[dow], nombre: s.name, tipo: s.type,
           kcal: Math.round(s.kcal), minutos: s.minutes, volumen_kg: s.volumeKg,
+          distancia_km: s.distanceM != null ? +(s.distanceM / 1000).toFixed(1) : null,
+          potencia_w: s.avgPowerW, cadencia_rpm: s.avgCadenceRpm, fc_prom: s.avgHr,
           ejercicios: (s.exercises || []).map((e) => ({
             nombre: e.name, musculo: e.muscle || null,
             series: e.sets ?? null, reps: e.reps ?? null, peso_kg: e.weightKg ?? null,
@@ -7191,10 +7253,13 @@ function ExercisesView({ state, setState, targets }) {
     downloadCsv(lines, `plan-hugo-ejercicios-detalle-${todayKey()}.csv`);
   };
   const exportSummary = () => {
-    const header = ['fecha', 'nombre', 'kcal', 'minutos', 'volumen_kg', 'n_ejercicios'];
+    const header = ['fecha', 'tipo', 'nombre', 'kcal', 'minutos', 'volumen_kg', 'n_ejercicios', 'distancia_km', 'potencia_w', 'cadencia_rpm', 'fc_prom'];
     const lines = [header.join(',')];
     for (const s of rangeSessions()) {
-      lines.push([s.date, s.name, Math.round(s.kcal), s.minutes ?? '', s.volumeKg ?? '', (s.exercises || []).length].map(csvCell).join(','));
+      lines.push([
+        s.date, s.type || 'strength', s.name, Math.round(s.kcal), s.minutes ?? '', s.volumeKg ?? '', (s.exercises || []).length,
+        s.distanceM != null ? (s.distanceM / 1000).toFixed(2) : '', s.avgPowerW ?? '', s.avgCadenceRpm ?? '', s.avgHr ?? '',
+      ].map(csvCell).join(','));
     }
     downloadCsv(lines, `plan-hugo-ejercicios-sesiones-${todayKey()}.csv`);
   };
@@ -7211,7 +7276,7 @@ FRECUENCIA: ${stats.freqPerWeek.toFixed(1)} sesiones/semana (últimas ${stats.we
 HISTORIAL (sesiones, recientes primero):
 ${JSON.stringify(trainingHistory, null, 2)}
 
-Cada ejercicio puede traer rm1_kg (1RM estimado), volumen_kg y calidad (nota A/B/C/D de técnica). Úsalos: la PROGRESIÓN se ve si rm1_kg/peso_kg/volumen suben sesión a sesión para el mismo ejercicio o grupo; la TÉCNICA se ve en la nota de calidad (una C/D repetida = problema a corregir).
+Cada sesión tiene "tipo": "strength" (fuerza, con ejercicios) o "cardio" (bici/trote/etc., con distancia_km/potencia_w/fc_prom y SIN ejercicios). Considera el BALANCE fuerza vs cardio. En las de fuerza, cada ejercicio puede traer rm1_kg (1RM estimado), volumen_kg y calidad (nota A/B/C/D de técnica). Úsalos: la PROGRESIÓN se ve si rm1_kg/peso_kg/volumen suben sesión a sesión para el mismo ejercicio o grupo (en cardio, si sube distancia/potencia); la TÉCNICA se ve en la nota de calidad (una C/D repetida = problema a corregir).
 
 Evalúa: consistencia/frecuencia, volumen por grupo muscular (¿desbalances? ¿algún músculo descuidado?), progresión (¿sube 1RM/peso/volumen en el tiempo o está estancado?), técnica (notas de calidad bajas) y qué cambiarías.
 
@@ -7274,7 +7339,11 @@ Reglas:
           <div className="grid grid-cols-2 gap-2">
             <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-3">
               <div className="text-2xl font-bold">{stats.freqPerWeek.toFixed(1)}<span className="text-xs font-normal text-gray-500 dark:text-gray-400"> /sem</span></div>
-              <div className="text-[11px] text-gray-500 dark:text-gray-400">Frecuencia ({stats.weeks} sem)</div>
+              <div className="text-[11px] text-gray-500 dark:text-gray-400">
+                {stats.cardioSessions > 0
+                  ? `🏋️ ${stats.freqStrengthPerWeek.toFixed(1)} + 🚴 ${stats.freqCardioPerWeek.toFixed(1)} /sem`
+                  : `Frecuencia (${stats.weeks} sem)`}
+              </div>
             </div>
             <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-3">
               <div className="text-2xl font-bold">{stats.sessionsThisMonth}</div>
@@ -7410,9 +7479,15 @@ Reglas:
               <div className="space-y-1.5 pt-1">
                 {stats.sessions.map((s) => (
                   <div key={s.id || s.date + s.name} className="flex items-center gap-2 rounded-xl border border-gray-100 dark:border-gray-800 px-3 py-2">
+                    <span className="text-base shrink-0">{s.type === 'cardio' ? '🚴' : '🏋️'}</span>
                     <div className="flex-1 min-w-0">
                       <div className="text-sm font-medium truncate">{new Date(s.date + 'T12:00:00').toLocaleDateString('es-CL', { weekday: 'short', day: 'numeric', month: 'short' })}</div>
-                      <div className="text-[11px] text-gray-500 dark:text-gray-400">{Math.round(s.kcal)} kcal{s.volumeKg ? ` · ${Math.round(s.volumeKg)} kg` : ''}{s.exercises.length ? ` · ${s.exercises.length} ej.` : ''}</div>
+                      <div className="text-[11px] text-gray-500 dark:text-gray-400">
+                        {Math.round(s.kcal)} kcal
+                        {s.type === 'cardio'
+                          ? `${s.distanceM != null ? ` · ${(s.distanceM / 1000).toFixed(1)} km` : ''}${s.avgPowerW != null ? ` · ${s.avgPowerW} W` : ''}${s.minutes != null ? ` · ${s.minutes} min` : ''}`
+                          : `${s.volumeKg ? ` · ${Math.round(s.volumeKg)} kg` : ''}${s.exercises.length ? ` · ${s.exercises.length} ej.` : ''}`}
+                      </div>
                     </div>
                     {s.exercises.length > 0 && (
                       <button onClick={() => setEditSession({ date: s.date, id: s.id, name: s.name, exercises: s.exercises })}
