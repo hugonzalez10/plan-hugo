@@ -82,6 +82,9 @@ const EXERCISE_EMOJIS = [
   ['escalada', '🧗'], ['boxeo', '🥊'],
 ];
 
+// Grupos musculares para el dropdown de corrección en el historial de ejercicios.
+const MUSCLE_GROUPS = ['pecho', 'espalda', 'piernas', 'hombros', 'brazos', 'core', 'glúteos', 'cardio', 'movilidad'];
+
 function emojiFor(name, map, fallback) {
   const n = (name || '').toLowerCase();
   for (const [kw, emoji] of map) if (n.includes(kw)) return emoji;
@@ -2791,6 +2794,7 @@ function computeExerciseStats(days, refDate, weeks = 8) {
     const ex = Array.isArray(day?.exercise) ? day.exercise : [];
     for (const w of ex) {
       sessions.push({
+        id: w.id,
         date: dk,
         name: w.name || 'Entrenamiento',
         kcal: Number(w.kcal) || 0,
@@ -2841,6 +2845,30 @@ function computeExerciseStats(days, refDate, weeks = 8) {
   const topExercises = Object.entries(exNameCount).map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count).slice(0, 6);
   const detailSessions = sessions.filter((s) => s.exercises.length > 0).length;
 
+  // Progresión / récords por ejercicio (solo los que cargan peso/volumen, no movilidad pura).
+  // Histórico completo, no solo la ventana. Una entrada por aparición del ejercicio en una sesión.
+  const byEx = {};
+  for (const s of sessions) {
+    for (const e of (s.exercises || [])) {
+      if (e.weightKg == null && e.oneRepMaxKg == null && e.volumeKg == null) continue;
+      const key = (e.name || '').trim();
+      if (!key) continue;
+      if (!byEx[key]) byEx[key] = { name: key, muscle: e.muscle || null, entries: [] };
+      byEx[key].entries.push({
+        date: s.date,
+        weightKg: e.weightKg ?? null,
+        oneRepMaxKg: e.oneRepMaxKg ?? null,
+        volumeKg: e.volumeKg ?? null,
+        quality: e.quality ?? null,
+      });
+    }
+  }
+  const byExercise = Object.values(byEx).map((x) => {
+    const entries = x.entries.slice().sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+    const best = (k) => { const vals = entries.map((e) => e[k]).filter((v) => v != null); return vals.length ? Math.max(...vals) : null; };
+    return { ...x, entries, sessions: entries.length, bestRm: best('oneRepMaxKg'), bestWeight: best('weightKg'), bestVolume: best('volumeKg') };
+  }).sort((a, b) => b.sessions - a.sessions);
+
   return {
     totalSessions: sessions.length,
     sessionsThisMonth,
@@ -2852,6 +2880,7 @@ function computeExerciseStats(days, refDate, weeks = 8) {
     muscleVolume,
     topExercises,
     detailSessions,
+    byExercise,
     weeks,
     sessions,
   };
@@ -7081,6 +7110,11 @@ function ExercisesView({ state, setState, targets }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [response, setResponse] = useState(cached?.response || null);
+  const [editSession, setEditSession] = useState(null); // { date, id, name, exercises } | null
+  const [progEx, setProgEx] = useState('');             // ejercicio elegido para la progresión
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [csvFrom, setCsvFrom] = useState('');           // '' = sin límite inferior (todo)
+  const [csvTo, setCsvTo] = useState(todayKey());
 
   const stats = useMemo(() => computeExerciseStats(state.days || {}, todayKey(), 8), [state.days]);
 
@@ -7115,6 +7149,54 @@ function ExercisesView({ state, setState, targets }) {
       return { ...prev, days: { ...prev.days, [key]: { ...prevDay, exercise: [...ex, { ...item, id: item.id ?? uuid(), ts: item.ts ?? Date.now() }] } } };
     });
     setCapturing(false);
+  };
+
+  // Historial: borrar una sesión (entrada de day.exercise[]) o corregir el músculo de sus ejercicios.
+  const removeSession = (date, id) => {
+    if (!window.confirm('¿Borrar esta sesión de entrenamiento?')) return;
+    setState((prev) => {
+      const d = prev.days[date]; if (!d) return prev;
+      return { ...prev, days: { ...prev.days, [date]: { ...d, exercise: (d.exercise || []).filter((w) => w.id !== id) } } };
+    });
+  };
+  const saveSessionEdit = (exs) => {
+    if (!editSession) return;
+    const { date, id } = editSession;
+    setState((prev) => {
+      const d = prev.days[date]; if (!d) return prev;
+      return { ...prev, days: { ...prev.days, [date]: { ...d, exercise: (d.exercise || []).map((w) => (w.id === id ? { ...w, exercises: exs } : w)) } } };
+    });
+    setEditSession(null);
+  };
+
+  // Export CSV (reusa el patrón de exportCsv de Ajustes). Rango [csvFrom, csvTo]; csvFrom '' = todo.
+  const csvCell = (v) => { const s = String(v ?? ''); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+  const downloadCsv = (lines, name) => {
+    const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = name; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+  };
+  const rangeSessions = () => (stats.sessions || [])
+    .filter((s) => (!csvFrom || s.date >= csvFrom) && s.date <= (csvTo || todayKey()))
+    .slice().sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  const exportDetailed = () => {
+    const header = ['fecha', 'sesion', 'ejercicio', 'musculo', 'series', 'reps', 'peso_max_kg', 'volumen_kg', 'rm1_kg', 'calidad'];
+    const lines = [header.join(',')];
+    for (const s of rangeSessions()) {
+      for (const e of (s.exercises || [])) {
+        lines.push([s.date, s.name, e.name, e.muscle ?? '', e.sets ?? '', e.reps ?? '', e.weightKg ?? '', e.volumeKg ?? '', e.oneRepMaxKg ?? '', e.quality ?? ''].map(csvCell).join(','));
+      }
+    }
+    downloadCsv(lines, `plan-hugo-ejercicios-detalle-${todayKey()}.csv`);
+  };
+  const exportSummary = () => {
+    const header = ['fecha', 'nombre', 'kcal', 'minutos', 'volumen_kg', 'n_ejercicios'];
+    const lines = [header.join(',')];
+    for (const s of rangeSessions()) {
+      lines.push([s.date, s.name, Math.round(s.kcal), s.minutes ?? '', s.volumeKg ?? '', (s.exercises || []).length].map(csvCell).join(','));
+    }
+    downloadCsv(lines, `plan-hugo-ejercicios-sesiones-${todayKey()}.csv`);
   };
 
   const generate = async () => {
@@ -7267,6 +7349,102 @@ Reglas:
               💡 Ninguna captura trae el desglose por ejercicio todavía. Sube capturas que listen los movimientos (series/reps/peso) para desbloquear el análisis de desbalances y progresión.
             </p>
           )}
+
+          {/* Récords (PRs) */}
+          {stats.byExercise.length > 0 && (
+            <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-2">
+              <div className="text-xs font-semibold text-gray-600 dark:text-gray-400">🏆 Récords por ejercicio</div>
+              {stats.byExercise.slice(0, 6).map((x) => (
+                <div key={x.name} className="flex items-center justify-between gap-2 text-xs">
+                  <span className="flex items-center gap-1 min-w-0"><span>{emojiForExercise(x.name)}</span><span className="truncate">{x.name}</span></span>
+                  <span className="shrink-0 font-semibold">
+                    {x.bestRm != null ? `1RM ${x.bestRm}` : x.bestWeight != null ? `${x.bestWeight} kg` : ''}
+                    {x.bestVolume != null ? <span className="font-normal text-gray-400"> · vol {Math.round(x.bestVolume)}</span> : null}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Progresión por ejercicio */}
+          {stats.byExercise.length > 0 && (() => {
+            const sel = stats.byExercise.find((x) => x.name === progEx) || stats.byExercise[0];
+            const valOf = (e) => (e.oneRepMaxKg ?? e.weightKg ?? null);
+            const vals = sel.entries.map(valOf).filter((v) => v != null);
+            const maxV = vals.length ? Math.max(...vals) : 1;
+            const first = vals.length ? vals[0] : null;
+            const last = vals.length ? vals[vals.length - 1] : null;
+            const delta = first != null && last != null ? last - first : null;
+            return (
+              <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-xs font-semibold text-gray-600 dark:text-gray-400 shrink-0">📈 Progresión</div>
+                  <select value={sel.name} onChange={(e) => setProgEx(e.target.value)}
+                    className="text-xs rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 px-2 py-1 max-w-[62%] truncate">
+                    {stats.byExercise.map((x) => <option key={x.name} value={x.name}>{x.name}</option>)}
+                  </select>
+                </div>
+                <div className="text-[11px] text-gray-500 dark:text-gray-400">
+                  1RM / peso máx por sesión · {sel.entries.length} registros
+                  {delta != null ? <span className={delta >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}> · {first}→{last} kg ({delta >= 0 ? '+' : ''}{delta})</span> : null}
+                </div>
+                <div className="flex items-end gap-1.5 h-20">
+                  {sel.entries.map((e, i) => { const v = valOf(e); return (
+                    <div key={i} className="flex-1 flex flex-col items-center gap-1" title={`${e.date}: ${v ?? '—'} kg`}>
+                      <div className="w-full bg-sky-500/80 rounded-t" style={{ height: `${v != null ? Math.max(4, (v / maxV) * 64) : 2}px` }} />
+                      <div className="text-[8px] text-gray-400 dark:text-gray-500">{e.date.slice(5)}</div>
+                    </div>
+                  ); })}
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* Historial de sesiones (ver/editar/borrar) */}
+          <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-2">
+            <button onClick={() => setHistoryOpen((v) => !v)} className="w-full flex items-center justify-between">
+              <span className="text-xs font-semibold text-gray-600 dark:text-gray-400">📜 Historial de sesiones ({stats.sessions.length})</span>
+              <span className="text-[10px] text-gray-400">{historyOpen ? '▼' : '▶'}</span>
+            </button>
+            {historyOpen && (
+              <div className="space-y-1.5 pt-1">
+                {stats.sessions.map((s) => (
+                  <div key={s.id || s.date + s.name} className="flex items-center gap-2 rounded-xl border border-gray-100 dark:border-gray-800 px-3 py-2">
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-medium truncate">{new Date(s.date + 'T12:00:00').toLocaleDateString('es-CL', { weekday: 'short', day: 'numeric', month: 'short' })}</div>
+                      <div className="text-[11px] text-gray-500 dark:text-gray-400">{Math.round(s.kcal)} kcal{s.volumeKg ? ` · ${Math.round(s.volumeKg)} kg` : ''}{s.exercises.length ? ` · ${s.exercises.length} ej.` : ''}</div>
+                    </div>
+                    {s.exercises.length > 0 && (
+                      <button onClick={() => setEditSession({ date: s.date, id: s.id, name: s.name, exercises: s.exercises })}
+                        className="shrink-0 text-xs px-2 py-1 rounded-lg bg-gray-100 dark:bg-gray-800" aria-label="Editar">✏️</button>
+                    )}
+                    <button onClick={() => removeSession(s.date, s.id)}
+                      className="shrink-0 text-xs px-2 py-1 rounded-lg bg-rose-50 dark:bg-rose-900/30 text-rose-600 dark:text-rose-300" aria-label="Borrar">🗑️</button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Exportar CSV */}
+          <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-3">
+            <div className="text-xs font-semibold text-gray-600 dark:text-gray-400">📤 Exportar CSV</div>
+            <div className="flex items-center gap-2 text-xs">
+              <label className="flex-1">Desde
+                <input type="date" value={csvFrom} max={csvTo || todayKey()} onChange={(e) => setCsvFrom(e.target.value)}
+                  className="mt-0.5 w-full px-2 py-1.5 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800" />
+              </label>
+              <label className="flex-1">Hasta
+                <input type="date" value={csvTo} max={todayKey()} onChange={(e) => setCsvTo(e.target.value || todayKey())}
+                  className="mt-0.5 w-full px-2 py-1.5 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800" />
+              </label>
+            </div>
+            <p className="text-[10px] text-gray-400 dark:text-gray-500">Deja "Desde" vacío para exportar todo el historial.</p>
+            <div className="grid grid-cols-2 gap-2">
+              <button onClick={exportDetailed} className="py-2 rounded-xl border border-gray-300 dark:border-gray-700 text-xs font-semibold hover:bg-gray-50 dark:hover:bg-gray-800">📊 Por ejercicio</button>
+              <button onClick={exportSummary} className="py-2 rounded-xl border border-gray-300 dark:border-gray-700 text-xs font-semibold hover:bg-gray-50 dark:hover:bg-gray-800">📋 Por sesión</button>
+            </div>
+          </div>
         </>
       )}
 
@@ -7349,6 +7527,45 @@ Reglas:
       {capturing && (
         <WorkoutCaptureModal apiKey={apiKey} onClose={() => setCapturing(false)} onSave={addCapture} />
       )}
+      {editSession && (
+        <SessionEditModal session={editSession} onClose={() => setEditSession(null)} onSave={saveSessionEdit} />
+      )}
+    </div>
+  );
+}
+
+// Corrige el grupo muscular de cada ejercicio de una sesión ya cargada (la inferencia puede
+// fallar con los nombres raros de Speediance).
+function SessionEditModal({ session, onClose, onSave }) {
+  const [exs, setExs] = useState(() => (session.exercises || []).map((e) => ({ ...e })));
+  const setMuscle = (i, m) => setExs((prev) => prev.map((e, idx) => (idx === i ? { ...e, muscle: m || null } : e)));
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 p-4 overflow-y-auto">
+      <div className="w-full max-w-md bg-white dark:bg-gray-900 rounded-2xl shadow-xl border border-gray-200 dark:border-gray-800 p-5 space-y-3 my-4 max-h-[92vh] overflow-y-auto">
+        <div className="flex items-center justify-between">
+          <h2 className="text-lg font-bold">✏️ Corregir músculos</h2>
+          <button onClick={onClose} className="w-8 h-8 rounded-full bg-gray-100 dark:bg-gray-800 text-sm">✕</button>
+        </div>
+        <p className="text-xs text-gray-500 dark:text-gray-400">{session.date} · ajusta el grupo muscular de cada ejercicio.</p>
+        {exs.length === 0 && <p className="text-sm text-gray-500 dark:text-gray-400">Esta sesión no tiene desglose por ejercicio.</p>}
+        <div className="space-y-2">
+          {exs.map((e, i) => (
+            <div key={i} className="flex items-center gap-2">
+              <span className="text-lg shrink-0">{emojiForExercise(e.name)}</span>
+              <div className="flex-1 min-w-0 text-sm truncate">{e.name}</div>
+              <select value={e.muscle || ''} onChange={(ev) => setMuscle(i, ev.target.value)}
+                className="shrink-0 text-xs rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 px-2 py-1">
+                <option value="">—</option>
+                {MUSCLE_GROUPS.map((m) => <option key={m} value={m}>{m}</option>)}
+              </select>
+            </div>
+          ))}
+        </div>
+        <div className="flex gap-2 pt-1">
+          <button onClick={onClose} className="flex-1 py-2.5 rounded-xl border border-gray-300 dark:border-gray-700 font-medium text-sm">Cancelar</button>
+          <button onClick={() => onSave(exs)} className="flex-1 py-2.5 rounded-xl bg-emerald-500 text-white font-semibold text-sm hover:bg-emerald-600">Guardar</button>
+        </div>
+      </div>
     </div>
   );
 }
