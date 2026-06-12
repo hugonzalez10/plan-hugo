@@ -5483,6 +5483,7 @@ function WorkoutCaptureModal({ apiKey, onClose, onSave }) {
   const [processing, setProcessing] = useState(false);
   const [extracted, setExtracted] = useState(null);
   const [error, setError] = useState(null);
+  const [targetDate, setTargetDate] = useState(todayKey()); // a qué día se asigna el entrenamiento
 
   const handleFiles = async (e) => {
     const files = Array.from(e.target.files || []);
@@ -5508,6 +5509,10 @@ function WorkoutCaptureModal({ apiKey, onClose, onSave }) {
     try {
       const data = await extractWorkoutFromImage(attachments, apiKey);
       setExtracted(data);
+      // Autodetecta la fecha de la sesión si la captura la trae (y no es futura)
+      if (typeof data.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(data.date) && data.date <= todayKey()) {
+        setTargetDate(data.date);
+      }
     } catch (err) {
       setError(err.message || 'Error procesando archivos');
     } finally {
@@ -5538,9 +5543,11 @@ function WorkoutCaptureModal({ apiKey, onClose, onSave }) {
   const confirm = () => {
     if (!canSave) return;
     const minutesNote = extracted.minutes ? ` · ${extracted.minutes} min` : '';
+    // ts ancla a mediodía del día elegido (para entrenamientos pasados ordena bien); hoy usa el reloj
+    const ts = targetDate === todayKey() ? Date.now() : new Date(targetDate + 'T12:00:00').getTime();
     const out = {
       id: uuid(),
-      ts: Date.now(),
+      ts,
       name: 'Entrenamiento Speediance' + minutesNote,
       kcal: extracted.kcal != null ? Number(extracted.kcal) : 0,
       source: 'photo',
@@ -5548,7 +5555,7 @@ function WorkoutCaptureModal({ apiKey, onClose, onSave }) {
     if (extracted.minutes != null) out.minutes = Number(extracted.minutes);
     if (extracted.volumeKg != null) out.volumeKg = Number(extracted.volumeKg);
     if (exercises.length) out.exercises = exercises;
-    onSave(out);
+    onSave(out, targetDate);
   };
 
   return (
@@ -5621,6 +5628,18 @@ function WorkoutCaptureModal({ apiKey, onClose, onSave }) {
               )}
             </div>
 
+            {!isAggregate && (
+              <label className="flex items-center justify-between gap-2 rounded-xl border border-gray-200 dark:border-gray-800 px-3 py-2">
+                <span className="text-sm flex items-center gap-1.5">📅 Día del entrenamiento</span>
+                <input type="date" value={targetDate} max={todayKey()}
+                  onChange={(e) => e.target.value && setTargetDate(e.target.value)}
+                  className="text-sm font-semibold bg-transparent focus:outline-none text-right" />
+              </label>
+            )}
+            {!isAggregate && extracted.date && extracted.date !== targetDate && (
+              <p className="text-[11px] text-gray-400 dark:text-gray-500 -mt-1">La captura sugería {extracted.date}.</p>
+            )}
+
             {exercises.length > 0 && (
               <div className="rounded-xl border border-gray-200 dark:border-gray-800 divide-y divide-gray-100 dark:divide-gray-800">
                 <div className="px-3 py-2 text-[10px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
@@ -5653,7 +5672,9 @@ function WorkoutCaptureModal({ apiKey, onClose, onSave }) {
             ) : (
               <button onClick={confirm} disabled={!canSave}
                 className="w-full py-2.5 rounded-xl bg-emerald-500 text-white font-semibold hover:bg-emerald-600 disabled:bg-gray-300 dark:disabled:bg-gray-700 disabled:text-gray-500">
-                Agregar como ejercicio de hoy
+                {targetDate === todayKey()
+                  ? 'Agregar como ejercicio de hoy'
+                  : `Agregar al ${new Date(targetDate + 'T12:00:00').toLocaleDateString('es-CL', { weekday: 'short', day: 'numeric', month: 'short' })}`}
               </button>
             )}
           </div>
@@ -5772,7 +5793,7 @@ function AddExerciseModal({ apiKey, userWeightKg, onCancel, onSave }) {
   );
 }
 
-function ExerciseSection({ day, onUpdate, apiKey, userWeightKg }) {
+function ExerciseSection({ day, onUpdate, apiKey, userWeightKg, onSaveToDate }) {
   const [adding, setAdding] = useState(false);
   const [capturing, setCapturing] = useState(false);
   const [quickKcal, setQuickKcal] = useState('');
@@ -5787,8 +5808,11 @@ function ExerciseSection({ day, onUpdate, apiKey, userWeightKg }) {
   };
   const handleSave = (item) => { onUpdate({ exercise: [...items, { ...item, id: uuid(), ts: Date.now() }] }); setAdding(false); };
   const handleRemove = (id) => { onUpdate({ exercise: items.filter((e) => e.id !== id) }); };
-  const handleCaptureSave = (item) => {
-    onUpdate({ exercise: [...items, { ...item, id: item.id ?? uuid(), ts: item.ts ?? Date.now() }] });
+  const handleCaptureSave = (item, date) => {
+    // Si el modal eligió otra fecha (entrenamiento pasado), escribe en ese día vía onSaveToDate;
+    // si es el día que se está viendo, usa el onUpdate normal.
+    if (date && onSaveToDate) onSaveToDate(item, date);
+    else onUpdate({ exercise: [...items, { ...item, id: item.id ?? uuid(), ts: item.ts ?? Date.now() }] });
     setCapturing(false);
   };
 
@@ -6645,7 +6669,12 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
         </div>
         <ExtrasSection day={day} onUpdate={updateDay} apiKey={state.settings?.anthropicApiKey} tryWithRules={tryWithRules}
           onRemoveExtra={(id) => removeSlotExtra('extra', id)} onEditExtra={setEditTarget} />
-        <ExerciseSection day={day} onUpdate={updateDay} apiKey={state.settings?.anthropicApiKey} userWeightKg={state.userProfile?.weightKg} />
+        <ExerciseSection day={day} onUpdate={updateDay} apiKey={state.settings?.anthropicApiKey} userWeightKg={state.userProfile?.weightKg}
+          onSaveToDate={(item, date) => setState((prev) => {
+            const d = prev.days[date] || {};
+            const ex = Array.isArray(d.exercise) ? d.exercise : [];
+            return { ...prev, days: { ...prev.days, [date]: { ...d, exercise: [...ex, { ...item, id: item.id ?? uuid(), ts: item.ts ?? Date.now() }] } } };
+          })} />
         <DailyNotesCard day={day} onUpdate={updateDay} />
       </div>
     </>
@@ -7078,12 +7107,12 @@ function ExercisesView({ state, setState, targets }) {
   const cacheAgeMs = cached ? (Date.now() - new Date(cached.generatedAt).getTime()) : Infinity;
   const cacheOld = cacheAgeMs > 7 * 86400000;
 
-  const addCapture = (item) => {
-    const today = todayKey();
+  const addCapture = (item, date) => {
+    const key = date || todayKey();
     setState((prev) => {
-      const prevDay = prev.days[today] || {};
+      const prevDay = prev.days[key] || {};
       const ex = Array.isArray(prevDay.exercise) ? prevDay.exercise : [];
-      return { ...prev, days: { ...prev.days, [today]: { ...prevDay, exercise: [...ex, { ...item, id: item.id ?? uuid(), ts: item.ts ?? Date.now() }] } } };
+      return { ...prev, days: { ...prev.days, [key]: { ...prevDay, exercise: [...ex, { ...item, id: item.id ?? uuid(), ts: item.ts ?? Date.now() }] } } };
     });
     setCapturing(false);
   };
