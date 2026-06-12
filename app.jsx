@@ -1836,7 +1836,26 @@ function mergeBridge(state, bridge) {
     // NO se corta por importedIds: si el dato está en el bridge pero falta localmente (estado
     // perdido), se reimporta. El freno real es la presencia local (por id o por contenido) y
     // removedBridgeIds (borrados deliberados, ya filtrados arriba).
-    if (d.extras.some((x) => x.id === m.id)) { importedIds.add(m.id); continue; }
+    const localIdx = d.extras.findIndex((x) => x.id === m.id);
+    if (localIdx >= 0) {
+      // La comida ya está importada por id. Antes solo se IGNORABA, así que corregir la toma
+      // o los macros en el chat (p.ej. "ese filete era cena, no almuerzo") nunca llegaba a la
+      // app: quedaba pegado al mealSlot original. El bridge es la autoridad para lo que nació
+      // de él (skill-chat), así que reconciliamos los campos mutables cuando difieren. No se
+      // tocan los extras de la app (foto/texto): esos se editan localmente.
+      const ex = d.extras[localIdx];
+      if (ex.source === 'skill-chat') {
+        const name = m.name || ex.name;
+        const patch = { name, kcal: num(m.kcal), protein: num(m.protein), carbs: num(m.carbs), fat: num(m.fat), fiber: num(m.fiber), mealSlot: slot };
+        const changed = Object.keys(patch).some((k) => ex[k] !== patch[k]);
+        if (changed) {
+          d.extras = d.extras.map((x, i) => (i === localIdx ? { ...x, ...patch } : x));
+          const detected = extraPlanSlot({ mealSlot: slot, name, ts: ex.ts, source: 'skill-chat' });
+          if (BRIDGE_EATEN_SLOTS.has(detected)) d.eaten = { ...(d.eaten || {}), [detected]: true };
+        }
+      }
+      importedIds.add(m.id); continue;
+    }
     // Dedup por contenido+ventana contra CUALQUIER extra ya presente ese día (no solo del chat):
     // así también se absorbe el eco del propio empuje app→bridge, que vuelve con id de servidor
     // distinto. Lo damos por importado.
