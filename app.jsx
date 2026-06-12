@@ -285,23 +285,35 @@ Usa estos keys cuando estén disponibles (omite los que no aparezcan):
    - "month" si es vista mensual
    - "all" si es histórico completo
 - exercises (SOLO si la captura lista los movimientos/ejercicios de UNA sesión, no en resúmenes
-  agregados): array de objetos, uno por ejercicio, con:
-   - name (nombre del ejercicio, ej. "Press banca", "Sentadilla", "Remo")
-   - muscle (grupo muscular principal que trabaja, en español y normalizado a UNO de:
-     "pecho", "espalda", "piernas", "hombros", "brazos", "core", "glúteos", "cardio".
-     Infiérelo del nombre del ejercicio aunque la captura no lo diga.)
-   - sets (número de series, entero) — null si no aparece
-   - reps (repeticiones por serie; número o string como "8-12") — null si no aparece
-   - weightKg (peso usado en kg, número) — null si es peso corporal o no aparece
+  agregados): array de objetos, uno por ejercicio EN ORDEN, con:
+   - name (nombre del ejercicio tal cual aparece, ej. "Caja de cremallera delantera Squat",
+     "Cuerda de tricep cubilete", "Crunch con barra")
+   - muscle (grupo muscular principal, en español, normalizado a UNO de:
+     "pecho", "espalda", "piernas", "hombros", "brazos", "core", "glúteos", "cardio", "movilidad".
+     INFIÉRELO del nombre — Speediance NO lo dice. Pistas: Squat/sentadilla/split/prensa/femoral
+     → "piernas"; Crunch/abdominales/plancha/rotación/oblicuo → "core"; tricep/bíceps/curl →
+     "brazos"; press banca/pectoral/apertura → "pecho"; remo/dominada/jalón/espalda → "espalda";
+     press militar/hombro/elevación lateral → "hombros"; glúteo/hip thrust/puente → "glúteos";
+     estiramiento/movilidad/flexor de cadera/calentamiento → "movilidad".)
+   - sets (número de series de trabajo, entero) — null si no aparece
+   - reps (repeticiones por serie; si ves "12/12" es bilateral izq/der → usa 12; rango → "8-12") —
+     null si el ejercicio es por tiempo/duración (movilidad, estiramiento)
+   - weightKg (usa el valor "Peso máx" del ejercicio, en kg) — null si es peso corporal o no aparece
+   - volumeKg (el "Volumen total" del ejercicio, en kg) — null si no aparece
+   - oneRepMaxKg (el valor "1 repetición máx." / 1RM estimado, en kg) — null si no aparece
+   - quality (la "Puntuación del movimiento": una letra "A", "B", "C", "D") — null si no aparece
 
 Reglas:
 - Valores numéricos sin unidades.
 - null si no aparece. No inventes.
 - Si ves "30.3K kg" interpreta como 30300.
 - Si ves "4491 kcal" como total, eso es kcal=4491.
+- Si "Peso máx" muestra dos valores (ej. "18.0 / 18.0", una por brazo) usa uno (18).
+- Los ejercicios de solo "Duración" (00:00:30) son movilidad/estiramiento: muscle "movilidad",
+  reps null, weightKg null.
 - Si NO ves un desglose por ejercicio (solo totales), omite "exercises".
 
-Ejemplo: {"kcal":3676,"minutes":371,"volumeKg":30300,"period":"today","exercises":[{"name":"Press banca","muscle":"pecho","sets":4,"reps":"10","weightKg":40},{"name":"Sentadilla","muscle":"piernas","sets":4,"reps":"8","weightKg":60}]}`;
+Ejemplo: {"kcal":297,"minutes":32,"volumeKg":8462,"period":"today","exercises":[{"name":"Caja de cremallera delantera Squat","muscle":"piernas","sets":3,"reps":13,"weightKg":25,"volumeKg":1668,"oneRepMaxKg":33,"quality":"B"},{"name":"Cuerda de tricep cubilete","muscle":"brazos","sets":3,"reps":15,"weightKg":60,"volumeKg":1141,"oneRepMaxKg":96,"quality":"A"}]}`;
 
 const PROMPT_EXTRACT_MEAL = `Eres un nutricionista experto. Estás analizando una FOTO de un plato de comida y/o una DESCRIPCIÓN en texto natural de lo que comió alguien.
 
@@ -5508,13 +5520,17 @@ function WorkoutCaptureModal({ apiKey, onClose, onSave }) {
     today: 'Hoy', session: 'Sesión', '7days': 'Últimos 7 días', '30days': 'Últimos 30 días', month: 'Mes', all: 'Histórico',
   }[extracted?.period] || extracted?.period;
 
+  const numOrNull = (v) => (v != null && Number.isFinite(Number(v)) ? Number(v) : null);
   const exercises = Array.isArray(extracted?.exercises)
     ? extracted.exercises.filter((e) => e && e.name).map((e) => ({
         name: String(e.name).trim(),
         muscle: e.muscle ? String(e.muscle).trim().toLowerCase() : null,
-        sets: e.sets != null && Number.isFinite(Number(e.sets)) ? Number(e.sets) : null,
+        sets: numOrNull(e.sets),
         reps: e.reps != null ? e.reps : null,
-        weightKg: e.weightKg != null && Number.isFinite(Number(e.weightKg)) ? Number(e.weightKg) : null,
+        weightKg: numOrNull(e.weightKg),
+        volumeKg: numOrNull(e.volumeKg),
+        oneRepMaxKg: numOrNull(e.oneRepMaxKg),
+        quality: e.quality ? String(e.quality).trim().toUpperCase().slice(0, 2) : null,
       }))
     : [];
   const canSave = !!extracted && !isAggregate && (extracted.kcal != null || exercises.length > 0);
@@ -5614,11 +5630,15 @@ function WorkoutCaptureModal({ apiKey, onClose, onSave }) {
                   <div key={i} className="flex items-center gap-2 px-3 py-2">
                     <span className="text-lg shrink-0">{emojiForExercise(e.name)}</span>
                     <div className="flex-1 min-w-0">
-                      <div className="text-sm font-medium truncate">{e.name}</div>
+                      <div className="flex items-center gap-1.5">
+                        <div className="text-sm font-medium truncate">{e.name}</div>
+                        {e.quality && <span className="shrink-0 text-[10px] font-bold px-1.5 rounded bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300">{e.quality}</span>}
+                      </div>
                       <div className="text-[11px] text-gray-500 dark:text-gray-400">
                         {e.muscle ? <span className="uppercase tracking-wide">{e.muscle}</span> : null}
                         {(e.sets != null || e.reps != null) ? ` · ${e.sets ?? '?'}×${e.reps ?? '?'}` : ''}
                         {e.weightKg != null ? ` · ${e.weightKg} kg` : ''}
+                        {e.oneRepMaxKg != null ? ` · 1RM ${e.oneRepMaxKg}` : ''}
                       </div>
                     </div>
                   </div>
@@ -7047,6 +7067,7 @@ function ExercisesView({ state, setState, targets }) {
           ejercicios: (s.exercises || []).map((e) => ({
             nombre: e.name, musculo: e.muscle || null,
             series: e.sets ?? null, reps: e.reps ?? null, peso_kg: e.weightKg ?? null,
+            volumen_kg: e.volumeKg ?? null, rm1_kg: e.oneRepMaxKg ?? null, calidad: e.quality ?? null,
           })),
         };
       });
@@ -7079,7 +7100,9 @@ FRECUENCIA: ${stats.freqPerWeek.toFixed(1)} sesiones/semana (últimas ${stats.we
 HISTORIAL (sesiones, recientes primero):
 ${JSON.stringify(trainingHistory, null, 2)}
 
-Evalúa: consistencia/frecuencia, volumen por grupo muscular (¿desbalances? ¿algún músculo descuidado?), progresión (¿sube peso/volumen en el tiempo o está estancado?), y qué cambiarías.
+Cada ejercicio puede traer rm1_kg (1RM estimado), volumen_kg y calidad (nota A/B/C/D de técnica). Úsalos: la PROGRESIÓN se ve si rm1_kg/peso_kg/volumen suben sesión a sesión para el mismo ejercicio o grupo; la TÉCNICA se ve en la nota de calidad (una C/D repetida = problema a corregir).
+
+Evalúa: consistencia/frecuencia, volumen por grupo muscular (¿desbalances? ¿algún músculo descuidado?), progresión (¿sube 1RM/peso/volumen en el tiempo o está estancado?), técnica (notas de calidad bajas) y qué cambiarías.
 
 Devuelve SOLO JSON, sin markdown:
 {

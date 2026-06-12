@@ -4,7 +4,7 @@
  * NO interceptamos llamadas a api.anthropic.com.
  */
 
-const CACHE_NAME = 'plan-hugo-v28-pestana-ejercicios';
+const CACHE_NAME = 'plan-hugo-v29-speediance-detalle';
 const CORE_URLS = [
   './index.html',
   './app.js',
