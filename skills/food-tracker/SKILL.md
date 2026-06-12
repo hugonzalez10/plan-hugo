@@ -243,10 +243,13 @@ Reglas comunes para TODA entrada:
   manda `time` (`HH:MM`) o `ts` (ms).
 - `date`: `YYYY-MM-DD` del registro (o de la captura si la muestra).
 - `source`: `"skill-chat"`.
-- `mealSlot` (solo comida): sección del plan según la hora (ver tabla). La app usa
-  `desayuno|almuerzo|colacion|cena|antojo|extra` y muestra la comida dentro de esa
-  sección. Toda comida entra como entrada de `meals`; usa `extra` solo si no calza
-  por hora o es claramente fuera de plan.
+- `mealSlot` (solo comida): la toma del plan a la que pertenece. **Prefiere la toma que
+  Hugo nombra** ("mi colación de la mañana", "el almuerzo", "la cena"); si no la nombra,
+  dedúcela por la hora (ver tabla). La app usa las 5 tomas
+  `desayuno|colacion1|almuerzo|colacion2|cena` (más `extra`) y muestra la comida dentro de
+  esa sección. Puedes mandar `colacion` a secas: la app y el bridge la parten en
+  `colacion1` (mañana) o `colacion2` (tarde) por la hora. Toda comida entra como entrada de
+  `meals`; usa `extra` solo si es claramente fuera de plan.
 
 **Comida** → push a `meals`:
 ```json
@@ -472,7 +475,7 @@ El objeto resultante trae todo lo que necesitan los 5 bloques. Notas de la data 
   de hoy como respaldo.
 - **`mealsToday[].time` suele venir `null`** (las comidas registradas por la app no
   guardan hora). Para el Bloque D, si falta `time`, **infiere desde `mealSlot`**:
-  desayuno→08:00, almuerzo→13:00, colacion→16:30, cena→20:00, antojo→22:00, extra→hora
+  desayuno→08:00, colacion1→11:00, almuerzo→13:30, colacion2→18:00, cena→20:30, extra→hora
   actual. Menciona en el texto del chat que las horas sin registro son aproximadas.
 - **Limpia `mealsToday` antes del Bloque D:** descarta entradas de prueba/basura (p. ej.
   `name` tipo `TEST_…`) y **colapsa duplicados exactos** (mismo `name` + `protein`) — el
@@ -624,20 +627,24 @@ sigue siendo la **prioridad #1**.
 
 ## Categoría de comida según hora
 
-Misma regla que `autoDetectOccasion()` en la app (`app.jsx`), para que chat y app
-coincidan siempre:
+Misma regla que `slotByTime()` en la app (`app.jsx`) y `_slotByTime()` en el `.gs`, para
+que chat, bridge y app coincidan siempre:
 
 | Hora | mealSlot |
 |------|----------|
-| antes de 11:00 | desayuno |
-| 11:00–14:59 | almuerzo |
-| 15:00–18:59 | colacion |
-| 19:00–21:29 | cena |
-| 21:30 en adelante | antojo |
+| antes de 10:30 | desayuno |
+| 10:30–12:29 | colacion1 |
+| 12:30–15:29 | almuerzo |
+| 15:30–19:29 | colacion2 |
+| 19:30 en adelante | cena |
 
-(La app despliega cada `mealSlot` del plan —desayuno/almuerzo/colacion/cena/antojo—
-DENTRO de su sección, con "📝 Registrado" y los macros que estimaste. Solo lo que no
-calza por hora o es fuera de plan va a `extra` → "EXTRAS DEL DÍA".)
+Ya **no existe** `antojo` como sección: lo de muy tarde se pliega a la cena. **Si Hugo
+nombra la toma, esa manda sobre el reloj** (una colación que comió a las 12:40 sigue
+siendo `colacion1` si él la llama "colación de la mañana").
+
+(La app despliega cada `mealSlot` del plan —desayuno/colacion1/almuerzo/colacion2/cena—
+DENTRO de su sección, con "📝 Registrado" y los macros que estimaste. Solo lo claramente
+fuera de plan va a `extra` → "EXTRAS DEL DÍA".)
 
 ---
 

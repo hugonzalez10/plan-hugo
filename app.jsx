@@ -1836,7 +1836,26 @@ function mergeBridge(state, bridge) {
     // NO se corta por importedIds: si el dato está en el bridge pero falta localmente (estado
     // perdido), se reimporta. El freno real es la presencia local (por id o por contenido) y
     // removedBridgeIds (borrados deliberados, ya filtrados arriba).
-    if (d.extras.some((x) => x.id === m.id)) { importedIds.add(m.id); continue; }
+    const localIdx = d.extras.findIndex((x) => x.id === m.id);
+    if (localIdx >= 0) {
+      // La comida ya está importada por id. Antes solo se IGNORABA, así que corregir la toma
+      // o los macros en el chat (p.ej. "ese filete era cena, no almuerzo") nunca llegaba a la
+      // app: quedaba pegado al mealSlot original. El bridge es la autoridad para lo que nació
+      // de él (skill-chat), así que reconciliamos los campos mutables cuando difieren. No se
+      // tocan los extras de la app (foto/texto): esos se editan localmente.
+      const ex = d.extras[localIdx];
+      if (ex.source === 'skill-chat') {
+        const name = m.name || ex.name;
+        const patch = { name, kcal: num(m.kcal), protein: num(m.protein), carbs: num(m.carbs), fat: num(m.fat), fiber: num(m.fiber), mealSlot: slot };
+        const changed = Object.keys(patch).some((k) => ex[k] !== patch[k]);
+        if (changed) {
+          d.extras = d.extras.map((x, i) => (i === localIdx ? { ...x, ...patch } : x));
+          const detected = extraPlanSlot({ mealSlot: slot, name, ts: ex.ts, source: 'skill-chat' });
+          if (BRIDGE_EATEN_SLOTS.has(detected)) d.eaten = { ...(d.eaten || {}), [detected]: true };
+        }
+      }
+      importedIds.add(m.id); continue;
+    }
     // Dedup por contenido+ventana contra CUALQUIER extra ya presente ese día (no solo del chat):
     // así también se absorbe el eco del propio empuje app→bridge, que vuelve con id de servidor
     // distinto. Lo damos por importado.
@@ -2191,6 +2210,9 @@ function slotByTime(d) {
 function extraPlanSlot(x) {
   const ms = x?.mealSlot;
   if (ms === 'colacion') return resolveColacion(x);   // paraguas de la skill → colacion1/2 por hora
+  // 'antojo' ya no es sección (lo de muy tarde se pliega a cena). Registros viejos/skills
+  // desincronizadas aún pueden mandarlo: resuélvelo por la hora en vez de mandarlo a Extras.
+  if (ms === 'antojo') return (x?.ts != null && slotByTime(new Date(x.ts))) || 'cena';
   if (PLAN_SLOTS.has(ms)) return ms;                  // desayuno/almuerzo/colacion1/colacion2/cena directos
   if (x?.source === 'skill-chat' && x?.name) {
     for (const slot of PLAN_SLOTS) if (SLOT_NAME_RE[slot].test(x.name)) return slot;
@@ -7837,19 +7859,37 @@ function SettingsModal({ state, setState, onClose }) {
     onClose();
   };
 
-  const exportJson = () => {
+  // Descarga el estado actual (sin credenciales) como .json. Devuelve true si gatilló la
+  // descarga. Lo usan Exportar JSON y, como red de seguridad, las acciones destructivas
+  // (reset / importar): siempre cae un respaldo antes de pisar datos.
+  const downloadBackup = (filename) => {
     try {
       const blob = new Blob([JSON.stringify(sanitizeStateForUpload(state), null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `plan-hugo-backup-${todayKey()}.json`;
+      a.download = filename;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
-    } catch (e) {
-      alert('Error al exportar: ' + e.message);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  // Resumen de una persona en una línea: para mostrar qué se importa vs. qué se reemplaza.
+  const stateSummary = (s) => {
+    const days = s && s.days ? Object.keys(s.days).length : 0;
+    const weights = Array.isArray(s && s.weights) ? s.weights.length : 0;
+    const recipes = Array.isArray(s && s.recipeBank) ? s.recipeBank.length : 0;
+    return `${days} días · ${weights} pesos · ${recipes} recetas`;
+  };
+
+  const exportJson = () => {
+    if (!downloadBackup(`plan-hugo-backup-${todayKey()}.json`)) {
+      alert('Error al exportar el respaldo.');
     }
   };
 
@@ -7907,7 +7947,9 @@ function SettingsModal({ state, setState, onClose }) {
             alert('El archivo no parece un respaldo de Plan Hugo.');
             return;
           }
-          if (!confirm('Esto REEMPLAZA los datos de este dispositivo con el respaldo importado. ¿Continuar?')) return;
+          const msg = `Vas a IMPORTAR:\n  ${stateSummary(obj)}\n\nReemplaza lo de este dispositivo:\n  ${stateSummary(state)}\n\nAntes de continuar se descargará un respaldo de tus datos actuales. ¿Continuar?`;
+          if (!confirm(msg)) return;
+          downloadBackup(`plan-hugo-PRE-IMPORT-${todayKey()}.json`);
           setState((prev) => ({ ...prev, ...obj, settings: { ...(prev.settings || {}), ...(obj.settings || {}) } }));
           alert('Respaldo importado. Revísalo y guarda.');
         } catch (e) {
@@ -7945,13 +7987,18 @@ function SettingsModal({ state, setState, onClose }) {
   const resetTabOrder = () => setState((prev) => ({ ...prev, settings: { ...(prev.settings || {}), tabOrder: null } }));
 
   const resetAll = () => {
-    if (!confirm('¿Borrar TODOS los datos? Esto incluye historial de comidas, pesos, banco y onboarding. No se puede deshacer.')) return;
-    if (!confirm('Confirma una vez más: ¿realmente quieres resetear todo?')) return;
+    if (!confirm('¿Borrar TODOS los datos? Esto incluye historial de comidas, pesos, banco y onboarding.')) return;
+    const backed = downloadBackup(`plan-hugo-PRE-RESET-${todayKey()}.json`);
+    const ok = confirm(backed
+      ? 'Se descargó un respaldo (plan-hugo-PRE-RESET-…json) por si te arrepientes.\n\nConfirma una vez más: ¿resetear todo?'
+      : 'OJO: no se pudo descargar el respaldo automático. Mejor cancela y usa "Exportar JSON" primero.\n\n¿Resetear igual?');
+    if (!ok) return;
     try {
       localStorage.removeItem(STORAGE_KEY);
       for (const k of LEGACY_STORAGE_KEYS) localStorage.removeItem(k);
     } catch {}
-    window.location.reload();
+    // Pequeña espera para no cancelar la descarga del respaldo en algunos navegadores.
+    setTimeout(() => window.location.reload(), 400);
   };
 
   return (
