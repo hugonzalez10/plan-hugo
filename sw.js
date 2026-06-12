@@ -4,7 +4,7 @@
  * NO interceptamos llamadas a api.anthropic.com.
  */
 
-const CACHE_NAME = 'plan-hugo-v30-fecha-entrenamiento';
+const CACHE_NAME = 'plan-hugo-v31-ejercicios-csv-historial';
 const CORE_URLS = [
   './index.html',
   './app.js',
