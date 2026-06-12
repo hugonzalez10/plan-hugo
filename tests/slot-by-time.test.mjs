@@ -103,3 +103,19 @@ test('extraPlanSlot: sin ts ni nombre reconocible → null (extra genuino)', () 
   const x = { source: 'skill-chat', name: 'Algo' };
   assert.equal(extraPlanSlot(x), null);
 });
+
+// ── 'antojo' legacy: ya no es sección; se pliega a su toma por hora, NO a Extras ──────
+test('extraPlanSlot: mealSlot "antojo" tarde de noche → cena (no Extras)', () => {
+  const x = { source: 'skill-chat', name: 'Helado', mealSlot: 'antojo', ts: at(22, 30).getTime() };
+  assert.equal(extraPlanSlot(x), 'cena');
+});
+
+test('extraPlanSlot: mealSlot "antojo" sin ts → cena por defecto', () => {
+  const x = { source: 'skill-chat', name: 'Helado', mealSlot: 'antojo' };
+  assert.equal(extraPlanSlot(x), 'cena');
+});
+
+test('gs._mealSlot: "antojo" tarde de noche → cena (espejo de la app)', () => {
+  assert.equal(gs._mealSlot({ mealSlot: 'antojo', time: '22:30', name: 'Helado' }), 'cena');
+  assert.equal(gs._mealSlot({ mealSlot: 'antojo', name: 'Helado' }), 'cena');
+});

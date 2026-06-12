@@ -492,6 +492,8 @@ function _resolveColacion(m) {
 function _mealSlot(m) {
   if (!m) return null;
   if (m.mealSlot === 'colacion') return _resolveColacion(m);
+  // 'antojo' ya no es sección: se pliega a su toma real por la hora (típicamente cena).
+  if (m.mealSlot === 'antojo') return _slotByTime(m.time, m.ts) || 'cena';
   if (PLAN_SLOTS_GS.indexOf(m.mealSlot) >= 0) return m.mealSlot;
   if (m.source === 'skill-chat' && m.name) {
     for (var i = 0; i < PLAN_SLOTS_GS.length; i++) {
