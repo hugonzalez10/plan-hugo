@@ -93,6 +93,10 @@ function emojiFor(name, map, fallback) {
 function emojiForFood(name) { return emojiFor(name, FOOD_EMOJIS, '🍽️'); }
 function emojiForExercise(name) { return emojiFor(name, EXERCISE_EMOJIS, '💪'); }
 
+// Campos escalares de un entrenamiento que deben sobrevivir el round-trip por el bridge
+// (igual que WEIGHT_FIELDS para composición). El array `exercises` se trata aparte por ser array.
+const WORKOUT_EXTRA_FIELDS = ['type', 'activity', 'minutes', 'volumeKg', 'distanceM', 'avgPowerW', 'avgCadenceRpm', 'avgHr'];
+
 const WEIGHT_FIELDS = [
   // Principales
   { key: 'weightKg',           label: 'Peso',              unit: 'kg',   step: '0.1', cat: 'main' },
@@ -1991,7 +1995,11 @@ function mergeBridge(state, bridge) {
       importedIds.add(w.id); continue;
     }
     const ex = { id: w.id, ts: w.ts != null ? w.ts : Date.now(), name: w.name || 'Entrenamiento', kcal: num(w.kcal) };
-    if (w.minutes != null) ex.minutes = num(w.minutes);
+    for (const f of WORKOUT_EXTRA_FIELDS) {
+      if (w[f] == null) continue;
+      ex[f] = (f === 'type' || f === 'activity') ? w[f] : num(w[f]);
+    }
+    if (Array.isArray(w.exercises) && w.exercises.length) ex.exercises = w.exercises;
     d.exercise.push(ex);
     importedIds.add(w.id); added.workouts++;
   }
@@ -7324,6 +7332,88 @@ function ExercisesView({ state, setState, targets }) {
     downloadCsv(lines, `plan-hugo-ejercicios-sesiones-${todayKey()}.csv`);
   };
 
+  // ── Exportar la evaluación de Claude (PDF + Markdown) para discutirla con otra IA ──
+  const downloadBlob = (content, name, mime) => {
+    const blob = new Blob([content], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = name; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+  };
+  // jsPDF (helvetica) no dibuja emojis: para el PDF se quitan; en el Markdown se conservan.
+  const stripEmoji = (s) => String(s ?? '').replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2190}-\u{21FF}\u{2B00}-\u{2BFF}\u{FE0F}\u{200D}]/gu, '').replace(/\s{2,}/g, ' ').trim();
+
+  // Fuente única de verdad: secciones {heading, lines[]} con evaluación + datos de respaldo.
+  const buildEvalSections = () => {
+    const r = response || {};
+    const secs = [];
+    const gen = cached?.generatedAt
+      ? new Date(cached.generatedAt).toLocaleString('es-CL', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+      : '';
+    secs.push({ heading: 'Plan Hugo — Evaluación de rutina', lines: [
+      gen ? `Generado: ${gen}` : null,
+      r.confidence ? `Confianza: ${r.confidence}` : null,
+    ].filter(Boolean) });
+    if (r.resumen || r.consistencia) secs.push({ heading: 'Resumen', lines: [r.resumen, r.consistencia ? `📅 ${r.consistencia}` : null].filter(Boolean) });
+    if (Array.isArray(r.seguir) && r.seguir.length) secs.push({ heading: '✅ Qué seguir', lines: r.seguir.map((s) => `• ${s}`) });
+    if (Array.isArray(r.mejorar) && r.mejorar.length) {
+      const lines = [];
+      r.mejorar.forEach((m, i) => { const o = typeof m === 'string' ? { que: m } : m; lines.push(`${i + 1}. ${o.que}`); if (o.porque) lines.push(`   Por qué: ${o.porque}`); if (o.como) lines.push(`   Cómo: ${o.como}`); });
+      secs.push({ heading: '🔧 Qué mejorar', lines });
+    }
+    if (r.desbalances) secs.push({ heading: '⚖️ Desbalances', lines: [r.desbalances] });
+    if (r.progresion) secs.push({ heading: '📈 Progresión', lines: [r.progresion] });
+    if (r.nota_critica) secs.push({ heading: '🎯 Nota crítica', lines: [r.nota_critica] });
+    secs.push({ heading: '— Datos de respaldo —', lines: [
+      `Ventana: últimas ${stats.weeks} semanas`,
+      `Frecuencia: ${stats.freqPerWeek.toFixed(1)}/sem (fuerza ${stats.freqStrengthPerWeek.toFixed(1)} + cardio ${stats.freqCardioPerWeek.toFixed(1)})`,
+      `Sesiones: ${stats.totalSessions} totales · ${stats.sessionsThisMonth} este mes · última hace ${stats.daysSinceLast ?? '?'} días`,
+    ] });
+    if (stats.muscleVolume?.length) secs.push({ heading: 'Volumen por grupo muscular (series)', lines: stats.muscleVolume.map((m) => `• ${m.muscle}: ${m.sets}`) });
+    if (stats.byExercise?.length) {
+      secs.push({ heading: 'Récords por ejercicio', lines: stats.byExercise.slice(0, 25).map((x) => {
+        const parts = []; if (x.bestRm != null) parts.push(`1RM ${x.bestRm}`); if (x.bestWeight != null) parts.push(`peso ${x.bestWeight}`); if (x.bestVolume != null) parts.push(`vol ${Math.round(x.bestVolume)}`);
+        return `• ${x.name}: ${parts.join(' · ')}`;
+      }) });
+      const prog = stats.byExercise.filter((x) => (x.entries || []).length >= 2).slice(0, 25).map((x) => {
+        const v = (e) => (e.oneRepMaxKg ?? e.weightKg);
+        const first = x.entries[0], last = x.entries[x.entries.length - 1];
+        const fv = v(first), lv = v(last); if (fv == null || lv == null) return null;
+        return `• ${x.name}: ${first.date} ${fv} → ${last.date} ${lv} kg (${lv - fv >= 0 ? '+' : ''}${(lv - fv).toFixed(0)})`;
+      }).filter(Boolean);
+      if (prog.length) secs.push({ heading: 'Progresión por ejercicio (1RM/peso)', lines: prog });
+    }
+    const hist = (trainingHistory || []).map((s) => `${s.fecha} · ${s.tipo} · ${s.nombre} · ${s.kcal} kcal${s.volumen_kg ? ` · ${Math.round(s.volumen_kg)} kg` : ''}${s.distancia_km ? ` · ${s.distancia_km} km` : ''}${(s.ejercicios || []).length ? ` · ${s.ejercicios.length} ej` : ''}`);
+    if (hist.length) secs.push({ heading: `Historial de sesiones (${hist.length})`, lines: hist });
+    return secs;
+  };
+
+  const exportEvalMarkdown = () => {
+    const secs = buildEvalSections();
+    let md = '';
+    secs.forEach((s, i) => { md += (i === 0 ? `# ${s.heading}\n\n` : `## ${s.heading}\n\n`); md += s.lines.join('\n') + '\n\n'; });
+    md += '## Historial detallado (JSON)\n\n```json\n' + JSON.stringify(trainingHistory, null, 2) + '\n```\n';
+    downloadBlob(md, `plan-hugo-evaluacion-${todayKey()}.md`, 'text/markdown;charset=utf-8');
+  };
+
+  const exportEvalPdf = () => {
+    const JsPDF = window.jspdf && window.jspdf.jsPDF;
+    if (!JsPDF) { setError('No se pudo cargar el generador de PDF. Usa "Exportar texto", o reintenta con conexión.'); return; }
+    const doc = new JsPDF({ unit: 'pt', format: 'a4' });
+    const margin = 48, pageH = doc.internal.pageSize.getHeight(), maxW = doc.internal.pageSize.getWidth() - margin * 2;
+    let y = margin;
+    const ensure = (h) => { if (y + h > pageH - margin) { doc.addPage(); y = margin; } };
+    buildEvalSections().forEach((s, si) => {
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(si === 0 ? 15 : 12);
+      ensure(22); doc.text(stripEmoji(s.heading) || s.heading, margin, y); y += si === 0 ? 24 : 18;
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(10);
+      for (const line of s.lines) {
+        for (const w of doc.splitTextToSize(stripEmoji(line), maxW)) { ensure(14); doc.text(w, margin, y); y += 14; }
+      }
+      y += 8;
+    });
+    doc.save(`plan-hugo-evaluacion-${todayKey()}.pdf`);
+  };
+
   const generate = async () => {
     if (!apiKey) { setError('Configura tu API key en ⚙️ Ajustes primero.'); return; }
     if (stats.totalSessions < 3) { setError(`Necesitas al menos 3 sesiones registradas. Tienes ${stats.totalSessions}.`); return; }
@@ -7650,6 +7740,15 @@ Reglas:
               <p className="text-sm text-amber-900 dark:text-amber-100">{response.nota_critica}</p>
             </div>
           )}
+
+          <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-2">
+            <div className="text-xs font-semibold text-gray-600 dark:text-gray-400">📤 Exportar evaluación (para discutir con otra IA)</div>
+            <div className="grid grid-cols-2 gap-2">
+              <button onClick={exportEvalPdf} className="py-2 rounded-xl border border-gray-300 dark:border-gray-700 text-xs font-semibold hover:bg-gray-50 dark:hover:bg-gray-800">📄 PDF</button>
+              <button onClick={exportEvalMarkdown} className="py-2 rounded-xl border border-gray-300 dark:border-gray-700 text-xs font-semibold hover:bg-gray-50 dark:hover:bg-gray-800">📝 Texto (Markdown)</button>
+            </div>
+            <p className="text-[10px] text-gray-400 dark:text-gray-500">Incluyen la evaluación + datos de respaldo (frecuencia, volumen por músculo, récords, progresión e historial). El Markdown agrega el historial completo en JSON.</p>
+          </div>
 
           {cached?.generatedAt && (
             <p className="text-[10px] text-gray-500 dark:text-gray-400 text-center">
@@ -12682,7 +12781,11 @@ function App() {
       for (const ex of (d.exercise || [])) {
         if (!ex || ex.id == null || imported.has(ex.id) || pushed.has(ex.id)) continue;
         const entry = { name: ex.name, kcal: numv(ex.kcal), date: dk, ts: ex.ts != null ? ex.ts : null, source: 'app' };
-        if (ex.minutes != null) entry.minutes = numv(ex.minutes);
+        for (const f of WORKOUT_EXTRA_FIELDS) {
+          if (ex[f] == null) continue;
+          entry[f] = (f === 'type' || f === 'activity') ? ex[f] : numv(ex[f]);
+        }
+        if (Array.isArray(ex.exercises) && ex.exercises.length) entry.exercises = ex.exercises;
         out.push({ localId: ex.id, section: 'workouts', date: dk, entry });
       }
     }
