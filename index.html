@@ -179,6 +179,8 @@
 <body class="bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-100 font-sans">
   <div id="root"></div>
 
+  <!-- jsPDF (UMD) para exportar la evaluación a PDF. Desde unpkg → el SW lo cachea (offline). -->
+  <script defer src="https://unpkg.com/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
   <script src="app.js" defer></script>
 </body>
 </html>
