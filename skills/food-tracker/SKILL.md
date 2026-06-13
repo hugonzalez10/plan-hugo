@@ -209,9 +209,41 @@ que no aparezcan), valores numéricos sin unidades:
 
 ### Ejercicio
 ```
-Lee esta captura de entrenamiento. Si hay varios entrenamientos, devuelve un array.
-Responde SOLO JSON sin markdown:
-[ { "name": "tipo de entrenamiento", "kcal": kcal totales (número), "minutes": duración en minutos (número) } ]
+Lee esta captura de entrenamiento (Speediance u otra app). Si hay varios entrenamientos,
+devuelve un array con uno por entrenamiento. Responde SOLO JSON sin markdown.
+
+Cada entrenamiento, con los keys que apliquen (omite los que no aparezcan):
+- name (nombre corto del entrenamiento)
+- type ("strength" si es fuerza con pesos/máquinas; "cardio" si es bici/trote/remo/elíptica/caminata)
+- kcal (calorías quemadas TOTALES, número. Si hay "activas" y "totales", usa las TOTALES)
+- minutes (duración total en minutos, número entero)
+- volumeKg (volumen total levantado en kg — solo fuerza)
+- (SOLO cardio) activity (ej. "Bicicleta", "Trote"), distanceM (metros: "21.5 km"→21500),
+  avgPowerW (vatios), avgCadenceRpm (rpm), avgHr (lpm/bpm)
+- exercises (SOLO si la captura lista los movimientos de UNA sesión de fuerza, no en resúmenes
+  agregados): array EN ORDEN, un objeto por ejercicio con:
+   - name (nombre tal cual aparece)
+   - muscle (grupo principal en español, normalizado a UNO de: "pecho", "espalda", "piernas",
+     "hombros", "brazos", "core", "glúteos", "cardio", "movilidad". INFIÉRELO del nombre:
+     Squat/sentadilla/prensa/femoral→"piernas"; Crunch/abdominal/plancha/oblicuo→"core";
+     tricep/bíceps/curl→"brazos"; press banca/pectoral/apertura→"pecho";
+     remo/dominada/jalón→"espalda"; press militar/elevación lateral→"hombros";
+     glúteo/hip thrust/puente→"glúteos"; estiramiento/movilidad/calentamiento→"movilidad")
+   - sets (series de trabajo, entero) — null si no aparece
+   - reps (reps por serie; "12/12" bilateral→12; rango→"8-12") — null si es por tiempo
+   - weightKg (el "Peso máx" del ejercicio) — null si peso corporal o no aparece
+   - volumeKg (el "Volumen total" del ejercicio) — null si no aparece
+   - oneRepMaxKg (1RM estimado) — null si no aparece
+   - quality (la "Puntuación del movimiento": "A"/"B"/"C"/"D") — null si no aparece
+
+Reglas: valores numéricos sin unidades; null si no aparece (no inventes); "30.3K kg"→30300;
+ejercicios de solo "Duración" (00:00:30) son "movilidad" (reps/weightKg null); si es CARDIO no
+devuelvas "exercises" ni "volumeKg"; si solo ves totales (sin desglose por ejercicio), omite "exercises".
+
+Ejemplo fuerza: { "name":"Pesas", "type":"strength", "kcal":297, "minutes":32, "volumeKg":8462,
+  "exercises":[{"name":"Squat delantera","muscle":"piernas","sets":3,"reps":13,"weightKg":25,"volumeKg":1668,"oneRepMaxKg":33,"quality":"B"}] }
+Ejemplo cardio: { "name":"Bicicleta", "type":"cardio", "activity":"Bicicleta", "kcal":629, "minutes":45,
+  "distanceM":21534, "avgPowerW":173, "avgCadenceRpm":58, "avgHr":138 }
 ```
 
 ---
@@ -277,11 +309,19 @@ muchos campos; incluye solo los que de verdad aparezcan):
 }
 ```
 
-**Ejercicio** → push a `workouts` (una entrada por entrenamiento):
+**Ejercicio** → push a `workouts` (una entrada por entrenamiento). **Incluye TODOS los campos
+que extrajiste** (`type`, `volumeKg`, `exercises[]` en fuerza; `distanceM`/`avgPowerW`/`avgCadenceRpm`/`avgHr`
+en cardio): la app los necesita para el desglose por músculo y la progresión de la pestaña Ejercicios.
+El servidor los preserva y, si una versión simple ya estaba registrada, la versión con desglose la mejora.
 ```json
-{ "date": "2026-05-28", "time": "07:30", "name": "Bicicleta fija", "kcal": 307, "minutes": 20, "source": "skill-chat" },
-{ "date": "2026-05-28", "time": "08:05", "name": "Entrenamiento de fuerza", "kcal": 319, "minutes": 35, "source": "skill-chat" }
+{ "date": "2026-05-28", "time": "07:30", "name": "Bicicleta fija", "type": "cardio", "activity": "Bicicleta",
+  "kcal": 307, "minutes": 20, "distanceM": 9800, "avgPowerW": 165, "avgHr": 132, "source": "skill-chat" },
+{ "date": "2026-05-28", "time": "08:05", "name": "Pesas", "type": "strength", "kcal": 319, "minutes": 35,
+  "volumeKg": 8462, "source": "skill-chat",
+  "exercises": [ { "name": "Squat delantera", "muscle": "piernas", "sets": 3, "reps": 13, "weightKg": 25, "volumeKg": 1668, "oneRepMaxKg": 33, "quality": "B" } ] }
 ```
+> ⚠️ `exercises[]` es un array → **solo viaja por el POST del delta** (Paso 4.a), no por la URL `?w=add` (Paso 4.b).
+> Para entrenamientos de fuerza con desglose usa siempre el POST del delta.
 
 **Agua** → push a `water` (campo `ml`). Es **append-only**: el servidor SUMA cada
 registro al agua del día (no dedup), así que registrar dos vasos seguidos suma los dos.
@@ -322,7 +362,7 @@ curl -sL "$BRIDGE_URL?w=add&section=meals&date=2026-05-30&time=20:48\
 - Campos por sección:
   - `meals`: `name,kcal,protein,carbs,fat,fiber,gi,satfat(0/1),mealSlot,time,notes`
   - `weights` (manda TODAS las legibles, no solo estas): `weightKg,bodyFatPct,fatKg,subcutaneousFatKg,muscleKg,skeletalMuscleKg,fatFreeMassKg,ffmi,waterKg,proteinKg,boneKg,visceralFat,bmi,basalMetabolismKcal,waistHipRatio,referenceWeightKg,bodyType,waistCm,hipCm,time` (el POST del delta es mejor que el GET para tantos campos)
-  - `workouts`: `name,kcal,minutes,time` (una llamada por entrenamiento)
+  - `workouts`: cardio → `name,type,activity,kcal,minutes,distanceM,avgPowerW,avgCadenceRpm,avgHr,time`; fuerza → `name,type,kcal,minutes,volumeKg,time`. **El desglose `exercises[]` NO cabe por GET (es un array): para fuerza con desglose usa el POST del delta.** Una llamada por entrenamiento.
   - `water`: `ml` (+ `date`, opcional `time`). **Append-only: cada registro SUMA** al
     agua del día — nunca reemplaza ni se colapsa. Ej. "tomé 500 ml" → `?w=add&section=water&date=2026-06-05&ml=500&source=skill-chat`. El `waterMl` del día sale en la respuesta y en `?totals=`.
 - También puedes mandar el delta entero por GET: `BRIDGE_URL?delta=<json url-encoded>&k=$BRIDGE_TOKEN`.

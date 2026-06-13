@@ -93,6 +93,10 @@ function emojiFor(name, map, fallback) {
 function emojiForFood(name) { return emojiFor(name, FOOD_EMOJIS, '🍽️'); }
 function emojiForExercise(name) { return emojiFor(name, EXERCISE_EMOJIS, '💪'); }
 
+// Campos escalares de un entrenamiento que deben sobrevivir el round-trip por el bridge
+// (igual que WEIGHT_FIELDS para composición). El array `exercises` se trata aparte por ser array.
+const WORKOUT_EXTRA_FIELDS = ['type', 'activity', 'minutes', 'volumeKg', 'distanceM', 'avgPowerW', 'avgCadenceRpm', 'avgHr'];
+
 const WEIGHT_FIELDS = [
   // Principales
   { key: 'weightKg',           label: 'Peso',              unit: 'kg',   step: '0.1', cat: 'main' },
@@ -1991,7 +1995,11 @@ function mergeBridge(state, bridge) {
       importedIds.add(w.id); continue;
     }
     const ex = { id: w.id, ts: w.ts != null ? w.ts : Date.now(), name: w.name || 'Entrenamiento', kcal: num(w.kcal) };
-    if (w.minutes != null) ex.minutes = num(w.minutes);
+    for (const f of WORKOUT_EXTRA_FIELDS) {
+      if (w[f] == null) continue;
+      ex[f] = (f === 'type' || f === 'activity') ? w[f] : num(w[f]);
+    }
+    if (Array.isArray(w.exercises) && w.exercises.length) ex.exercises = w.exercises;
     d.exercise.push(ex);
     importedIds.add(w.id); added.workouts++;
   }
@@ -12682,7 +12690,11 @@ function App() {
       for (const ex of (d.exercise || [])) {
         if (!ex || ex.id == null || imported.has(ex.id) || pushed.has(ex.id)) continue;
         const entry = { name: ex.name, kcal: numv(ex.kcal), date: dk, ts: ex.ts != null ? ex.ts : null, source: 'app' };
-        if (ex.minutes != null) entry.minutes = numv(ex.minutes);
+        for (const f of WORKOUT_EXTRA_FIELDS) {
+          if (ex[f] == null) continue;
+          entry[f] = (f === 'type' || f === 'activity') ? ex[f] : numv(ex[f]);
+        }
+        if (Array.isArray(ex.exercises) && ex.exercises.length) entry.exercises = ex.exercises;
         out.push({ localId: ex.id, section: 'workouts', date: dk, entry });
       }
     }

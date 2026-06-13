@@ -166,6 +166,10 @@ var SECTIONS     = ['meals', 'weights', 'workouts', 'checks', 'water', 'energy']
 // Campos de la sección `energy` que se mergean por fecha (latest gana). Mantener en sync con
 // buildEnergySeries() de app.jsx.
 var ENERGY_MERGE_FIELDS = ['kcalIn', 'trendWeightKg'];
+// Campos de un entrenamiento que se mergean sobre la entrada existente del mismo día (la versión
+// más rica gana): si primero llegó una línea simple (name/kcal) y luego una con desglose, no se
+// pierde el detalle. Mantener en sync con WORKOUT_EXTRA_FIELDS + `exercises` de app.jsx.
+var WORKOUT_MERGE_FIELDS = ['type', 'activity', 'minutes', 'volumeKg', 'distanceM', 'avgPowerW', 'avgCadenceRpm', 'avgHr', 'exercises'];
 var WINDOW_MS    = 5 * 60 * 1000; // ventana de dedup por contenido (meals/workouts)
 // Campos de composición que se mergean sobre la medición del día (no duplica peso).
 // Lista COMPLETA alineada con WEIGHT_FIELDS + STRING_FIELDS + SEGMENT_FIELDS de app.jsx:
@@ -587,8 +591,20 @@ function _contentUnion(bridge, sec, entries, assignId) {
         ENERGY_MERGE_FIELDS.forEach(function (k) {
           if (e[k] != null && e[k] !== '') curE[k] = e[k];
         });
+      } else if (sec === 'workouts') {
+        // Mismo entrenamiento (nombre+fecha en la ventana) → la versión más rica gana, para que
+        // un push posterior con desglose mejore la línea simple ya guardada. `exercises` solo
+        // sobrescribe si el nuevo trae un array no vacío.
+        var curW = bridge[sec][hitIdx];
+        WORKOUT_MERGE_FIELDS.forEach(function (k) {
+          if (k === 'exercises') {
+            if (Array.isArray(e[k]) && e[k].length) curW[k] = e[k];
+          } else if (e[k] != null && e[k] !== '') {
+            curW[k] = e[k];
+          }
+        });
       }
-      return; // dedup: ya existe (o mergeado, en weights/energy)
+      return; // dedup: ya existe (o mergeado, en weights/energy/workouts)
     }
     // Anti-doble-conteo: un check de una sección que ese día YA tiene comida registrada
     // es redundante (el extra es la comida; el check sumaría el plan fijo fantasma). Como
