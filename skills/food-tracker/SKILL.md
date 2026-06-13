@@ -9,9 +9,12 @@ description: >
   músculo), o una captura de entrenamiento (Apple Fitness, Strava, etc.), o diga
   "comí X", "registra esto", "anota esta comida", "cuántas calorías tiene esto",
   "pésame esto", "registra mi peso", "anota este entrenamiento", "registra este
-  ejercicio", "registra X de agua", "tomé X vasos", "anota un vaso de agua",
+  ejercicio", "registra X de agua", "agrega X de agua", "añade X litros/lt",
+  "suma X de agua", "tomé X vasos", "anota un vaso de agua",
   "me tomé una botella/un litro", o cualquier variación de registro de comida,
-  peso, actividad o agua/hidratación.
+  peso, actividad o agua/hidratación. **agregar/añadir/sumar son sinónimos de
+  registrar** (ej. "agrega 1.5lt de agua" = registrar 1500 ml de agua); cualquiera
+  de esos verbos sobre comida/peso/ejercicio/agua DEBE activar la skill.
   También activar con "cómo voy hoy", "cuánto llevo", "resumen del día".
 ---
 
