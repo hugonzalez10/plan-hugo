@@ -939,9 +939,44 @@ function useGistAutoSync(state, setState) {
 
 function parseJsonLoose(text) {
   if (!text) return null;
-  const match = text.match(/\{[\s\S]*\}/);
-  if (!match) return null;
-  try { return JSON.parse(match[0]); } catch { return null; }
+  let s = String(text).trim();
+  // Quitar fences markdown ```json … ```
+  const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence) s = fence[1].trim();
+  const start = s.indexOf('{');
+  if (start < 0) return null;
+  // Intento directo: del primer { al último }
+  const last = s.lastIndexOf('}');
+  if (last > start) {
+    try { return JSON.parse(s.slice(start, last + 1)); } catch {}
+  }
+  // Recorrer balanceando llaves/corchetes (respetando strings); stack guarda los cierres pendientes
+  const stack = [];
+  let inStr = false, esc = false, end = -1;
+  for (let i = start; i < s.length; i++) {
+    const ch = s[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === '\\') esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') inStr = true;
+    else if (ch === '{') stack.push('}');
+    else if (ch === '[') stack.push(']');
+    else if (ch === '}' || ch === ']') { stack.pop(); if (stack.length === 0) { end = i; break; } }
+  }
+  if (end >= 0) {
+    try { return JSON.parse(s.slice(start, end + 1)); } catch {}
+  }
+  // Respuesta truncada: cerrar lo que quedó abierto, en orden inverso del stack (mejor esfuerzo)
+  let frag = s.slice(start);
+  if (inStr) frag += '"';
+  frag = frag.replace(/,\s*$/, '');
+  for (let i = stack.length - 1; i >= 0; i--) frag += stack[i];
+  try { return JSON.parse(frag); } catch {}
+  if (typeof console !== 'undefined') console.warn('[parseJsonLoose] no se pudo parsear:', s.slice(0, 500));
+  return null;
 }
 
 let _zxingPromise = null;
@@ -7321,7 +7356,7 @@ Reglas:
 - 2 a 4 items en "mejorar", los más importantes.
 - Si no hay desglose por ejercicio en el historial, dilo en desbalances/progresion y baja la confidence.
 - No inventes datos.`;
-      const text = await askClaude(prompt, apiKey, 1800);
+      const text = await askClaude(prompt, apiKey, 3200);
       const parsed = parseJsonLoose(text);
       if (!parsed?.resumen && !parsed?.mejorar) { setError('No se pudo parsear la respuesta.'); return; }
       setResponse(parsed);
