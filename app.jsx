@@ -1681,6 +1681,10 @@ function loadState() {
 // Escritura verificada con backup rotatorio.
 // Antes de pisar la copia buena, la respalda; tras escribir, relee y verifica.
 // Devuelve 'ok' | 'failed' en vez de tragarse el error en silencio.
+// JSON del último estado que ESTA pestaña escribió en localStorage. Lo usa el guard
+// multi-pestaña (useStorageSync) para distinguir su propio eco de un cambio externo.
+let lastSavedJson = null;
+
 function saveState(state) {
   let json;
   try { json = JSON.stringify(state); }
@@ -1702,6 +1706,7 @@ function saveState(state) {
     localStorage.setItem(STORAGE_KEY, json);
     // Verificación: releer y confirmar que quedó completo.
     if (localStorage.getItem(STORAGE_KEY) !== json) throw new Error('verificación de escritura falló');
+    lastSavedJson = json; // para el guard multi-pestaña: ignorar nuestro propio eco
     return 'ok';
   } catch (e) {
     console.warn('No se pudo guardar localStorage', e);
@@ -3269,6 +3274,26 @@ function usePersistentState() {
     const result = saveState(state);
     setSaveError(result === 'ok' ? null : 'No se pudo guardar en este dispositivo — probablemente falta espacio. Libera datos del sitio o exporta un respaldo antes de seguir.');
   }, [state]);
+
+  // Guard multi-pestaña: si OTRA pestaña del mismo origen reescribe el estado en localStorage
+  // (el evento 'storage' solo dispara en las OTRAS pestañas, no en la que escribió), esta
+  // pestaña ADOPTA ese estado en vez de pisarlo más tarde con su copia en memoria, que puede
+  // ser más vieja. Antes, dos pestañas abiertas se pisaban mutuamente y se perdían cambios
+  // (p.ej. el desglose de un entrenamiento recién cargado). Una pestaña inactiva no tiene
+  // ediciones sin guardar (el save corre en cada cambio), así que adoptar siempre es seguro.
+  useEffect(() => {
+    const onStorage = (e) => {
+      if (e.key !== STORAGE_KEY || e.newValue == null) return;
+      if (e.newValue === lastSavedJson) return; // es nuestro propio eco
+      let remote;
+      try { remote = JSON.parse(e.newValue); } catch { return; }
+      if (!remote || typeof remote !== 'object' || !remote.days) return;
+      lastSavedJson = e.newValue; // evita que el save effect lo reescriba y dispare un ida-y-vuelta
+      setState(remote);
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
 
   // Rescate desde el espejo IndexedDB: si arrancamos sin datos locales (Safari pudo purgar el
   // localStorage) pero IndexedDB conserva el estado, rehidratamos. Solo al montar; no pisa si el

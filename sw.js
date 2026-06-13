@@ -4,7 +4,7 @@
  * NO interceptamos llamadas a api.anthropic.com.
  */
 
-const CACHE_NAME = 'plan-hugo-v32-cardio';
+const CACHE_NAME = 'plan-hugo-v33-guard-multipestana';
 const CORE_URLS = [
   './index.html',
   './app.js',
