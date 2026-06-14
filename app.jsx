@@ -2208,9 +2208,13 @@ function computeDayTotals(day, snackBank, proteinBank, targets, dessertBank, cus
   const planFiber = sumField(planEaten, 'fiber');
 
   return {
-    kcal: kcalNet, kcalIn, kcalBurned, kcalNet,
+    // `kcal` es la cifra que toda la app muestra y compara contra la meta: BRUTO (lo comido),
+    // NO neto. El TDEE adaptativo ya incorpora la actividad (se calibra desde kcalIn vs peso),
+    // así que restar el ejercicio aquí lo contaría dos veces e inflaría el déficit. El ejercicio
+    // (kcalBurned) se muestra aparte como dato informativo. kcalNet queda disponible por compat.
+    kcal: kcalIn, kcalIn, kcalBurned, kcalNet,
     planIn, planProtein, planCarbs, planFat, planFiber,
-    kcalRemaining: T.kcalMax - kcalNet,
+    kcalRemaining: T.kcalMax - kcalIn,
     protein, proteinRemaining: T.proteinMin - protein,
     carbs, carbsRemaining: T.carbsTarget - carbs,
     fat, fatRemaining: T.fatTarget - fat,
@@ -3090,7 +3094,7 @@ function computeTrendAnalysis(weights, days, snackBank, proteinBank, targets, de
     const day = days[k];
     if (!day) continue;
     const totals = computeDayTotals(day, snackBank, proteinBank, targets, dessertBank, customAntojoItems);
-    if (totals.eatenAny) { kcalSum += totals.kcalNet; daysCount++; }
+    if (totals.eatenAny) { kcalSum += totals.kcalIn; daysCount++; }
   }
 
   const promedioKcal = daysCount > 0 ? Math.round(kcalSum / daysCount) : null;
@@ -3486,8 +3490,8 @@ function BentoTodayHero({ totals, targets, streak, onStreakClick, weightSeries, 
             </div>
             {kcalBurned > 0 && (
               <div>
-                <div className="bento-label">Quemado</div>
-                <div className="text-2xl font-bold" style={{ letterSpacing: '-0.02em', fontVariantNumeric: 'tabular-nums', color: 'var(--bento-pos)' }}>−{kcalBurned} <span className="text-xs font-normal" style={{ color: 'var(--bento-faint)' }}>kcal</span></div>
+                <div className="bento-label">Quemado · informativo</div>
+                <div className="text-2xl font-bold" style={{ letterSpacing: '-0.02em', fontVariantNumeric: 'tabular-nums', color: 'var(--bento-pos)' }}>{kcalBurned} <span className="text-xs font-normal" style={{ color: 'var(--bento-faint)' }}>kcal</span></div>
               </div>
             )}
           </div>
@@ -4966,7 +4970,7 @@ ESTADO AHORA:
 - Grasas: ${Math.round(totals.fat)} / ${T.fatTarget} g
 - Fibra: ${Math.round(totals.fiber)} / ${T.fiberTarget} g
 - Agua: ${totals.waterMl} / ${T.waterTarget} ml
-- Ejercicio quemado hoy: ${Math.round(totals.kcalBurned)} kcal
+- Ejercicio quemado hoy: ${Math.round(totals.kcalBurned)} kcal (SOLO informativo — NO lo restes de las calorías; el TDEE y la meta ya incorporan la actividad)
 - Comidas sin marcar todavía: ${slotsPendientes.length ? slotsPendientes.join(', ') : 'ninguna'}
 
 Devuelve SOLO JSON, sin markdown, así:
@@ -6807,64 +6811,104 @@ function WeekView({ state, setState, onSelectDay, targets }) {
   const avgKcal = completedRows.length ? Math.round(completedRows.reduce((s, r) => s + r.totals.kcal, 0) / completedRows.length) : 0;
   const avgProtein = completedRows.length ? Math.round(completedRows.reduce((s, r) => s + r.totals.protein, 0) / completedRows.length) : 0;
 
+  // Δ peso de la semana (primer vs último registro dentro de la semana)
+  const weekWeights = (state.weights || []).filter((w) => weekKeys.includes(w.date) && w.weightKg != null).slice().sort((a, b) => (a.date < b.date ? -1 : 1));
+  const deltaKg = weekWeights.length >= 2 ? +(weekWeights[weekWeights.length - 1].weightKg - weekWeights[0].weightKg).toFixed(1) : null;
+  const daysMet = completedRows.filter((r) => colorForKcal(r.totals.kcal, targets) === 'green' && colorForProtein(r.totals.protein, targets) !== 'red').length;
+  const maxKcal = Math.max(1, ...rows.map((r) => r.totals.kcal));
+
   return (
     <div className="px-4 py-4 space-y-4">
       <div className="px-1">
         <h1 className="text-2xl font-bold tracking-tight">Esta semana</h1>
-        <p className="text-sm text-gray-500 dark:text-gray-400">Lunes a sábado</p>
+        <p className="text-sm" style={{ color: 'var(--bento-faint)' }}>Lunes a sábado</p>
       </div>
-      <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 overflow-hidden">
+
+      {/* Resumen · 4 métricas */}
+      <div className="bento-card">
+        <div className="bento-label" style={{ marginBottom: 14 }}>Resumen</div>
+        <div className="grid grid-cols-4 gap-2">
+          <div>
+            <div className="bento-label">Δ Peso</div>
+            <div className="bento-num" style={{ fontSize: 23, marginTop: 4, color: deltaKg == null ? 'var(--bento-ink)' : deltaKg <= 0 ? 'var(--bento-pos)' : 'var(--bento-warm)' }}>{deltaKg == null ? '—' : (deltaKg > 0 ? '+' : '') + deltaKg}</div>
+            <div style={{ fontSize: 10, color: 'var(--bento-faint)' }}>kg</div>
+          </div>
+          <div>
+            <div className="bento-label">Kcal/día</div>
+            <div className="bento-num" style={{ fontSize: 23, marginTop: 4 }}>{avgKcal || '—'}</div>
+            <div style={{ fontSize: 10, color: 'var(--bento-faint)' }}>prom</div>
+          </div>
+          <div>
+            <div className="bento-label">En meta</div>
+            <div className="bento-num" style={{ fontSize: 23, marginTop: 4 }}>{daysMet}<span style={{ fontSize: 12, fontWeight: 400, color: 'var(--bento-faint)' }}>/{completedRows.length}</span></div>
+            <div style={{ fontSize: 10, color: 'var(--bento-faint)' }}>días</div>
+          </div>
+          <div>
+            <div className="bento-label">Proteína</div>
+            <div className="bento-num" style={{ fontSize: 23, marginTop: 4 }}>{avgProtein || '—'}</div>
+            <div style={{ fontSize: 10, color: 'var(--bento-faint)' }}>g/día</div>
+          </div>
+        </div>
+      </div>
+
+      {/* Calorías por día */}
+      <div className="bento-card">
+        <div className="bento-label" style={{ marginBottom: 16 }}>Calorías por día · meta {targets.kcalMax}</div>
+        <div className="flex items-end gap-2" style={{ height: 130 }}>
+          {rows.map((r) => {
+            const has = r.totals.hasSnack && r.totals.hasDinner;
+            const col = !has ? 'var(--bento-surface)' : colorForKcal(r.totals.kcal, targets) === 'green' ? 'var(--bento-ink)' : 'var(--bento-warm)';
+            const h = has ? Math.max(6, (r.totals.kcal / maxKcal) * 96) : 6;
+            return (
+              <div key={r.key} className="flex-1 flex flex-col items-center gap-1.5">
+                <div className="bento-mono" style={{ fontSize: 9, color: 'var(--bento-faint)' }}>{has ? Math.round(r.totals.kcal) : ''}</div>
+                <div style={{ width: '100%', maxWidth: 44, height: `${h}px`, background: col, borderRadius: 4 }} title={`${r.label}: ${Math.round(r.totals.kcal)} kcal`} />
+                <div style={{ fontSize: 11, color: 'var(--bento-muted)' }}>{r.label}</div>
+              </div>
+            );
+          })}
+        </div>
+        <div className="flex gap-4" style={{ marginTop: 14, fontSize: 11, color: 'var(--bento-muted)' }}>
+          <span className="inline-flex items-center gap-1.5"><span style={{ width: 9, height: 9, borderRadius: 2, background: 'var(--bento-ink)' }} /> En meta</span>
+          <span className="inline-flex items-center gap-1.5"><span style={{ width: 9, height: 9, borderRadius: 2, background: 'var(--bento-warm)' }} /> Sobre meta</span>
+        </div>
+      </div>
+
+      {/* Lista de días (tap para abrir) */}
+      <div className="bento-card" style={{ padding: 0, overflow: 'hidden' }}>
         {rows.map((r, i) => {
           const kcalColor = r.totals.hasSnack && r.totals.hasDinner ? colorForKcal(r.totals.kcal, targets) : null;
           const proteinColor = r.totals.hasSnack && r.totals.hasDinner ? colorForProtein(r.totals.protein, targets) : null;
           const worst = kcalColor === 'red' || proteinColor === 'red' ? 'red'
             : kcalColor === 'amber' || proteinColor === 'amber' ? 'amber'
             : kcalColor ? 'green' : null;
+          const worstColor = worst === 'red' ? 'var(--bento-warm)' : worst === 'amber' ? 'var(--bento-yellow)' : worst === 'green' ? 'var(--bento-pos)' : null;
           return (
             <button key={r.key} onClick={() => onSelectDay && onSelectDay(r.key)}
-              className={`w-full text-left flex items-center gap-3 px-4 py-3 active:bg-gray-100 dark:active:bg-gray-800 ${i !== rows.length - 1 ? 'border-b border-gray-200 dark:border-gray-800' : ''} ${r.isToday ? 'bg-gray-50 dark:bg-gray-800/40' : ''}`}>
+              className="w-full text-left flex items-center gap-3 px-4 py-3"
+              style={{ borderTop: i ? '1px solid var(--bento-hairline)' : 'none', background: r.isToday ? 'var(--bento-surface)' : 'transparent' }}>
               <div className="w-14 shrink-0">
-                <div className={`font-semibold text-sm ${r.isToday ? 'text-emerald-600 dark:text-emerald-400' : ''}`}>{r.label}</div>
-                <div className="text-xs text-gray-500 dark:text-gray-400">{r.dateStr}</div>
+                <div className="font-semibold text-sm" style={r.isToday ? { color: 'var(--bento-pos)' } : undefined}>{r.label}</div>
+                <div style={{ fontSize: 12, color: 'var(--bento-faint)' }}>{r.dateStr}</div>
               </div>
-              <div className="flex-1 min-w-0 text-xs text-gray-600 dark:text-gray-400 truncate">
+              <div className="flex-1 min-w-0 truncate" style={{ fontSize: 12, color: 'var(--bento-muted)' }}>
                 {r.totals.snackLabel ? r.totals.snackLabel : <span className="italic">— sin colación</span>}
                 <br />
                 {r.totals.dinnerLabel ? r.totals.dinnerLabel : <span className="italic">— sin cena</span>}
               </div>
               <div className="text-right shrink-0">
-                <div className="text-sm font-semibold">{Math.round(r.totals.kcal)} kcal</div>
-                <div className="text-xs text-gray-500 dark:text-gray-400">{Math.round(r.totals.protein)}g prot</div>
+                <div className="bento-num text-sm">{Math.round(r.totals.kcal)} kcal</div>
+                <div style={{ fontSize: 12, color: 'var(--bento-faint)' }}>{Math.round(r.totals.protein)}g prot</div>
               </div>
               <div className="w-3 shrink-0 flex justify-end">
-                {worst && <div className={`w-2.5 h-2.5 rounded-full ${COLOR_CLASSES[worst].dot}`} />}
+                {worstColor && <div style={{ width: 10, height: 10, borderRadius: 99, background: worstColor }} />}
               </div>
             </button>
           );
         })}
       </div>
-      <WeeklyAnalysisCard state={state} setState={setState} weekKey={weekKey} rows={rows} targets={targets} />
 
-      <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4">
-        <h3 className="text-sm font-semibold mb-2">Promedio semanal</h3>
-        {completedRows.length === 0 ? (
-          <p className="text-sm text-gray-500 dark:text-gray-400">Aún no hay días completos esta semana.</p>
-        ) : (
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <div className="text-xs text-gray-500 dark:text-gray-400">Calorías</div>
-              <div className={`text-xl font-bold ${COLOR_CLASSES[colorForKcal(avgKcal, targets)].text}`}>{avgKcal} kcal</div>
-            </div>
-            <div>
-              <div className="text-xs text-gray-500 dark:text-gray-400">Proteína</div>
-              <div className={`text-xl font-bold ${COLOR_CLASSES[colorForProtein(avgProtein, targets)].text}`}>{avgProtein}g</div>
-            </div>
-          </div>
-        )}
-        <p className="text-xs text-gray-500 dark:text-gray-400 mt-2">
-          Basado en {completedRows.length} día{completedRows.length === 1 ? '' : 's'} con colación y cena.
-        </p>
-      </div>
+      <WeeklyAnalysisCard state={state} setState={setState} weekKey={weekKey} rows={rows} targets={targets} />
     </div>
   );
 }
@@ -6923,7 +6967,7 @@ function InsightsView({ state, setState, targets }) {
 METAS:
 - kcal: ${T.kcalMin}-${T.kcalMax} · proteína ≥ ${T.proteinMin}g · agua ${T.waterTarget} ml
 
-DATOS (28 días, dow 0=domingo, 6=sábado):
+DATOS (28 días, dow 0=domingo, 6=sábado). "kcal" = comida consumida (BRUTA), ya comparable contra la meta; "ejercicio_kcal" es solo contexto — NO lo restes de "kcal" (el TDEE y la meta ya incorporan la actividad):
 ${JSON.stringify(series, null, 2)}
 
 Devuelve SOLO JSON, sin markdown:
@@ -6967,60 +7011,70 @@ Reglas:
   };
 
   const confidenceColor = response?.confidence === 'alta' ? 'green' : response?.confidence === 'media' ? 'amber' : 'red';
+  const insightTones = ['var(--bento-warm)', 'var(--bento-pos)', 'var(--bento-blue)', 'var(--bento-yellow)', 'var(--bento-lilac)'];
 
   return (
     <div className="px-4 py-4 space-y-4">
       <div className="px-1">
         <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2"><span>🧠</span>Insights</h1>
-        <p className="text-sm text-gray-500 dark:text-gray-400">Patrones de las últimas 4 semanas</p>
+        <p className="text-sm" style={{ color: 'var(--bento-faint)' }}>Patrones de las últimas 4 semanas</p>
       </div>
 
-      <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-3">
-        <div className="flex items-center justify-between text-sm">
-          <span className="text-gray-600 dark:text-gray-400">Días con registro:</span>
-          <span className="font-semibold">{recordedCount} / 28</span>
+      {/* 3 stats */}
+      <div className="grid grid-cols-3 gap-2.5">
+        <div className="bento-card" style={{ padding: '14px' }}>
+          <div className="bento-label">Registro</div>
+          <div className="bento-num" style={{ fontSize: 26, marginTop: 4 }}>{recordedCount}<span style={{ fontSize: 12, fontWeight: 400, color: 'var(--bento-faint)' }}>/28</span></div>
+          <div style={{ fontSize: 11, color: 'var(--bento-faint)', marginTop: 3 }}>{Math.round(recordedCount / 28 * 100)}% cobertura</div>
         </div>
+        <div className="bento-card" style={{ padding: '14px' }}>
+          <div className="bento-label">Patrones</div>
+          <div className="bento-num" style={{ fontSize: 26, marginTop: 4 }}>{response?.insights?.length ?? '—'}</div>
+          <div style={{ fontSize: 11, color: 'var(--bento-faint)', marginTop: 3 }}>por Claude</div>
+        </div>
+        <div className="bento-card" style={{ padding: '14px' }}>
+          <div className="bento-label">Confianza</div>
+          <div className="bento-num" style={{ fontSize: 22, marginTop: 6 }}>{response?.confidence ? response.confidence.charAt(0).toUpperCase() + response.confidence.slice(1) : '—'}</div>
+          <div style={{ fontSize: 11, color: 'var(--bento-faint)', marginTop: 3 }}>{response ? 'del análisis' : 'sin análisis'}</div>
+        </div>
+      </div>
+
+      {/* Generar */}
+      <div className="bento-card space-y-3">
         {!apiKey && (
-          <p className="text-xs text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/30 p-2 rounded-lg">
-            ⚠️ Configura tu API key en ⚙️ Ajustes primero.
-          </p>
+          <p className="text-xs p-2 rounded-lg" style={{ color: 'var(--bento-warm)', background: 'rgba(205,122,85,0.10)' }}>⚠️ Configura tu API key en ⚙️ Ajustes primero.</p>
         )}
         <button onClick={generate} disabled={loading || !apiKey || recordedCount < 7}
-          className="w-full py-2.5 rounded-xl bg-emerald-500 text-white font-semibold hover:bg-emerald-600 disabled:bg-gray-300 dark:disabled:bg-gray-700 disabled:text-gray-500">
+          className="w-full py-2.5 rounded-xl font-semibold"
+          style={loading || !apiKey || recordedCount < 7 ? { background: 'var(--bento-surface)', color: 'var(--bento-faint)' } : { background: 'var(--bento-ink)', color: 'var(--bento-on-ink)' }}>
           {loading ? 'Buscando patrones…' : (response ? (isStale || cacheOlderThan7Days ? 'Actualizar análisis' : 'Regenerar') : 'Detectar patrones con Claude ✨')}
         </button>
-        {error && <p className="text-xs text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-900/30 p-2 rounded-lg">{error}</p>}
+        {recordedCount < 7 && <p style={{ fontSize: 11, color: 'var(--bento-faint)' }}>Necesitas al menos 7 días con registro ({recordedCount} hasta ahora).</p>}
+        {error && <p className="text-xs p-2 rounded-lg" style={{ color: 'var(--bento-warm)', background: 'rgba(205,122,85,0.10)' }}>{error}</p>}
       </div>
 
       {response && (
         <>
-          <div className={`flex items-center gap-2 px-3 py-2 rounded-xl ${COLOR_CLASSES[confidenceColor].bg}`}>
-            <span className="text-base">{response.confidence === 'alta' ? '✅' : response.confidence === 'media' ? 'ℹ️' : '⚠️'}</span>
-            <span className={`text-xs ${COLOR_CLASSES[confidenceColor].text}`}>
-              Confianza {response.confidence}{isStale && ' · datos cambiaron'}
-            </span>
-          </div>
+          {response.confidence && (
+            <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full" style={{ background: 'var(--bento-surface)' }}>
+              <span style={{ width: 8, height: 8, borderRadius: 99, background: confidenceColor === 'green' ? 'var(--bento-pos)' : confidenceColor === 'amber' ? 'var(--bento-yellow)' : 'var(--bento-warm)' }} />
+              <span style={{ fontSize: 11, color: 'var(--bento-muted)' }}>Confianza {response.confidence}{isStale && ' · datos cambiaron'}</span>
+            </div>
+          )}
 
           {response.insights.map((ins, i) => (
-            <div key={i} className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-2">
-              <h3 className="text-sm font-bold">{ins.title}</h3>
-              {ins.evidence && (
-                <p className="text-xs text-gray-600 dark:text-gray-400">
-                  <span className="font-semibold uppercase tracking-wide text-[10px] text-gray-500 dark:text-gray-500">Evidencia</span>
-                  <br />
-                  {ins.evidence}
-                </p>
-              )}
-              {ins.suggestion && (
-                <p className="text-xs text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-900/20 p-2 rounded-lg">
-                  💡 {ins.suggestion}
-                </p>
-              )}
+            <div key={i} className="bento-card space-y-2.5">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <span style={{ width: 9, height: 9, borderRadius: 99, background: insightTones[i % insightTones.length], flexShrink: 0 }} />
+                <span style={{ fontSize: 15, fontWeight: 600, letterSpacing: '-0.01em' }}>{ins.title}</span>
+              </div>
+              {ins.evidence && <p style={{ fontSize: 13, color: 'var(--bento-muted)', lineHeight: 1.5, paddingLeft: 19 }}>{ins.evidence}</p>}
+              {ins.suggestion && <p style={{ fontSize: 12.5, lineHeight: 1.5, padding: '10px 12px', background: 'var(--bento-surface)', borderRadius: 8, marginLeft: 19 }}>💡 {ins.suggestion}</p>}
             </div>
           ))}
 
           {cached?.generatedAt && (
-            <p className="text-[10px] text-gray-500 dark:text-gray-400 text-center">
+            <p className="text-center" style={{ fontSize: 10, color: 'var(--bento-faint)' }}>
               Generado {new Date(cached.generatedAt).toLocaleString('es-CL', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
             </p>
           )}
@@ -7268,126 +7322,167 @@ Reglas:
   const maxWeekSessions = Math.max(1, ...stats.weekBuckets.map((w) => w.sessions));
   const maxMuscle = Math.max(1, ...stats.muscleVolume.map((m) => m.sets));
   const confColor = response?.confidence === 'alta' ? 'green' : response?.confidence === 'media' ? 'amber' : 'red';
+  // Color por grupo muscular (variante B): piernas→ink, espalda→blue, pecho/brazos→warm,
+  // core→yellow, movilidad→lilac, glúteos/hombros→pos. Las claves vienen en minúscula.
+  const muscleColorVar = (m) => {
+    const k = (m || '').toLowerCase();
+    if (k.includes('pierna') || k.includes('cuad') || k.includes('cuád')) return 'var(--bento-ink)';
+    if (k.includes('espalda') || k.includes('dorsal')) return 'var(--bento-blue)';
+    if (k.includes('pecho') || k.includes('brazo') || k.includes('bicep') || k.includes('bícep') || k.includes('tricep') || k.includes('trícep')) return 'var(--bento-warm)';
+    if (k.includes('core') || k.includes('abdom')) return 'var(--bento-yellow)';
+    if (k.includes('movil')) return 'var(--bento-lilac)';
+    if (k.includes('glute') || k.includes('glúte') || k.includes('hombro')) return 'var(--bento-pos)';
+    return 'var(--bento-blue)';
+  };
 
   return (
     <div className="px-4 py-4 space-y-4">
       <div className="px-1">
         <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2"><span>🏋️</span>Ejercicios</h1>
-        <p className="text-sm text-gray-500 dark:text-gray-400">Tus rutinas, consistencia y evaluación crítica</p>
+        <p className="text-sm" style={{ color: 'var(--bento-faint)' }}>Tus rutinas, consistencia y evaluación crítica</p>
       </div>
 
       <button onClick={() => setCapturing(true)}
-        className="w-full py-3 rounded-2xl bg-emerald-500 text-white font-semibold text-sm hover:bg-emerald-600 flex items-center justify-center gap-2 shadow-sm">
+        className="w-full py-3.5 rounded-2xl font-semibold text-sm flex items-center justify-center gap-2"
+        style={{ background: 'var(--bento-ink)', color: 'var(--bento-on-ink)' }}>
         <span className="text-base">📸</span><span>Subir captura de entrenamiento</span>
       </button>
 
       {stats.totalSessions === 0 ? (
-        <div className="rounded-2xl border-2 border-dashed border-gray-200 dark:border-gray-800 p-6 text-center text-sm text-gray-500 dark:text-gray-400">
+        <div className="bento-card text-center text-sm" style={{ borderStyle: 'dashed', color: 'var(--bento-muted)' }}>
           Aún no hay entrenamientos registrados. Sube una captura cada día que entrenes y acá verás tu consistencia y una evaluación crítica de tu rutina.
         </div>
       ) : (
         <>
-          {/* KPIs */}
-          <div className="grid grid-cols-2 gap-2">
-            <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-3">
-              <div className="text-2xl font-bold">{stats.freqPerWeek.toFixed(1)}<span className="text-xs font-normal text-gray-500 dark:text-gray-400"> /sem</span></div>
-              <div className="text-[11px] text-gray-500 dark:text-gray-400">
+          {/* Hero · 4 stats */}
+          <div className="bento-grid4">
+            <div className="bento-card" style={{ padding: '16px 18px' }}>
+              <div className="bento-label">Frecuencia</div>
+              <div className="bento-num" style={{ fontSize: 32, marginTop: 4 }}>
+                {stats.freqPerWeek.toFixed(1)}<span style={{ fontSize: 13, fontWeight: 400, color: 'var(--bento-faint)' }}> /sem</span>
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--bento-faint)', marginTop: 4 }}>
                 {stats.cardioSessions > 0
-                  ? `🏋️ ${stats.freqStrengthPerWeek.toFixed(1)} + 🚴 ${stats.freqCardioPerWeek.toFixed(1)} /sem`
-                  : `Frecuencia (${stats.weeks} sem)`}
+                  ? `🏋️ ${stats.freqStrengthPerWeek.toFixed(1)} · 🚴 ${stats.freqCardioPerWeek.toFixed(1)} /sem`
+                  : `últimas ${stats.weeks} sem`}
               </div>
             </div>
-            <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-3">
-              <div className="text-2xl font-bold">{stats.sessionsThisMonth}</div>
-              <div className="text-[11px] text-gray-500 dark:text-gray-400">Sesiones este mes</div>
+            <div className="bento-card" style={{ padding: '16px 18px' }}>
+              <div className="bento-label">Este mes</div>
+              <div className="bento-num" style={{ fontSize: 32, marginTop: 4 }}>{stats.sessionsThisMonth}</div>
+              <div style={{ fontSize: 11, color: 'var(--bento-faint)', marginTop: 4 }}>sesiones</div>
             </div>
-            <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-3">
-              <div className="text-2xl font-bold">{stats.daysSinceLast === 0 ? 'Hoy' : stats.daysSinceLast != null ? `${stats.daysSinceLast}d` : '—'}</div>
-              <div className="text-[11px] text-gray-500 dark:text-gray-400">Desde la última</div>
+            <div className="bento-card" style={{ padding: '16px 18px' }}>
+              <div className="bento-label">Totales</div>
+              <div className="bento-num" style={{ fontSize: 32, marginTop: 4 }}>{stats.totalSessions}</div>
+              <div style={{ fontSize: 11, color: 'var(--bento-faint)', marginTop: 4 }}>sesiones registradas</div>
             </div>
-            <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-3">
-              <div className="text-2xl font-bold">{stats.totalSessions}</div>
-              <div className="text-[11px] text-gray-500 dark:text-gray-400">Sesiones totales</div>
-            </div>
-          </div>
-
-          {/* Días entrenados (últimos 28) */}
-          <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-2">
-            <div className="text-xs font-semibold text-gray-600 dark:text-gray-400">Días entrenados · últimas 4 semanas</div>
-            <div className="flex flex-wrap gap-1">
-              {last28.map((d) => (
-                <div key={d.date} title={d.date}
-                  className={`w-5 h-5 rounded ${d.trained ? 'bg-emerald-500' : 'bg-gray-100 dark:bg-gray-800'} ${(d.dow === 0 || d.dow === 6) && !d.trained ? 'ring-1 ring-gray-200 dark:ring-gray-700' : ''}`} />
-              ))}
+            <div className="bento-card" style={{ padding: '16px 18px' }}>
+              <div className="bento-label">Última</div>
+              <div className="bento-num" style={{ fontSize: 32, marginTop: 4 }}>{stats.daysSinceLast === 0 ? 'Hoy' : stats.daysSinceLast != null ? `${stats.daysSinceLast}d` : '—'}</div>
+              <div style={{ fontSize: 11, color: 'var(--bento-faint)', marginTop: 4 }}>desde la última</div>
             </div>
           </div>
 
-          {/* Tendencia semanal (sesiones) */}
-          <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-2">
-            <div className="text-xs font-semibold text-gray-600 dark:text-gray-400">Sesiones por semana</div>
-            <div className="flex items-end gap-1.5 h-20">
-              {stats.weekBuckets.map((w, i) => (
-                <div key={i} className="flex-1 flex flex-col items-center gap-1">
-                  <div className="w-full bg-emerald-500/80 rounded-t" style={{ height: `${Math.max(4, (w.sessions / maxWeekSessions) * 64)}px` }} title={`${w.sessions} sesiones`} />
-                  <div className="text-[9px] text-gray-400 dark:text-gray-500">{w.label}</div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Volumen por grupo muscular */}
-          {stats.muscleVolume.length > 0 && (
-            <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-2">
-              <div className="text-xs font-semibold text-gray-600 dark:text-gray-400">Volumen por grupo muscular · series ({stats.weeks} sem)</div>
-              {stats.muscleVolume.map((m) => (
-                <div key={m.muscle} className="flex items-center gap-2">
-                  <div className="w-20 text-xs capitalize shrink-0">{m.muscle}</div>
-                  <div className="flex-1 h-4 rounded bg-gray-100 dark:bg-gray-800 overflow-hidden">
-                    <div className="h-full bg-sky-500/80 rounded" style={{ width: `${(m.sets / maxMuscle) * 100}%` }} />
+          {/* Sesiones por semana · Días entrenados */}
+          <div className="bento-grid2 is-a items-start">
+            <div className="bento-card">
+              <div className="bento-label" style={{ marginBottom: 16 }}>Sesiones por semana</div>
+              <div className="flex items-end gap-2.5" style={{ height: 104 }}>
+                {stats.weekBuckets.map((w, i) => (
+                  <div key={i} className="flex-1 flex flex-col items-center gap-1.5">
+                    <div className="bento-num" style={{ fontSize: 11, color: 'var(--bento-faint)' }}>{w.sessions}</div>
+                    <div style={{ width: '100%', maxWidth: 54, height: `${Math.max(4, (w.sessions / maxWeekSessions) * 72)}px`, background: 'var(--bento-ink)', borderRadius: 4 }} title={`${w.sessions} sesiones`} />
+                    <div className="bento-mono" style={{ fontSize: 9, color: 'var(--bento-faint)' }}>{w.label}</div>
                   </div>
-                  <div className="w-8 text-right text-xs font-semibold">{m.sets}</div>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {/* Top ejercicios */}
-          {stats.topExercises.length > 0 && (
-            <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-2">
-              <div className="text-xs font-semibold text-gray-600 dark:text-gray-400">Ejercicios más frecuentes</div>
-              <div className="flex flex-wrap gap-1.5">
-                {stats.topExercises.map((e) => (
-                  <span key={e.name} className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-[11px] bg-gray-100 dark:bg-gray-800">
-                    {emojiForExercise(e.name)} {e.name} <span className="text-gray-400">×{e.count}</span>
-                  </span>
                 ))}
               </div>
+            </div>
+            <div className="bento-card">
+              <div className="bento-label" style={{ marginBottom: 14 }}>Días entrenados · últimas 4 semanas</div>
+              <div className="flex flex-wrap gap-1.5">
+                {last28.map((d) => (
+                  <div key={d.date} title={d.date} style={{ width: 18, height: 18, borderRadius: 4, background: d.trained ? 'var(--bento-ink)' : 'var(--bento-surface)' }} />
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Volumen por grupo · Ejercicios frecuentes */}
+          {(stats.muscleVolume.length > 0 || stats.topExercises.length > 0) && (
+            <div className={`items-start ${stats.muscleVolume.length > 0 && stats.topExercises.length > 0 ? 'bento-grid2 is-b' : 'bento-grid2'}`}>
+              {stats.muscleVolume.length > 0 && (
+                <div className="bento-card">
+                  <div className="bento-label" style={{ marginBottom: 16 }}>Volumen por grupo muscular · series ({stats.weeks} sem)</div>
+                  <div className="flex flex-col gap-3">
+                    {stats.muscleVolume.map((m) => (
+                      <div key={m.muscle} className="grid items-center gap-3" style={{ gridTemplateColumns: '84px 1fr 40px' }}>
+                        <div className="capitalize" style={{ fontSize: 12, color: 'var(--bento-muted)' }}>{m.muscle}</div>
+                        <div style={{ height: 6, borderRadius: 99, background: 'var(--bento-surface)', overflow: 'hidden' }}>
+                          <div style={{ height: '100%', borderRadius: 99, width: `${(m.sets / maxMuscle) * 100}%`, background: muscleColorVar(m.muscle) }} />
+                        </div>
+                        <div className="bento-mono" style={{ fontSize: 12, textAlign: 'right', fontWeight: 600 }}>{m.sets}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {stats.topExercises.length > 0 && (
+                <div className="bento-card">
+                  <div className="bento-label" style={{ marginBottom: 14 }}>Ejercicios más frecuentes</div>
+                  <div className="flex flex-wrap gap-2">
+                    {stats.topExercises.map((e) => (
+                      <span key={e.name} className="inline-flex items-center gap-1.5" style={{ padding: '6px 10px', borderRadius: 8, background: 'var(--bento-surface)', fontSize: 12 }}>
+                        {emojiForExercise(e.name)} {e.name} <span className="bento-mono" style={{ color: 'var(--bento-faint)' }}>×{e.count}</span>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
           {stats.detailSessions === 0 && (
-            <p className="text-[11px] text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/30 p-2 rounded-lg">
+            <p className="text-[11px] p-2 rounded-lg" style={{ color: 'var(--bento-warm)', background: 'rgba(205,122,85,0.10)' }}>
               💡 Ninguna captura trae el desglose por ejercicio todavía. Sube capturas que listen los movimientos (series/reps/peso) para desbloquear el análisis de desbalances y progresión.
             </p>
           )}
 
-          {/* Récords (PRs) */}
+          {/* Récords (PRs) · grilla 2 columnas */}
           {stats.byExercise.length > 0 && (
-            <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-2">
-              <div className="text-xs font-semibold text-gray-600 dark:text-gray-400">🏆 Récords por ejercicio</div>
-              {stats.byExercise.slice(0, 6).map((x) => (
-                <div key={x.name} className="flex items-center justify-between gap-2 text-xs">
-                  <span className="flex items-center gap-1 min-w-0"><span>{emojiForExercise(x.name)}</span><span className="truncate">{x.name}</span></span>
-                  <span className="shrink-0 font-semibold">
-                    {x.bestRm != null ? `1RM ${x.bestRm}` : x.bestWeight != null ? `${x.bestWeight} kg` : ''}
-                    {x.bestVolume != null ? <span className="font-normal text-gray-400"> · vol {Math.round(x.bestVolume)}</span> : null}
-                  </span>
-                </div>
-              ))}
+            <div className="bento-card">
+              <div className="bento-label" style={{ marginBottom: 14 }}>🏆 Récords por ejercicio</div>
+              <div className="bento-grid2 is-eq">
+                {stats.byExercise.slice(0, 6).map((x) => {
+                  const primLabel = x.bestRm != null ? '1RM' : 'Peso';
+                  const primVal = x.bestRm != null ? x.bestRm : x.bestWeight;
+                  return (
+                    <div key={x.name} style={{ padding: '12px 14px', border: '1px solid var(--bento-hairline)', borderRadius: 10 }}>
+                      <div className="flex items-center gap-1.5" style={{ fontSize: 12.5, fontWeight: 600, lineHeight: 1.3 }}>
+                        <span>{emojiForExercise(x.name)}</span><span className="truncate">{x.name}</span>
+                      </div>
+                      <div className="flex gap-4" style={{ marginTop: 8 }}>
+                        {primVal != null && (
+                          <div>
+                            <div className="bento-label" style={{ fontSize: 9 }}>{primLabel}</div>
+                            <div className="bento-num" style={{ fontSize: 18 }}>{primVal}<span style={{ fontSize: 10, color: 'var(--bento-faint)' }}> kg</span></div>
+                          </div>
+                        )}
+                        {x.bestVolume != null && (
+                          <div>
+                            <div className="bento-label" style={{ fontSize: 9 }}>Volumen</div>
+                            <div className="bento-num" style={{ fontSize: 18 }}>{Math.round(x.bestVolume)}</div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           )}
 
-          {/* Progresión por ejercicio */}
+          {/* Progresión por ejercicio (interactivo) */}
           {stats.byExercise.length > 0 && (() => {
             const sel = stats.byExercise.find((x) => x.name === progEx) || stats.byExercise[0];
             const valOf = (e) => (e.oneRepMaxKg ?? e.weightKg ?? null);
@@ -7397,23 +7492,24 @@ Reglas:
             const last = vals.length ? vals[vals.length - 1] : null;
             const delta = first != null && last != null ? last - first : null;
             return (
-              <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-2">
+              <div className="bento-card space-y-2">
                 <div className="flex items-center justify-between gap-2">
-                  <div className="text-xs font-semibold text-gray-600 dark:text-gray-400 shrink-0">📈 Progresión</div>
+                  <div className="bento-label shrink-0">📈 Progresión</div>
                   <select value={sel.name} onChange={(e) => setProgEx(e.target.value)}
-                    className="text-xs rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 px-2 py-1 max-w-[62%] truncate">
+                    className="text-xs rounded-lg px-2 py-1 max-w-[62%] truncate"
+                    style={{ border: '1px solid var(--bento-hairline)', background: 'var(--bento-surface)', color: 'var(--bento-ink)' }}>
                     {stats.byExercise.map((x) => <option key={x.name} value={x.name}>{x.name}</option>)}
                   </select>
                 </div>
-                <div className="text-[11px] text-gray-500 dark:text-gray-400">
+                <div style={{ fontSize: 11, color: 'var(--bento-faint)' }}>
                   1RM / peso máx por sesión · {sel.entries.length} registros
-                  {delta != null ? <span className={delta >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}> · {first}→{last} kg ({delta >= 0 ? '+' : ''}{delta})</span> : null}
+                  {delta != null ? <span style={{ color: delta >= 0 ? 'var(--bento-pos)' : 'var(--bento-warm)' }}> · {first}→{last} kg ({delta >= 0 ? '+' : ''}{delta})</span> : null}
                 </div>
-                <div className="flex items-end gap-1.5 h-20">
+                <div className="flex items-end gap-1.5" style={{ height: 80 }}>
                   {sel.entries.map((e, i) => { const v = valOf(e); return (
                     <div key={i} className="flex-1 flex flex-col items-center gap-1" title={`${e.date}: ${v ?? '—'} kg`}>
-                      <div className="w-full bg-sky-500/80 rounded-t" style={{ height: `${v != null ? Math.max(4, (v / maxV) * 64) : 2}px` }} />
-                      <div className="text-[8px] text-gray-400 dark:text-gray-500">{e.date.slice(5)}</div>
+                      <div style={{ width: '100%', borderRadius: '4px 4px 0 0', background: 'var(--bento-blue)', height: `${v != null ? Math.max(4, (v / maxV) * 64) : 2}px` }} />
+                      <div className="bento-mono" style={{ fontSize: 8, color: 'var(--bento-faint)' }}>{e.date.slice(5)}</div>
                     </div>
                   ); })}
                 </div>
@@ -7422,19 +7518,19 @@ Reglas:
           })()}
 
           {/* Historial de sesiones (ver/editar/borrar) */}
-          <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-2">
+          <div className="bento-card space-y-2">
             <button onClick={() => setHistoryOpen((v) => !v)} className="w-full flex items-center justify-between">
-              <span className="text-xs font-semibold text-gray-600 dark:text-gray-400">📜 Historial de sesiones ({stats.sessions.length})</span>
-              <span className="text-[10px] text-gray-400">{historyOpen ? '▼' : '▶'}</span>
+              <span className="bento-label">📜 Historial de sesiones ({stats.sessions.length})</span>
+              <span style={{ fontSize: 10, color: 'var(--bento-faint)' }}>{historyOpen ? '▼' : '▶'}</span>
             </button>
             {historyOpen && (
               <div className="space-y-1.5 pt-1">
                 {stats.sessions.map((s) => (
-                  <div key={s.id || s.date + s.name} className="flex items-center gap-2 rounded-xl border border-gray-100 dark:border-gray-800 px-3 py-2">
+                  <div key={s.id || s.date + s.name} className="flex items-center gap-2 rounded-xl px-3 py-2" style={{ border: '1px solid var(--bento-hairline)' }}>
                     <span className="text-base shrink-0">{s.type === 'cardio' ? '🚴' : '🏋️'}</span>
                     <div className="flex-1 min-w-0">
                       <div className="text-sm font-medium truncate">{new Date(s.date + 'T12:00:00').toLocaleDateString('es-CL', { weekday: 'short', day: 'numeric', month: 'short' })}</div>
-                      <div className="text-[11px] text-gray-500 dark:text-gray-400">
+                      <div style={{ fontSize: 11, color: 'var(--bento-faint)' }}>
                         {Math.round(s.kcal)} kcal
                         {s.type === 'cardio'
                           ? `${s.distanceM != null ? ` · ${(s.distanceM / 1000).toFixed(1)} km` : ''}${s.avgPowerW != null ? ` · ${s.avgPowerW} W` : ''}${s.minutes != null ? ` · ${s.minutes} min` : ''}`
@@ -7443,10 +7539,10 @@ Reglas:
                     </div>
                     {s.exercises.length > 0 && (
                       <button onClick={() => setEditSession({ date: s.date, id: s.id, name: s.name, exercises: s.exercises })}
-                        className="shrink-0 text-xs px-2 py-1 rounded-lg bg-gray-100 dark:bg-gray-800" aria-label="Editar">✏️</button>
+                        className="shrink-0 text-xs px-2 py-1 rounded-lg" style={{ background: 'var(--bento-surface)' }} aria-label="Editar">✏️</button>
                     )}
                     <button onClick={() => removeSession(s.date, s.id)}
-                      className="shrink-0 text-xs px-2 py-1 rounded-lg bg-rose-50 dark:bg-rose-900/30 text-rose-600 dark:text-rose-300" aria-label="Borrar">🗑️</button>
+                      className="shrink-0 text-xs px-2 py-1 rounded-lg" style={{ background: 'rgba(205,122,85,0.12)', color: 'var(--bento-warm)' }} aria-label="Borrar">🗑️</button>
                   </div>
                 ))}
               </div>
@@ -7454,106 +7550,114 @@ Reglas:
           </div>
 
           {/* Exportar CSV */}
-          <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-3">
-            <div className="text-xs font-semibold text-gray-600 dark:text-gray-400">📤 Exportar CSV</div>
+          <div className="bento-card space-y-3">
+            <div className="bento-label">📤 Exportar CSV</div>
             <div className="flex items-center gap-2 text-xs">
               <label className="flex-1">Desde
                 <input type="date" value={csvFrom} max={csvTo || todayKey()} onChange={(e) => setCsvFrom(e.target.value)}
-                  className="mt-0.5 w-full px-2 py-1.5 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800" />
+                  className="mt-0.5 w-full px-2 py-1.5 rounded-lg" style={{ border: '1px solid var(--bento-hairline)', background: 'var(--bento-surface)', color: 'var(--bento-ink)' }} />
               </label>
               <label className="flex-1">Hasta
                 <input type="date" value={csvTo} max={todayKey()} onChange={(e) => setCsvTo(e.target.value || todayKey())}
-                  className="mt-0.5 w-full px-2 py-1.5 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800" />
+                  className="mt-0.5 w-full px-2 py-1.5 rounded-lg" style={{ border: '1px solid var(--bento-hairline)', background: 'var(--bento-surface)', color: 'var(--bento-ink)' }} />
               </label>
             </div>
-            <p className="text-[10px] text-gray-400 dark:text-gray-500">Deja "Desde" vacío para exportar todo el historial.</p>
+            <p style={{ fontSize: 10, color: 'var(--bento-faint)' }}>Deja "Desde" vacío para exportar todo el historial.</p>
             <div className="grid grid-cols-2 gap-2">
-              <button onClick={exportDetailed} className="py-2 rounded-xl border border-gray-300 dark:border-gray-700 text-xs font-semibold hover:bg-gray-50 dark:hover:bg-gray-800">📊 Por ejercicio</button>
-              <button onClick={exportSummary} className="py-2 rounded-xl border border-gray-300 dark:border-gray-700 text-xs font-semibold hover:bg-gray-50 dark:hover:bg-gray-800">📋 Por sesión</button>
+              <button onClick={exportDetailed} className="py-2 rounded-xl text-xs font-semibold" style={{ border: '1px solid var(--bento-hairline)' }}>📊 Por ejercicio</button>
+              <button onClick={exportSummary} className="py-2 rounded-xl text-xs font-semibold" style={{ border: '1px solid var(--bento-hairline)' }}>📋 Por sesión</button>
             </div>
           </div>
         </>
       )}
 
       {/* Evaluación crítica con Claude */}
-      <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-3">
-        <div className="text-sm font-bold">Evaluación crítica</div>
+      <div className="bento-label" style={{ marginTop: 8 }}>Evaluación crítica · Claude</div>
+      <div className="bento-card space-y-3">
         {!apiKey && (
-          <p className="text-xs text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/30 p-2 rounded-lg">⚠️ Configura tu API key en ⚙️ Ajustes primero.</p>
+          <p className="text-xs p-2 rounded-lg" style={{ color: 'var(--bento-warm)', background: 'rgba(205,122,85,0.10)' }}>⚠️ Configura tu API key en ⚙️ Ajustes primero.</p>
         )}
         <button onClick={generate} disabled={loading || !apiKey || stats.totalSessions < 3}
-          className="w-full py-2.5 rounded-xl bg-emerald-500 text-white font-semibold hover:bg-emerald-600 disabled:bg-gray-300 dark:disabled:bg-gray-700 disabled:text-gray-500">
+          className="w-full py-2.5 rounded-xl font-semibold"
+          style={loading || !apiKey || stats.totalSessions < 3
+            ? { background: 'var(--bento-surface)', color: 'var(--bento-faint)' }
+            : { background: 'var(--bento-ink)', color: 'var(--bento-on-ink)' }}>
           {loading ? 'Evaluando tu rutina…' : (response ? (isStale || cacheOld ? 'Actualizar evaluación' : 'Regenerar') : 'Evaluar mi rutina con Claude ✨')}
         </button>
         {stats.totalSessions < 3 && (
-          <p className="text-[11px] text-gray-500 dark:text-gray-400">Necesitas al menos 3 sesiones registradas ({stats.totalSessions} hasta ahora).</p>
+          <p style={{ fontSize: 11, color: 'var(--bento-faint)' }}>Necesitas al menos 3 sesiones registradas ({stats.totalSessions} hasta ahora).</p>
         )}
-        {error && <p className="text-xs text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-900/30 p-2 rounded-lg">{error}</p>}
+        {error && <p className="text-xs p-2 rounded-lg" style={{ color: 'var(--bento-warm)', background: 'rgba(205,122,85,0.10)' }}>{error}</p>}
       </div>
 
       {response && (
         <>
           {response.confidence && (
-            <div className={`flex items-center gap-2 px-3 py-2 rounded-xl ${COLOR_CLASSES[confColor].bg}`}>
-              <span className="text-base">{response.confidence === 'alta' ? '✅' : response.confidence === 'media' ? 'ℹ️' : '⚠️'}</span>
-              <span className={`text-xs ${COLOR_CLASSES[confColor].text}`}>Confianza {response.confidence}{isStale && ' · datos cambiaron'}</span>
+            <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full" style={{ background: 'var(--bento-surface)' }}>
+              <span style={{ width: 8, height: 8, borderRadius: 99, background: confColor === 'green' ? 'var(--bento-pos)' : confColor === 'amber' ? 'var(--bento-yellow)' : 'var(--bento-warm)' }} />
+              <span style={{ fontSize: 11, color: 'var(--bento-muted)' }}>Confianza {response.confidence}{isStale && ' · datos cambiaron'}</span>
             </div>
           )}
 
           {(response.resumen || response.consistencia) && (
-            <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-2">
+            <div className="bento-card space-y-2">
               {response.resumen && <p className="text-sm">{response.resumen}</p>}
-              {response.consistencia && <p className="text-xs text-gray-600 dark:text-gray-400">📅 {response.consistencia}</p>}
+              {response.consistencia && <p style={{ fontSize: 12, color: 'var(--bento-muted)' }}>📅 {response.consistencia}</p>}
             </div>
           )}
 
           {Array.isArray(response.seguir) && response.seguir.length > 0 && (
-            <div className="rounded-2xl border border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-900/20 p-4 space-y-1.5">
-              <div className="text-xs font-bold text-emerald-800 dark:text-emerald-200 uppercase tracking-wide">✅ Qué seguir</div>
-              {response.seguir.map((s, i) => (<p key={i} className="text-xs text-emerald-800 dark:text-emerald-200">• {s}</p>))}
+            <div className="bento-card" style={{ background: 'rgba(122,154,120,0.10)', borderColor: 'transparent' }}>
+              <div className="bento-label" style={{ color: 'var(--bento-pos)', marginBottom: 10 }}>✅ Qué seguir</div>
+              <ul className="space-y-1.5" style={{ margin: 0, paddingLeft: 18 }}>
+                {response.seguir.map((s, i) => (<li key={i} style={{ fontSize: 13, lineHeight: 1.45 }}>{s}</li>))}
+              </ul>
             </div>
           )}
 
           {Array.isArray(response.mejorar) && response.mejorar.map((m, i) => (
-            <div key={i} className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-2">
-              <h3 className="text-sm font-bold">🔧 {typeof m === 'string' ? m : m.que}</h3>
-              {m.porque && <p className="text-xs text-gray-600 dark:text-gray-400"><span className="font-semibold uppercase tracking-wide text-[10px] text-gray-500">Por qué</span><br />{m.porque}</p>}
-              {m.como && <p className="text-xs text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-900/20 p-2 rounded-lg">💡 {m.como}</p>}
+            <div key={i} className="bento-card space-y-2.5">
+              <div className="bento-label">🔧 {typeof m === 'string' ? m : m.que}</div>
+              {m.porque && <p style={{ fontSize: 12.5, color: 'var(--bento-muted)', lineHeight: 1.5 }}>{m.porque}</p>}
+              {m.como && <p style={{ fontSize: 12.5, lineHeight: 1.5, padding: '10px 12px', background: 'var(--bento-surface)', borderRadius: 8 }}>💡 {m.como}</p>}
             </div>
           ))}
 
-          {response.desbalances && (
-            <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-1">
-              <div className="text-xs font-bold uppercase tracking-wide text-gray-500">⚖️ Desbalances</div>
-              <p className="text-xs text-gray-700 dark:text-gray-300">{response.desbalances}</p>
-            </div>
-          )}
-
-          {response.progresion && (
-            <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-1">
-              <div className="text-xs font-bold uppercase tracking-wide text-gray-500">📈 Progresión</div>
-              <p className="text-xs text-gray-700 dark:text-gray-300">{response.progresion}</p>
+          {(response.desbalances || response.progresion) && (
+            <div className="bento-grid2 is-eq items-start">
+              {response.desbalances && (
+                <div className="bento-card">
+                  <div className="bento-label" style={{ marginBottom: 10 }}>⚖️ Desbalances</div>
+                  <p style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--bento-muted)' }}>{response.desbalances}</p>
+                </div>
+              )}
+              {response.progresion && (
+                <div className="bento-card">
+                  <div className="bento-label" style={{ marginBottom: 10 }}>📉 Progresión</div>
+                  <p style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--bento-muted)' }}>{response.progresion}</p>
+                </div>
+              )}
             </div>
           )}
 
           {response.nota_critica && (
-            <div className="rounded-2xl border border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-900/20 p-4 space-y-1">
-              <div className="text-xs font-bold uppercase tracking-wide text-amber-700 dark:text-amber-300">🎯 Nota crítica</div>
-              <p className="text-sm text-amber-900 dark:text-amber-100">{response.nota_critica}</p>
+            <div className="bento-card" style={{ background: 'rgba(205,122,85,0.10)', borderColor: 'transparent' }}>
+              <div className="bento-label" style={{ color: 'var(--bento-warm)', marginBottom: 10 }}>🐂 Nota crítica</div>
+              <p className="text-sm" style={{ lineHeight: 1.6 }}>{response.nota_critica}</p>
             </div>
           )}
 
-          <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-2">
-            <div className="text-xs font-semibold text-gray-600 dark:text-gray-400">📤 Exportar evaluación (para discutir con otra IA)</div>
+          <div className="bento-card space-y-2">
+            <div className="bento-label">📤 Exportar evaluación (para discutir con otra IA)</div>
             <div className="grid grid-cols-2 gap-2">
-              <button onClick={exportEvalPdf} className="py-2 rounded-xl border border-gray-300 dark:border-gray-700 text-xs font-semibold hover:bg-gray-50 dark:hover:bg-gray-800">📄 PDF</button>
-              <button onClick={exportEvalMarkdown} className="py-2 rounded-xl border border-gray-300 dark:border-gray-700 text-xs font-semibold hover:bg-gray-50 dark:hover:bg-gray-800">📝 Texto (Markdown)</button>
+              <button onClick={exportEvalPdf} className="py-2 rounded-xl text-xs font-semibold" style={{ border: '1px solid var(--bento-hairline)' }}>📄 PDF</button>
+              <button onClick={exportEvalMarkdown} className="py-2 rounded-xl text-xs font-semibold" style={{ border: '1px solid var(--bento-hairline)' }}>📝 Texto (Markdown)</button>
             </div>
-            <p className="text-[10px] text-gray-400 dark:text-gray-500">Incluyen la evaluación + datos de respaldo (frecuencia, volumen por músculo, récords, progresión e historial). El Markdown agrega el historial completo en JSON.</p>
+            <p style={{ fontSize: 10, color: 'var(--bento-faint)' }}>Incluyen la evaluación + datos de respaldo (frecuencia, volumen por músculo, récords, progresión e historial). El Markdown agrega el historial completo en JSON.</p>
           </div>
 
           {cached?.generatedAt && (
-            <p className="text-[10px] text-gray-500 dark:text-gray-400 text-center">
+            <p className="text-center" style={{ fontSize: 10, color: 'var(--bento-faint)' }}>
               Generado {new Date(cached.generatedAt).toLocaleString('es-CL', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
             </p>
           )}
@@ -7782,16 +7886,16 @@ function BankItemForm({ initial, kind, apiKey, onSave, onCancel }) {
 
 function BankList({ items, kind, onAdd, onEdit, onDelete }) {
   return (
-    <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 overflow-hidden">
+    <div className="bento-card" style={{ padding: 0, overflow: 'hidden' }}>
       {items.length === 0 ? (
-        <div className="p-4 text-sm text-gray-500 dark:text-gray-400 italic">Sin opciones todavía.</div>
+        <div className="p-4 text-sm italic" style={{ color: 'var(--bento-faint)' }}>Sin opciones todavía.</div>
       ) : (
         items.map((item, i) => (
-          <div key={item.id} className={`flex items-center gap-3 px-4 py-3 ${i !== items.length - 1 ? 'border-b border-gray-200 dark:border-gray-800' : ''}`}>
+          <div key={item.id} className="flex items-center gap-3 px-4 py-3" style={{ borderTop: i ? '1px solid var(--bento-hairline)' : 'none' }}>
             <div className="flex-1 min-w-0">
               <div className="font-medium text-sm">{item.name}</div>
-              <div className="text-xs text-gray-500 dark:text-gray-400">
-                {item.kcal} kcal · P {item.protein}g
+              <div style={{ fontSize: 12, color: 'var(--bento-faint)' }}>
+                <span className="bento-num" style={{ color: 'var(--bento-ink)' }}>{item.kcal}</span> kcal · P {item.protein}g
                 {(item.carbs || item.fat || item.fiber) ? <> · C {Math.round(item.carbs || 0)} · G {Math.round(item.fat || 0)} · F {Number(item.fiber || 0).toFixed(0)}</> : null}
                 {kind === 'snack' && item.category && ` · ${item.category}`}
                 {item.gi && item.gi !== 'bajo' ? ` · GI ${item.gi}` : null}
@@ -7800,18 +7904,18 @@ function BankList({ items, kind, onAdd, onEdit, onDelete }) {
               {Array.isArray(item.tags) && item.tags.length > 0 && (
                 <div className="mt-1 flex flex-wrap gap-1">
                   {item.tags.map((t) => (
-                    <span key={t} className="px-1.5 py-0.5 rounded-full text-[9px] font-semibold bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400">{t}</span>
+                    <span key={t} className="px-1.5 py-0.5 rounded-full text-[9px] font-semibold" style={{ background: 'var(--bento-surface)', color: 'var(--bento-faint)' }}>{t}</span>
                   ))}
                 </div>
               )}
             </div>
-            <button onClick={() => onEdit(item)} className="text-xs font-medium px-2.5 py-1.5 rounded-lg bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700">Editar</button>
+            <button onClick={() => onEdit(item)} className="text-xs font-medium px-2.5 py-1.5 rounded-lg" style={{ background: 'var(--bento-surface)' }}>Editar</button>
             <button onClick={() => { if (confirm(`¿Eliminar "${item.name}"?`)) onDelete(item.id); }}
-              className="text-xs font-medium px-2.5 py-1.5 rounded-lg bg-rose-100 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300 hover:bg-rose-200">Borrar</button>
+              className="text-xs font-medium px-2.5 py-1.5 rounded-lg" style={{ background: 'rgba(205,122,85,0.12)', color: 'var(--bento-warm)' }}>Borrar</button>
           </div>
         ))
       )}
-      <button onClick={onAdd} className="w-full py-3 text-sm font-semibold text-emerald-600 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 border-t border-gray-200 dark:border-gray-800">
+      <button onClick={onAdd} className="w-full py-3 text-sm font-semibold" style={{ color: 'var(--bento-ink)', borderTop: '1px solid var(--bento-hairline)' }}>
         + Agregar {kind === 'snack' ? 'colación' : kind === 'dessert' ? 'postre' : 'proteína'}
       </button>
     </div>
@@ -8040,24 +8144,25 @@ function BankView({ state, setState }) {
     <div className="px-4 py-4 space-y-5">
       <div className="px-1">
         <h1 className="text-2xl font-bold tracking-tight">Banco</h1>
-        <p className="text-sm text-gray-500 dark:text-gray-400">Edita colaciones, proteínas de cena y postres</p>
+        <p className="text-sm" style={{ color: 'var(--bento-faint)' }}>Tus comidas frecuentes · colaciones, cenas y postres</p>
       </div>
 
       <button onClick={() => setShowShopping(true)}
-        className="w-full flex items-center gap-3 rounded-2xl bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800 p-3.5 hover:bg-emerald-100 dark:hover:bg-emerald-900/30 transition-colors">
-        <span className="text-2xl shrink-0">🛒</span>
+        className="w-full flex items-center gap-3 bento-card"
+        style={{ padding: 14 }}>
+        <span className="w-9 h-9 rounded-lg shrink-0 flex items-center justify-center text-lg" style={{ background: 'var(--bento-surface)' }}>🛒</span>
         <div className="flex-1 min-w-0 text-left">
-          <div className="text-sm font-semibold text-emerald-800 dark:text-emerald-200">Generar lista de compras</div>
-          <div className="text-[11px] text-emerald-700 dark:text-emerald-300 mt-0.5">Basada en lo que comiste esta semana · compartible por WhatsApp</div>
+          <div className="text-sm font-semibold">Generar lista de compras</div>
+          <div style={{ fontSize: 11, color: 'var(--bento-faint)', marginTop: 2 }}>Basada en lo que comiste esta semana · compartible por WhatsApp</div>
         </div>
-        <span className="shrink-0 text-emerald-700 dark:text-emerald-300 font-bold">→</span>
+        <span className="shrink-0 font-bold" style={{ color: 'var(--bento-faint)' }}>→</span>
       </button>
 
       <div>
         <div className="flex items-end justify-between mb-1">
           <SectionHeader title="Colaciones" />
           <button onClick={() => setSuggesting('snack')}
-            className="px-2.5 py-1 rounded-full text-[11px] font-semibold bg-sky-100 dark:bg-sky-900/30 text-sky-700 dark:text-sky-300 hover:bg-sky-200 dark:hover:bg-sky-900/50">
+            className="px-2.5 py-1 rounded-full text-[11px] font-semibold" style={{ background: 'rgba(90,141,181,0.14)', color: 'var(--bento-blue)' }}>
             ✨ Sugerir más
           </button>
         </div>
@@ -8070,7 +8175,7 @@ function BankView({ state, setState }) {
         <div className="flex items-end justify-between mb-1">
           <SectionHeader title="Proteínas de cena" />
           <button onClick={() => setSuggesting('protein')}
-            className="px-2.5 py-1 rounded-full text-[11px] font-semibold bg-sky-100 dark:bg-sky-900/30 text-sky-700 dark:text-sky-300 hover:bg-sky-200 dark:hover:bg-sky-900/50">
+            className="px-2.5 py-1 rounded-full text-[11px] font-semibold" style={{ background: 'rgba(90,141,181,0.14)', color: 'var(--bento-blue)' }}>
             ✨ Sugerir más
           </button>
         </div>
@@ -8083,7 +8188,7 @@ function BankView({ state, setState }) {
         <div className="flex items-end justify-between mb-1">
           <SectionHeader title="Postres" hint="Opcional, para almuerzo o cena" />
           <button onClick={() => setSuggesting('dessert')}
-            className="px-2.5 py-1 rounded-full text-[11px] font-semibold bg-sky-100 dark:bg-sky-900/30 text-sky-700 dark:text-sky-300 hover:bg-sky-200 dark:hover:bg-sky-900/50">
+            className="px-2.5 py-1 rounded-full text-[11px] font-semibold" style={{ background: 'rgba(90,141,181,0.14)', color: 'var(--bento-blue)' }}>
             ✨ Sugerir más
           </button>
         </div>
@@ -10398,55 +10503,59 @@ function WeightView({ state, setState, targets }) {
     });
   };
 
+  const metricDots = ['var(--bento-warm)', 'var(--bento-blue)', 'var(--bento-lilac)', 'var(--bento-yellow)', 'var(--bento-pos)', 'var(--bento-ink)'];
+
   return (
     <div className="px-4 py-4 space-y-4">
       <div className="px-1">
         <h1 className="text-2xl font-bold tracking-tight">⚖️ Peso & composición</h1>
-        <p className="text-sm text-gray-500 dark:text-gray-400">Sube la captura de tu Speediance o ingresa manual</p>
+        <p className="text-sm" style={{ color: 'var(--bento-faint)' }}>{last ? `Última medición · ${last.date}${last.time ? ' · ' + last.time : ''}` : 'Sube la captura de tu Speediance o ingresa manual'}</p>
       </div>
 
       <WeighInNudge weights={weights} onAction={() => setAdding(true)} />
 
       {last ? (
-        <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4">
-          <div className="flex items-center justify-between mb-2">
-            <span className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Última medición</span>
-            <span className="text-xs text-gray-500 dark:text-gray-400">{last.date}{last.time ? ` · ${last.time}` : ''}</span>
-          </div>
-          {last.bodyType && (
-            <div className="mb-3 inline-block px-2.5 py-1 rounded-full bg-amber-100 dark:bg-amber-900/30 text-amber-800 dark:text-amber-200 text-[11px] font-semibold uppercase tracking-wide">
-              {last.bodyType}
+        <div className="bento-card">
+          <div className="flex items-start justify-between" style={{ marginBottom: 16 }}>
+            <div>
+              <div className="bento-label">Peso actual</div>
+              <div className="bento-num" style={{ fontSize: 44, lineHeight: 1, marginTop: 6 }}>{last.weightKg != null ? Number(last.weightKg).toFixed(1) : '—'}<span style={{ fontSize: 15, fontWeight: 400, color: 'var(--bento-faint)' }}> kg</span></div>
             </div>
-          )}
-          <div className="grid grid-cols-2 gap-3">
-            {WEIGHT_FIELDS.filter((wf) => last[wf.key] != null).map((wf) => {
+            {last.bodyType && (
+              <span className="px-2.5 py-1 rounded-full text-[11px] font-semibold uppercase tracking-wide" style={{ background: 'rgba(217,166,72,0.16)', color: 'var(--bento-yellow)' }}>{last.bodyType}</span>
+            )}
+          </div>
+          <div className="bento-label" style={{ marginBottom: 12 }}>Composición corporal</div>
+          <div className="grid grid-cols-2 gap-x-5 gap-y-4">
+            {WEIGHT_FIELDS.filter((wf) => wf.key !== 'weightKg' && last[wf.key] != null).map((wf, i) => {
               const status = evalMetric(wf.key, last[wf.key], state.userProfile);
               return (
                 <div key={wf.key}>
-                  <div className="text-[11px] text-gray-500 dark:text-gray-400">{wf.label}</div>
-                  <div className="text-base font-bold flex items-center gap-1.5">
-                    <span>{last[wf.key]}<span className="text-xs text-gray-500 dark:text-gray-400 font-normal ml-0.5">{wf.unit}</span></span>
+                  <div className="bento-label flex items-center gap-1.5"><span style={{ width: 7, height: 7, borderRadius: 99, background: metricDots[i % metricDots.length], flexShrink: 0 }} />{wf.label}</div>
+                  <div className="bento-num flex items-center gap-1.5" style={{ fontSize: 20, marginTop: 5 }}>
+                    <span>{last[wf.key]}<span style={{ fontSize: 11, fontWeight: 400, color: 'var(--bento-faint)' }}>{wf.unit ? ' ' + wf.unit : ''}</span></span>
                     <MetricStatusChip statusLabel={status} />
                   </div>
                 </div>
               );
             })}
           </div>
-          {last.note && <p className="mt-3 text-xs text-gray-500 dark:text-gray-400 italic">{last.note}</p>}
+          {last.note && <p className="mt-3 text-xs italic" style={{ color: 'var(--bento-faint)' }}>{last.note}</p>}
         </div>
       ) : (
-        <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-6 text-center">
+        <div className="bento-card text-center" style={{ padding: 24 }}>
           <div className="text-3xl mb-2">⚖️</div>
           <div className="text-sm font-medium">Sin mediciones aún</div>
-          <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">Agrega tu primera medición para empezar a ver la tendencia</div>
+          <div style={{ fontSize: 12, color: 'var(--bento-faint)', marginTop: 4 }}>Agrega tu primera medición para empezar a ver la tendencia</div>
         </div>
       )}
 
-      <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4">
+      <div className="bento-card">
         <div className="flex items-center gap-1.5 mb-3 overflow-x-auto -mx-1 px-1">
           {CHART_METRICS.map((m) => (
             <button key={m.key} onClick={() => setMetric(m.key)}
-              className={`shrink-0 px-3 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap ${metric === m.key ? 'bg-emerald-500 text-white' : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400'}`}>
+              className="shrink-0 px-3 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap"
+              style={metric === m.key ? { background: 'var(--bento-ink)', color: 'var(--bento-on-ink)' } : { background: 'var(--bento-surface)', color: 'var(--bento-muted)' }}>
               {m.label}
             </button>
           ))}
@@ -10465,25 +10574,25 @@ function WeightView({ state, setState, targets }) {
       <NotesHistory state={state} />
 
       {weights.length > 0 && (
-        <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 overflow-hidden">
+        <div className="bento-card" style={{ padding: 0, overflow: 'hidden' }}>
           <div className="px-4 pt-3.5 pb-2">
-            <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Historial</h3>
+            <div className="bento-label">Historial</div>
           </div>
-          <div className="border-t border-gray-100 dark:border-gray-800">
-            {weights.map((w, i) => (
-              <div key={w.id} className={`flex items-center gap-3 px-4 py-2.5 ${i !== weights.length - 1 ? 'border-b border-gray-100 dark:border-gray-800' : ''}`}>
-                <div className="w-16 shrink-0 text-xs text-gray-500 dark:text-gray-400">{w.date.slice(5)}{w.time ? ` ${w.time}` : ''}</div>
+          <div>
+            {weights.map((w) => (
+              <div key={w.id} className="flex items-center gap-3 px-4 py-2.5" style={{ borderTop: '1px solid var(--bento-hairline)' }}>
+                <div className="w-16 shrink-0" style={{ fontSize: 12, color: 'var(--bento-faint)' }}>{w.date.slice(5)}{w.time ? ` ${w.time}` : ''}</div>
                 <div className="flex-1 min-w-0 flex flex-wrap gap-x-3 gap-y-0.5 text-xs">
-                  {w.weightKg != null && <span><span className="font-semibold">{Number(w.weightKg).toFixed(1)}</span> kg</span>}
-                  {w.bodyFatPct != null && <span><span className="font-semibold">{Number(w.bodyFatPct).toFixed(1)}</span>% grasa</span>}
-                  {w.skeletalMuscleKg != null && <span><span className="font-semibold">{Number(w.skeletalMuscleKg).toFixed(1)}</span> kg m.esq.</span>}
-                  {w.bmi != null && <span><span className="font-semibold">{Number(w.bmi).toFixed(1)}</span> IMC</span>}
-                  {w.waistCm != null && <span><span className="font-semibold">{Number(w.waistCm).toFixed(1)}</span> cintura</span>}
-                  {w.visceralFat != null && <span><span className="font-semibold">{Number(w.visceralFat).toFixed(1)}</span> visc.</span>}
+                  {w.weightKg != null && <span><span className="bento-num">{Number(w.weightKg).toFixed(1)}</span> kg</span>}
+                  {w.bodyFatPct != null && <span><span className="bento-num">{Number(w.bodyFatPct).toFixed(1)}</span>% grasa</span>}
+                  {w.skeletalMuscleKg != null && <span><span className="bento-num">{Number(w.skeletalMuscleKg).toFixed(1)}</span> kg m.esq.</span>}
+                  {w.bmi != null && <span><span className="bento-num">{Number(w.bmi).toFixed(1)}</span> IMC</span>}
+                  {w.waistCm != null && <span><span className="bento-num">{Number(w.waistCm).toFixed(1)}</span> cintura</span>}
+                  {w.visceralFat != null && <span><span className="bento-num">{Number(w.visceralFat).toFixed(1)}</span> visc.</span>}
                 </div>
-                <button onClick={() => setEditing(w)} className="text-xs font-medium px-2 py-1 rounded-lg bg-gray-100 dark:bg-gray-800">Editar</button>
+                <button onClick={() => setEditing(w)} className="text-xs font-medium px-2 py-1 rounded-lg" style={{ background: 'var(--bento-surface)' }}>Editar</button>
                 <button onClick={() => remove(w.id)} aria-label="Borrar"
-                  className="shrink-0 w-7 h-7 rounded-full bg-rose-50 dark:bg-rose-900/30 text-rose-600 dark:text-rose-300 flex items-center justify-center text-sm">✕</button>
+                  className="shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-sm" style={{ background: 'rgba(205,122,85,0.12)', color: 'var(--bento-warm)' }}>✕</button>
               </div>
             ))}
           </div>
@@ -10491,7 +10600,7 @@ function WeightView({ state, setState, targets }) {
       )}
 
       <button onClick={() => setAdding(true)}
-        className="w-full py-3.5 rounded-2xl bg-emerald-500 text-white font-semibold hover:bg-emerald-600">
+        className="w-full py-3.5 rounded-2xl font-semibold" style={{ background: 'var(--bento-ink)', color: 'var(--bento-on-ink)' }}>
         + Nueva medición
       </button>
 
