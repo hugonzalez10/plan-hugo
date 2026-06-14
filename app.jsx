@@ -1459,6 +1459,7 @@ function buildSeed() {
     },
     weights: [],
     recipeBank: SEED_RECIPES.map((r) => ({ ...r, id: uuid(), builtin: true, createdAt: null })),
+    favorites: [],
     arsenalVersion: 3,
     bridge: { lastSyncAt: null, importedIds: [], pushedIds: [], removedBridgeIds: [] },
     aiCache: { coach: {}, weekly: {}, patterns: null, lastSubstitution: null },
@@ -1646,6 +1647,7 @@ function migrateState(parsed) {
     };
   }
   next.days = migratedDays;
+  next.favorites = Array.isArray(next.favorites) ? next.favorites : [];
   next.aiCache = next.aiCache || { coach: {}, weekly: {}, patterns: null, lastSubstitution: null };
   next.aiCache.coach = next.aiCache.coach || {};
   next.aiCache.weekly = next.aiCache.weekly || {};
@@ -2811,6 +2813,13 @@ function computeRecents(days, limit = 10, windowDays = 21) {
       fat: Number(b.sample.fat) || 0,
       fiber: Number(b.sample.fiber) || 0,
       count: b.count,
+      // Fidelidad para re-loguear de un toque (todos opcionales, backward-compatible):
+      key: b.norm,
+      barcode: b.sample.barcode || undefined,
+      per100: b.sample.per100 || undefined,
+      portion: b.sample.portion || undefined,
+      source: b.sample.source || undefined,
+      tags: Array.isArray(b.sample.tags) ? b.sample.tags : undefined,
     }));
 }
 
@@ -4269,6 +4278,7 @@ function AddExtraModal({ apiKey, onCancel, onSave }) {
   const [error, setError] = useState(null);
   const [showScanner, setShowScanner] = useState(false);
   const [fromBarcode, setFromBarcode] = useState(null); // {barcode, name}
+  const [productMeta, setProductMeta] = useState(null); // { barcode, per100 } para recordar el producto
   const [tags, setTags] = useState([]); // ['dulce', 'delivery', 'alcohol']
 
   const toggleTag = (tag) => {
@@ -4286,6 +4296,7 @@ function AddExtraModal({ apiKey, onCancel, onSave }) {
     setFiber(String(Number(product.fiber || 0).toFixed(1)));
     setEstimated(null);
     setFromBarcode({ barcode: product.barcode, name: product.name });
+    setProductMeta({ barcode: product.barcode || null, per100: product.raw || null });
     setError(null);
   };
 
@@ -4310,6 +4321,8 @@ function AddExtraModal({ apiKey, onCancel, onSave }) {
     if (!apiKey) { setError('Configura tu API key en ⚙️ Ajustes primero.'); return; }
     if (!canEstimate) { setError('Escribe el nombre o sube una foto.'); return; }
     setEstimating(true); setError(null);
+    setProductMeta(null); // los macros estimados ya no corresponden al producto escaneado
+    setFromBarcode(null);
     try {
       const data = await estimateExtraMacros({ name, attachments, apiKey });
       if (data?.name && !name.trim()) setName(String(data.name));
@@ -4347,7 +4360,10 @@ function AddExtraModal({ apiKey, onCancel, onSave }) {
       fat: num(fat),
       fiber: num(fiber),
       tags: tags.length ? tags.slice() : undefined,
-      source: estimated ? 'haiku-estimate' : 'manual',
+      source: productMeta?.barcode ? 'barcode' : (estimated ? 'haiku-estimate' : 'manual'),
+      barcode: productMeta?.barcode || undefined,
+      per100: productMeta?.per100 || undefined,
+      portion: portion || undefined,
     });
   };
 
@@ -4492,7 +4508,7 @@ function AddExtraModal({ apiKey, onCancel, onSave }) {
 
 // Lista compacta de alimentos registrados (vía WhatsApp/bridge o captura) asignados a un slot
 // del plan (colación/cena), para mostrarlos DENTRO de su sección en vez de en "Extras del día".
-function SlotLoggedItems({ items, onRemove, onEdit }) {
+function SlotLoggedItems({ items, onRemove, onEdit, onToggleFav, favKeys }) {
   if (!items || items.length === 0) return null;
   const meta = (item) => (
     <>
@@ -4520,10 +4536,79 @@ function SlotLoggedItems({ items, onRemove, onEdit }) {
               <div className="text-xs text-gray-500 dark:text-gray-400">{meta(item)}</div>
             </div>
           )}
+          {onToggleFav && (() => {
+            const starred = favKeys?.has(normalizeName(item.name));
+            return (
+              <button onClick={() => onToggleFav(item)} aria-label={starred ? 'Quitar de favoritos' : 'Marcar como favorito'}
+                className={`shrink-0 w-9 h-9 rounded-full flex items-center justify-center text-base ${starred ? 'text-amber-500 bg-amber-50 dark:bg-amber-900/20' : 'text-gray-400 bg-gray-50 dark:bg-gray-800 hover:text-amber-500'}`}>
+                {starred ? '★' : '☆'}
+              </button>
+            );
+          })()}
           <button onClick={() => onRemove(item.id)} aria-label="Borrar"
             className="shrink-0 w-9 h-9 rounded-full bg-rose-50 dark:bg-rose-900/30 text-rose-600 dark:text-rose-300 flex items-center justify-center text-base hover:bg-rose-100 dark:hover:bg-rose-900/50">✕</button>
         </div>
       ))}
+    </div>
+  );
+}
+
+// Tarjeta de "Registro rápido": chips de favoritos + recientes para re-loguear de un toque.
+// Recientes se derivan de computeRecents (no hay store nuevo); favoritos viven en state.favorites.
+function QuickLogChip({ item, starred, onLog, onToggleFav }) {
+  return (
+    <div className="inline-flex items-center rounded-full border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 overflow-hidden">
+      <button type="button" onClick={() => onLog(item)} aria-label={`Registrar ${item.name}`}
+        className="flex items-center gap-1.5 pl-3 pr-2 py-1.5 text-xs hover:bg-emerald-50 dark:hover:bg-emerald-900/20">
+        <span className="text-sm leading-none">{emojiForFood(item.name)}</span>
+        <span className="font-medium text-gray-800 dark:text-gray-200 max-w-[11rem] truncate">{item.name}</span>
+        <span className="text-gray-500 dark:text-gray-400">· {Math.round(Number(item.kcal) || 0)} kcal</span>
+        {Number(item.protein) > 0 && <span className="text-gray-500 dark:text-gray-400">· P {Math.round(item.protein)}g</span>}
+      </button>
+      <button type="button" onClick={() => onToggleFav(item)}
+        aria-label={starred ? 'Quitar de favoritos' : 'Marcar como favorito'}
+        className={`px-2 py-1.5 text-sm border-l border-gray-200 dark:border-gray-700 ${starred ? 'text-amber-500' : 'text-gray-400 hover:text-amber-500'}`}>
+        {starred ? '★' : '☆'}
+      </button>
+    </div>
+  );
+}
+
+function QuickLogCard({ recents, favorites, bankNames, favKeys, onQuickLog, onToggleFav }) {
+  const favChips = favorites || [];
+  // Recientes: fuera los ya favoritos y los que ya se pueden elegir desde el banco (no duplicar).
+  const recentChips = (recents || [])
+    .filter((r) => r.key && !favKeys.has(r.key) && !bankNames.has(r.key))
+    .slice(0, 8);
+  if (favChips.length === 0 && recentChips.length === 0) return null;
+
+  return (
+    <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-3">
+      <div className="flex items-center gap-2">
+        <span className="text-base">⚡</span>
+        <h3 className="text-sm font-bold text-gray-800 dark:text-gray-200">Registro rápido</h3>
+        <span className="text-[11px] text-gray-400 dark:text-gray-500">un toque para repetir</span>
+      </div>
+      {favChips.length > 0 && (
+        <div className="space-y-1.5">
+          <div className="text-[11px] font-semibold uppercase tracking-wide text-amber-600 dark:text-amber-400">★ Favoritos</div>
+          <div className="flex flex-wrap gap-2">
+            {favChips.map((item) => (
+              <QuickLogChip key={`fav-${item.key}`} item={item} starred onLog={onQuickLog} onToggleFav={onToggleFav} />
+            ))}
+          </div>
+        </div>
+      )}
+      {recentChips.length > 0 && (
+        <div className="space-y-1.5">
+          <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Recientes</div>
+          <div className="flex flex-wrap gap-2">
+            {recentChips.map((item) => (
+              <QuickLogChip key={`rec-${item.key}`} item={item} starred={false} onLog={onQuickLog} onToggleFav={onToggleFav} />
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -6084,6 +6169,72 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
     setPendingViolation({ violations: allViolations, onConfirm: doAction });
   }, [state, today, targets]);
 
+  // ── Registro rápido: recientes + favoritos de un toque ────────────────────────
+  const favorites = useMemo(() => (Array.isArray(state.favorites) ? state.favorites : []), [state.favorites]);
+  const favKeys = useMemo(() => new Set(favorites.map((f) => f.key)), [favorites]);
+  const recents = useMemo(() => computeRecents(state.days || {}, 12), [state.days]);
+  const bankNames = useMemo(() => new Set([
+    ...(state.snackBank || []),
+    ...(state.proteinBank || []),
+    ...(state.dessertBank || []),
+  ].map((b) => normalizeName(b.name))), [state.snackBank, state.proteinBank, state.dessertBank]);
+
+  // Re-loguea un ítem (reciente o favorito) como extra de hoy, de un toque. id/ts FRESCOS en
+  // cada registro (nunca reusar: rompería el dedup del bridge y el guard multi-pestaña). Rutea
+  // por las MISMAS reglas que el modal vía tryWithRules.
+  const quickLogExtra = (item) => {
+    const tagSet = new Set(item.tags || []);
+    const actions = ['add_extra'];
+    if (tagSet.has('dulce')) actions.push('add_dulce');
+    if (tagSet.has('delivery')) actions.push('add_delivery');
+    if (tagSet.has('alcohol')) actions.push('add_alcohol');
+    const doSave = () => updateDay({
+      extras: [...(day.extras || []), {
+        name: item.name,
+        kcal: Number(item.kcal) || 0,
+        protein: Number(item.protein) || 0,
+        carbs: Number(item.carbs) || 0,
+        fat: Number(item.fat) || 0,
+        fiber: Number(item.fiber) || 0,
+        tags: Array.isArray(item.tags) && item.tags.length ? item.tags.slice() : undefined,
+        barcode: item.barcode || undefined,
+        per100: item.per100 || undefined,
+        portion: item.portion || undefined,
+        source: 'quicklog',
+        id: uuid(),
+        ts: Date.now(),
+      }],
+    });
+    tryWithRules(actions, { prospectiveKcal: Number(item.kcal) || 0 }, doSave);
+  };
+
+  // Marca/desmarca un alimento como favorito (estado global, persiste entre días). Keyed por
+  // normalizeName para coincidir con computeRecents y el dedup.
+  const toggleFavorite = (item) => {
+    setState((prev) => {
+      const key = normalizeName(item.name);
+      if (!key) return prev;
+      const list = Array.isArray(prev.favorites) ? prev.favorites : [];
+      if (list.some((f) => f.key === key)) {
+        return { ...prev, favorites: list.filter((f) => f.key !== key) };
+      }
+      return { ...prev, favorites: [...list, {
+        key,
+        name: item.name,
+        kcal: Number(item.kcal) || 0,
+        protein: Number(item.protein) || 0,
+        carbs: Number(item.carbs) || 0,
+        fat: Number(item.fat) || 0,
+        fiber: Number(item.fiber) || 0,
+        barcode: item.barcode || undefined,
+        per100: item.per100 || undefined,
+        portion: item.portion || undefined,
+        source: item.source || 'manual',
+        addedAt: Date.now(),
+      }] };
+    });
+  };
+
   const toggleEaten = (key) => {
     const cur = day.eaten || {};
     updateDay({ eaten: { ...cur, [key]: !cur[key] } });
@@ -6214,7 +6365,8 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
           </button>
         </div>
         {!isSkipped && (
-          <SlotLoggedItems items={slotExtras} onRemove={(id) => removeSlotExtra(slot, id)} onEdit={setEditTarget} />
+          <SlotLoggedItems items={slotExtras} onRemove={(id) => removeSlotExtra(slot, id)} onEdit={setEditTarget}
+            onToggleFav={toggleFavorite} favKeys={favKeys} />
         )}
       </div>
     );
@@ -6271,7 +6423,8 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
           )
         )}
         {!isSkipped && (
-          <SlotLoggedItems items={slotExtras} onRemove={(id) => removeSlotExtra(slot, id)} onEdit={setEditTarget} />
+          <SlotLoggedItems items={slotExtras} onRemove={(id) => removeSlotExtra(slot, id)} onEdit={setEditTarget}
+            onToggleFav={toggleFavorite} favKeys={favKeys} />
         )}
       </div>
     );
@@ -6461,9 +6614,12 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
             );
           })()}
           {!skippedSet.has('cena') && (
-            <SlotLoggedItems items={cenaExtras} onRemove={(id) => removeSlotExtra('cena', id)} onEdit={setEditTarget} />
+            <SlotLoggedItems items={cenaExtras} onRemove={(id) => removeSlotExtra('cena', id)} onEdit={setEditTarget}
+              onToggleFav={toggleFavorite} favKeys={favKeys} />
           )}
         </div>
+        <QuickLogCard recents={recents} favorites={favorites} bankNames={bankNames} favKeys={favKeys}
+          onQuickLog={quickLogExtra} onToggleFav={toggleFavorite} />
         <ExtrasSection day={day} onUpdate={updateDay} apiKey={state.settings?.anthropicApiKey} tryWithRules={tryWithRules}
           onRemoveExtra={(id) => removeSlotExtra('extra', id)} onEditExtra={setEditTarget} />
         <ExerciseSection day={day} onUpdate={updateDay} apiKey={state.settings?.anthropicApiKey} userWeightKg={state.userProfile?.weightKg}
@@ -6487,9 +6643,10 @@ function WeeklyAnalysisCard({ state, setState, weekKey, rows, targets }) {
     return lr ? lr.pctPerWeek.toFixed(2) : 'na';
   }, [state.weights, weekRefKey]);
   const sig = useMemo(() => hashSig({
+    v: 2, // bump: ahora el análisis usa kcalIn bruto (no neto) — invalida cachés con el doble descuento
     rows: rows.map((r) => ({
       k: r.key,
-      kcal: Math.round(r.totals.kcal),
+      kcal: Math.round(r.totals.kcalIn),
       p: Math.round(r.totals.protein),
       c: Math.round(r.totals.carbs),
       f: Math.round(r.totals.fat),
@@ -6518,7 +6675,10 @@ function WeeklyAnalysisCard({ state, setState, weekKey, rows, targets }) {
       const compactRows = rows.map((r) => ({
         fecha: r.key,
         dia: r.label,
-        kcal: Math.round(r.totals.kcal),
+        // kcal_consumidas = comida BRUTA (sin restar ejercicio). Es lo que se compara contra el
+        // rango de la meta, porque el TDEE adaptativo ya descuenta la actividad. Restar el
+        // ejercicio aquí lo contaría dos veces (ver kcalNet en computeDayTotals).
+        kcal_consumidas: Math.round(r.totals.kcalIn),
         proteina: Math.round(r.totals.protein),
         carbos: Math.round(r.totals.carbs),
         grasas: Math.round(r.totals.fat),
@@ -6547,8 +6707,10 @@ PROGRESO POR TASA DE PÉRDIDA SEMANAL (no por déficit fijo). Rango objetivo: ${
 - <${WEEKLY_LOSS.slowPct} %/sem por 2 semanas → sugiere EXTENDER la duración del cardio (NO agregar días ni recortar más calorías).
 ${lossLine}
 
-SEMANA:
+SEMANA (cada día: "kcal_consumidas" = comida ingerida, YA es el número a comparar contra el rango de la meta; "ejercicio_kcal" es solo contexto informativo):
 ${JSON.stringify(compactRows, null, 2)}
+
+IMPORTANTE: para evaluar el cumplimiento calórico y el déficit usa SIEMPRE "kcal_consumidas" tal cual. NO le restes "ejercicio_kcal" — el TDEE y el rango de la meta ya incorporan la actividad, así que restar el ejercicio sería contarlo dos veces e inflar el déficit.
 
 ${weights.length ? `PESOS DE LA SEMANA: ${JSON.stringify(weights.map(w => ({ fecha: w.date, kg: w.weightKg })))}` : 'Sin mediciones de peso esta semana.'}
 
