@@ -6487,9 +6487,10 @@ function WeeklyAnalysisCard({ state, setState, weekKey, rows, targets }) {
     return lr ? lr.pctPerWeek.toFixed(2) : 'na';
   }, [state.weights, weekRefKey]);
   const sig = useMemo(() => hashSig({
+    v: 2, // bump: ahora el análisis usa kcalIn bruto (no neto) — invalida cachés con el doble descuento
     rows: rows.map((r) => ({
       k: r.key,
-      kcal: Math.round(r.totals.kcal),
+      kcal: Math.round(r.totals.kcalIn),
       p: Math.round(r.totals.protein),
       c: Math.round(r.totals.carbs),
       f: Math.round(r.totals.fat),
@@ -6518,7 +6519,10 @@ function WeeklyAnalysisCard({ state, setState, weekKey, rows, targets }) {
       const compactRows = rows.map((r) => ({
         fecha: r.key,
         dia: r.label,
-        kcal: Math.round(r.totals.kcal),
+        // kcal_consumidas = comida BRUTA (sin restar ejercicio). Es lo que se compara contra el
+        // rango de la meta, porque el TDEE adaptativo ya descuenta la actividad. Restar el
+        // ejercicio aquí lo contaría dos veces (ver kcalNet en computeDayTotals).
+        kcal_consumidas: Math.round(r.totals.kcalIn),
         proteina: Math.round(r.totals.protein),
         carbos: Math.round(r.totals.carbs),
         grasas: Math.round(r.totals.fat),
@@ -6547,8 +6551,10 @@ PROGRESO POR TASA DE PÉRDIDA SEMANAL (no por déficit fijo). Rango objetivo: ${
 - <${WEEKLY_LOSS.slowPct} %/sem por 2 semanas → sugiere EXTENDER la duración del cardio (NO agregar días ni recortar más calorías).
 ${lossLine}
 
-SEMANA:
+SEMANA (cada día: "kcal_consumidas" = comida ingerida, YA es el número a comparar contra el rango de la meta; "ejercicio_kcal" es solo contexto informativo):
 ${JSON.stringify(compactRows, null, 2)}
+
+IMPORTANTE: para evaluar el cumplimiento calórico y el déficit usa SIEMPRE "kcal_consumidas" tal cual. NO le restes "ejercicio_kcal" — el TDEE y el rango de la meta ya incorporan la actividad, así que restar el ejercicio sería contarlo dos veces e inflar el déficit.
 
 ${weights.length ? `PESOS DE LA SEMANA: ${JSON.stringify(weights.map(w => ({ fecha: w.date, kg: w.weightKg })))}` : 'Sin mediciones de peso esta semana.'}
 
