@@ -4292,43 +4292,6 @@ function LoggedItemModal({ initial, onSave, onCancel }) {
   );
 }
 
-// Modal para repetir las comidas registradas de un día anterior. Un tap copia todos los
-// extras de ese día a hoy (ids/ts nuevos, source 'repeat').
-function RepeatDayModal({ days, todayKeyStr, onAdd, onCancel }) {
-  const prior = useMemo(() => (
-    Object.entries(days || {})
-      .filter(([k, d]) => k !== todayKeyStr && Array.isArray(d?.extras) && d.extras.length > 0)
-      .sort((a, b) => (a[0] < b[0] ? 1 : -1))
-      .slice(0, 14)
-      .map(([k, d]) => ({
-        key: k,
-        items: d.extras,
-        kcal: d.extras.reduce((s, e) => s + (Number(e.kcal) || 0), 0),
-      }))
-  ), [days, todayKeyStr]);
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 p-4">
-      <div className="w-full max-w-md bg-white dark:bg-gray-900 rounded-2xl shadow-xl border border-gray-200 dark:border-gray-800 p-5 space-y-3 max-h-[85vh] overflow-y-auto">
-        <h2 className="text-lg font-bold">Repetir un día</h2>
-        {prior.length === 0 ? (
-          <p className="text-sm text-gray-500 dark:text-gray-400">No hay días anteriores con comidas registradas.</p>
-        ) : prior.map((d) => (
-          <button key={d.key} onClick={() => onAdd(d.items)}
-            className="w-full text-left px-4 py-3 rounded-xl border border-gray-200 dark:border-gray-800 hover:border-emerald-400 active:scale-[0.99]">
-            <div className="flex items-center justify-between">
-              <span className="font-semibold text-sm">{formatDateLabel(d.key, todayKeyStr)}</span>
-              <span className="text-xs text-gray-500 dark:text-gray-400">{d.items.length} {d.items.length === 1 ? 'ítem' : 'ítems'} · {Math.round(d.kcal)} kcal</span>
-            </div>
-            <div className="mt-1 text-xs text-gray-500 dark:text-gray-400 truncate">{d.items.map((e) => e.name).join(', ')}</div>
-          </button>
-        ))}
-        <button onClick={onCancel} className="w-full py-2.5 rounded-xl border border-gray-300 dark:border-gray-700 font-medium">Cerrar</button>
-      </div>
-    </div>
-  );
-}
-
 function DayItemList({ title, icon, items, onAdd, onRemove, onEdit, addLabel, emptyHint, renderMeta, iconForItem, headerExtra, totalLabel }) {
   return (
     <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 overflow-hidden">
@@ -6332,19 +6295,6 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
     setUndoItem(null);
   };
 
-  // Copia todos los extras de un día anterior a hoy (ids/ts nuevos).
-  const repeatItems = (items) => {
-    const cloned = (items || []).map((e) => ({ ...e, id: uuid(), ts: Date.now(), source: 'repeat' }));
-    if (!cloned.length) return;
-    updateDay({ extras: [...(day.extras || []), ...cloned] });
-  };
-
-  // Copia de un toque los extras del día anterior (menos fricción que abrir "Repetir un día"
-  // y elegir). Disponible solo si ayer tiene algo registrado.
-  const yesterdayKey = shiftDate(today, -1);
-  const yesterdayExtras = state.days?.[yesterdayKey]?.extras || [];
-  const copyYesterday = () => { if (yesterdayExtras.length) repeatItems(yesterdayExtras); };
-
   // Enforcement de reglas: acumula violaciones, muestra modal único si hay
   const [pendingViolation, setPendingViolation] = useState(null);
   const [suggestSlot, setSuggestSlot] = useState(null); // 'snack' | 'dinner' | 'dessert_almuerzo' | 'dessert_cena' | null
@@ -6618,7 +6568,6 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
 
   const [showStreakModal, setShowStreakModal] = useState(false);
   const [editTarget, setEditTarget] = useState(null); // extra en edición | null
-  const [showRepeat, setShowRepeat] = useState(false);
   const [undoItem, setUndoItem] = useState(null); // último extra borrado, para deshacer
 
   // El toast de "deshacer" se autodescarta a los 6s.
@@ -6661,11 +6610,6 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
         <LoggedItemModal initial={editTarget}
           onCancel={() => setEditTarget(null)}
           onSave={(patch) => { editExtra(editTarget.id, patch); setEditTarget(null); }} />
-      )}
-      {showRepeat && (
-        <RepeatDayModal days={state.days} todayKeyStr={today}
-          onCancel={() => setShowRepeat(false)}
-          onAdd={(items) => { repeatItems(items); setShowRepeat(false); }} />
       )}
       {undoItem && (
         <div className="fixed inset-x-0 bottom-4 z-50 flex justify-center px-4 pointer-events-none">
@@ -6734,19 +6678,6 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
             <span>Pregunta al coach</span>
           </button>
         )}
-
-        <div className="grid grid-cols-2 gap-2">
-          <button onClick={copyYesterday} disabled={!yesterdayExtras.length}
-            className="py-2.5 rounded-2xl bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 text-gray-600 dark:text-gray-300 font-semibold text-sm hover:border-emerald-400 flex items-center justify-center gap-2 disabled:opacity-40 disabled:hover:border-gray-200 dark:disabled:hover:border-gray-800">
-            <span>📋</span>
-            <span>Copiar ayer{yesterdayExtras.length ? ` (${yesterdayExtras.length})` : ''}</span>
-          </button>
-          <button onClick={() => setShowRepeat(true)}
-            className="py-2.5 rounded-2xl bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 text-gray-600 dark:text-gray-300 font-semibold text-sm hover:border-emerald-400 flex items-center justify-center gap-2">
-            <span>🔁</span>
-            <span>Repetir un día</span>
-          </button>
-        </div>
 
         <ComparisonCard comparison={comparison} />
 
