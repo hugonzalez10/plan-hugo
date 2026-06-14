@@ -160,12 +160,19 @@ var UPLOAD_TITLE = 'plan-hugo-bridge.upload.json';
 //     adaptativo de la app necesita para reconstruir el gasto. Como meals se poda a 30 días,
 //     sin esto el historial de ingesta para estimar gasto se perdería entre dispositivos.
 //     Nunca se poda; mergea por fecha (no duplica).
-var RETENTION    = { weights: 0, meals: 30, workouts: 30, checks: 30, water: 30, energy: 0 };
+//   · health → 0: serie diaria de Apple Health {date, steps, activeEnergyKcal, sleepHours,
+//     restingHr, vo2max} que la app muestra como CONTEXTO (nunca resta de las kcal: el TDEE
+//     adaptativo ya captura el gasto vía tendencia de peso). Compacta; nunca se poda; mergea
+//     por fecha (latest gana, no duplica). La postea un iOS Shortcut.
+var RETENTION    = { weights: 0, meals: 30, workouts: 30, checks: 30, water: 30, energy: 0, health: 0 };
 var SNAPSHOT_RETENTION_DAYS = 30; // los snapshots por fecha siguen la misma ventana que meals
-var SECTIONS     = ['meals', 'weights', 'workouts', 'checks', 'water', 'energy'];
+var SECTIONS     = ['meals', 'weights', 'workouts', 'checks', 'water', 'energy', 'health'];
 // Campos de la sección `energy` que se mergean por fecha (latest gana). Mantener en sync con
 // buildEnergySeries() de app.jsx.
 var ENERGY_MERGE_FIELDS = ['kcalIn', 'trendWeightKg'];
+// Campos de la sección `health` (Apple Health) que se mergean por fecha (latest no-nulo gana).
+// Mantener en sync con day.health de app.jsx y el JSON del iOS Shortcut.
+var HEALTH_MERGE_FIELDS = ['steps', 'activeEnergyKcal', 'sleepHours', 'restingHr', 'vo2max'];
 // Campos de un entrenamiento que se mergean sobre la entrada existente del mismo día (la versión
 // más rica gana): si primero llegó una línea simple (name/kcal) y luego una con desglose, no se
 // pierde el detalle. Mantener en sync con WORKOUT_EXTRA_FIELDS + `exercises` de app.jsx.
@@ -468,6 +475,7 @@ function _sig(sec, e) {
   if (sec === 'workouts') return _norm(e.name) + '|' + (e.date || '');
   if (sec === 'weights')  return (e.date || '');
   if (sec === 'energy')   return (e.date || '');
+  if (sec === 'health')   return (e.date || '');
   if (sec === 'checks')   return _norm(e.meal) + '|' + (e.date || '');
   return null;
 }
@@ -590,6 +598,14 @@ function _contentUnion(bridge, sec, entries, assignId) {
         var curE = bridge[sec][hitIdx];
         ENERGY_MERGE_FIELDS.forEach(function (k) {
           if (e[k] != null && e[k] !== '') curE[k] = e[k];
+        });
+      } else if (sec === 'health') {
+        // Misma fecha → actualiza las métricas de Apple Health (latest no-nulo gana). El
+        // Shortcut re-postea el día completo a las 23:00; un POST repetido reescribe la fila,
+        // no la duplica. Solo CONTEXTO: el ?totals no lo lee, nunca afecta kcal.
+        var curH = bridge[sec][hitIdx];
+        HEALTH_MERGE_FIELDS.forEach(function (k) {
+          if (e[k] != null && e[k] !== '') curH[k] = e[k];
         });
       } else if (sec === 'workouts') {
         // Mismo entrenamiento (nombre+fecha en la ventana) → la versión más rica gana, para que
