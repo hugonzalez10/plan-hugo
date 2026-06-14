@@ -4,20 +4,12 @@ const STORAGE_KEY = 'plan-hugo-v3';
 const BACKUP_STORAGE_KEY = 'plan-hugo-v3-bak';
 const LEGACY_STORAGE_KEYS = ['plan-hugo-v2', 'plan-hugo-v1'];
 
+// Desayuno y almuerzo ya no traen ítems predeterminados: Hugo registra la comida real por
+// chat (extras con su mealSlot), que se muestra dentro de cada sección. Se conservan como
+// slots (para el bucketing, el nudge y el "no comí"), pero sin ítems no suman kcal fantasma.
 const FIXED_MEALS = [
-  { id: 'desayuno', label: 'Desayuno', time: '08:00', emoji: '🍳',
-    items: [
-      { id: 'huevos', label: '2 huevos duros',            kcal: 140, protein: 12, carbs: 1,  fat: 10, fiber: 0 },
-      { id: 'yogurt', label: 'Yogurt Colun Protein Plus', kcal: 180, protein: 12, carbs: 21, fat: 5,  fiber: 1 },
-      { id: 'cafe',   label: 'Café',                      kcal: 5,   protein: 0,  carbs: 0,  fat: 0,  fiber: 0 },
-    ] },
-  { id: 'almuerzo', label: 'Almuerzo', time: '13:30', emoji: '🍚',
-    items: [
-      { id: 'arroz',          label: '1 taza arroz',                 kcal: 205, protein: 4,  carbs: 45, fat: 0,  fiber: 1 },
-      { id: 'proteina',       label: '1 taza proteína animal',       kcal: 275, protein: 40, carbs: 0,  fat: 12, fiber: 0 },
-      { id: 'fruta',          label: 'Fruta',                        kcal: 80,  protein: 1,  carbs: 21, fat: 0,  fiber: 3 },
-      { id: 'yogurt-granola', label: 'Yogurt + 30g granola',         kcal: 170, protein: 4,  carbs: 29, fat: 4,  fiber: 4 },
-    ] },
+  { id: 'desayuno', label: 'Desayuno', time: '08:00', emoji: '🍳', items: [] },
+  { id: 'almuerzo', label: 'Almuerzo', time: '13:30', emoji: '🍚', items: [] },
 ];
 
 function mealItemsFor(meal, customAntojoItems) {
@@ -25,17 +17,6 @@ function mealItemsFor(meal, customAntojoItems) {
     return [...(meal.items || []), ...customAntojoItems];
   }
   return meal?.items || [];
-}
-
-function mealTotals(meal, customAntojoItems) {
-  const items = mealItemsFor(meal, customAntojoItems);
-  return {
-    kcal:    items.reduce((s, x) => s + (Number(x.kcal)    || 0), 0),
-    protein: items.reduce((s, x) => s + (Number(x.protein) || 0), 0),
-    carbs:   items.reduce((s, x) => s + (Number(x.carbs)   || 0), 0),
-    fat:     items.reduce((s, x) => s + (Number(x.fat)     || 0), 0),
-    fiber:   items.reduce((s, x) => s + (Number(x.fiber)   || 0), 0),
-  };
 }
 
 // Devuelve { [itemId]: bool } para una comida. Si no hay eatenItems aún para ese día/meal,
@@ -3865,181 +3846,6 @@ function OnboardingModal({ state, setState, onClose, editing = false }) {
   );
 }
 
-function MealCard({ meal, day, skipped, onToggleItem, onMarkAll, onSkipToggle, onAddItem, onRemoveItem, customAntojoItems, fixed = true, targets }) {
-  const T = targets || DEFAULT_TARGETS;
-  const customItems = meal.id === 'antojo' ? (customAntojoItems || []) : [];
-  const items = mealItemsFor(meal, customItems);
-  const ticks = getMealItemTicks(day, meal, customItems);
-  const tickedItems = items.filter((it) => ticks[it.id]);
-  const totalMeal = mealTotals(meal, customItems);
-  const totalEaten = {
-    kcal:    tickedItems.reduce((s, x) => s + (Number(x.kcal)    || 0), 0),
-    protein: tickedItems.reduce((s, x) => s + (Number(x.protein) || 0), 0),
-  };
-  const allTicked  = items.length > 0 && tickedItems.length === items.length;
-  const anyTicked  = tickedItems.length > 0;
-
-  const kcalPct = T.kcalMax > 0 ? Math.round((totalMeal.kcal / T.kcalMax) * 100) : 0;
-  const protPct = T.proteinMin > 0 ? Math.round((totalMeal.protein / T.proteinMin) * 100) : 0;
-
-  const borderClass = skipped
-    ? 'border-gray-300 dark:border-gray-700 bg-gray-100 dark:bg-gray-800/40 opacity-70'
-    : allTicked
-    ? 'border-emerald-500 bg-emerald-50 dark:bg-emerald-900/20'
-    : anyTicked
-    ? 'border-amber-400 bg-amber-50/50 dark:bg-amber-900/10'
-    : 'border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900';
-
-  const labelTone = skipped
-    ? 'text-gray-500 dark:text-gray-400 line-through'
-    : allTicked
-    ? 'text-emerald-700 dark:text-emerald-300'
-    : anyTicked
-    ? 'text-amber-700 dark:text-amber-300'
-    : 'text-gray-500 dark:text-gray-400';
-
-  const [adding, setAdding] = useState(false);
-  const [form, setForm] = useState({ label: '', kcal: '', protein: '', carbs: '', fat: '', fiber: '' });
-  const resetForm = () => setForm({ label: '', kcal: '', protein: '', carbs: '', fat: '', fiber: '' });
-  const submitForm = () => {
-    if (!form.label.trim()) return;
-    onAddItem && onAddItem({
-      label: form.label.trim(),
-      kcal: Number(form.kcal) || 0,
-      protein: Number(form.protein) || 0,
-      carbs: Number(form.carbs) || 0,
-      fat: Number(form.fat) || 0,
-      fiber: Number(form.fiber) || 0,
-    });
-    resetForm();
-    setAdding(false);
-  };
-
-  return (
-    <div className={`w-full rounded-2xl border-2 overflow-hidden transition-all ${borderClass}`}>
-      <div className="p-4 pb-2">
-        <div className="flex items-center gap-3">
-          <span className="text-3xl shrink-0">{skipped ? '🚫' : (meal.emoji || '🍽️')}</span>
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className={`text-xs font-semibold uppercase tracking-wide ${labelTone}`}>{meal.label}</span>
-              {fixed && <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400">FIJA</span>}
-              {meal.time && <span className="text-xs text-gray-500 dark:text-gray-400">{meal.time}</span>}
-              {skipped && <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-gray-300 dark:bg-gray-700 text-gray-700 dark:text-gray-300">SALTADA</span>}
-              {!skipped && anyTicked && !allTicked && (
-                <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-900/40 text-amber-800 dark:text-amber-200">PARCIAL</span>
-              )}
-            </div>
-            <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              <span className="font-semibold text-gray-900 dark:text-gray-100">{Math.round(totalEaten.kcal)}</span>
-              <span className="opacity-70"> / {Math.round(totalMeal.kcal)}</span> kcal
-              <span className="text-[10px] opacity-70"> ({kcalPct}% día max)</span>
-              {' · '}
-              <span className="font-semibold text-gray-900 dark:text-gray-100">{Math.round(totalEaten.protein)}</span>
-              <span className="opacity-70"> / {Math.round(totalMeal.protein)}</span>g prot
-              <span className="text-[10px] opacity-70"> ({protPct}%)</span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <ul className={`px-4 pb-2 space-y-1.5 ${skipped ? 'opacity-50' : ''}`}>
-        {items.map((it) => {
-          const isOn = !!ticks[it.id];
-          const isCustom = !!it.custom;
-          return (
-            <li key={it.id} className="flex items-center gap-3">
-              <button type="button" onClick={() => !skipped && onToggleItem && onToggleItem(it.id)} disabled={skipped}
-                className={`shrink-0 w-6 h-6 rounded-full flex items-center justify-center border-2 transition-colors disabled:cursor-not-allowed ${
-                  isOn
-                    ? 'bg-emerald-500 border-emerald-500 text-white'
-                    : 'border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800'
-                }`}>
-                {isOn && <span className="text-xs font-bold">✓</span>}
-              </button>
-              <button type="button" onClick={() => !skipped && onToggleItem && onToggleItem(it.id)} disabled={skipped}
-                className="flex-1 min-w-0 text-left disabled:cursor-not-allowed">
-                <div className={`text-sm leading-snug ${isOn ? 'text-gray-900 dark:text-gray-100' : 'text-gray-700 dark:text-gray-300'} ${skipped ? 'line-through' : ''}`}>
-                  {it.label}
-                </div>
-                <div className="text-[11px] text-gray-500 dark:text-gray-400">
-                  <span className="font-semibold text-gray-700 dark:text-gray-300">{it.kcal}</span> kcal · <span className="font-semibold text-gray-700 dark:text-gray-300">{it.protein}</span>g prot
-                </div>
-              </button>
-              {isCustom && onRemoveItem && !skipped && (
-                <button type="button" onClick={() => onRemoveItem(it.id)} title="Quitar ítem custom"
-                  className="shrink-0 w-6 h-6 rounded text-xs text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20">🗑️</button>
-              )}
-            </li>
-          );
-        })}
-      </ul>
-
-      {meal.extensible && !skipped && onAddItem && (
-        <div className="px-4 pb-2">
-          {!adding ? (
-            <button type="button" onClick={() => setAdding(true)}
-              className="w-full py-1.5 rounded-lg border border-dashed border-gray-300 dark:border-gray-700 text-xs font-medium text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800">
-              + Agregar ítem
-            </button>
-          ) : (
-            <div className="rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-2.5 space-y-2">
-              <input type="text" placeholder="Nombre del ítem" value={form.label}
-                onChange={(e) => setForm({ ...form, label: e.target.value })}
-                className="w-full px-2 py-1.5 rounded border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm" />
-              <div className="grid grid-cols-5 gap-1.5">
-                {[
-                  ['kcal', 'kcal'],
-                  ['protein', 'P'],
-                  ['carbs', 'C'],
-                  ['fat', 'G'],
-                  ['fiber', 'Fib'],
-                ].map(([key, label]) => (
-                  <label key={key} className="block">
-                    <span className="block text-[10px] text-gray-500 dark:text-gray-400 text-center">{label}</span>
-                    <input type="number" inputMode="numeric" step="0.1" value={form[key]}
-                      onChange={(e) => setForm({ ...form, [key]: e.target.value })}
-                      className="w-full px-1.5 py-1 rounded border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-xs text-center" />
-                  </label>
-                ))}
-              </div>
-              <div className="flex gap-1.5">
-                <button type="button" onClick={submitForm} disabled={!form.label.trim()}
-                  className="flex-1 py-1.5 rounded bg-emerald-500 text-white text-xs font-semibold hover:bg-emerald-600 disabled:bg-gray-300 dark:disabled:bg-gray-700">
-                  Guardar
-                </button>
-                <button type="button" onClick={() => { resetForm(); setAdding(false); }}
-                  className="px-3 py-1.5 rounded bg-gray-100 dark:bg-gray-800 text-xs font-semibold text-gray-700 dark:text-gray-300">
-                  Cancelar
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      <div className="flex border-t-2 border-gray-100 dark:border-gray-800">
-        {!skipped && onMarkAll && items.length > 0 && (
-          <button type="button" onClick={() => onMarkAll(!allTicked)}
-            className="flex-1 px-3 py-1.5 text-[11px] font-semibold bg-white/50 dark:bg-gray-900/50 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 border-r border-gray-100 dark:border-gray-800">
-            {allTicked ? '↺ Desmarcar todo' : '✅ Marcar todo'}
-          </button>
-        )}
-        {onSkipToggle && (
-          <button type="button" onClick={onSkipToggle}
-            className={`flex-1 px-3 py-1.5 text-[11px] font-semibold transition-colors ${
-              skipped
-                ? 'bg-gray-200 dark:bg-gray-800 text-gray-700 dark:text-gray-300'
-                : 'bg-white/50 dark:bg-gray-900/50 text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'
-            }`}>
-            {skipped ? '↩️ Deshacer "no comí"' : '🚫 No comí'}
-          </button>
-        )}
-      </div>
-    </div>
-  );
-}
-
 function SelectableCard({ item, selected, eaten, onClick, onToggleEaten, showCategory, targets }) {
   const emoji = emojiForFood(item.name);
   const T = targets || DEFAULT_TARGETS;
@@ -6333,40 +6139,6 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
     updateDay({ eaten: { ...cur, [key]: !cur[key] } });
   };
 
-  // Tickea un ítem individual de una comida fija. Mantiene day.eaten[mealId] como sombra
-  // (true sólo si todos los ítems quedaron tickeados).
-  const toggleMealItem = (mealId, itemId) => {
-    const meal = FIXED_MEALS.find((m) => m.id === mealId);
-    if (!meal) return;
-    const customAntojo = state.antojoCustomItems || [];
-    const items = mealItemsFor(meal, customAntojo);
-    const currentTicks = getMealItemTicks(day, meal, customAntojo);
-    const nextTicks = { ...currentTicks, [itemId]: !currentTicks[itemId] };
-    const allItems = { ...(day.eatenItems || {}) };
-    allItems[mealId] = nextTicks;
-    const allTicked = items.length > 0 && items.every((it) => nextTicks[it.id]);
-    const newEaten = { ...(day.eaten || {}), [mealId]: allTicked };
-    // Tickear un item deshace el "saltado" del meal
-    const newSkipped = (day.skipped || []).filter((s) => s !== mealId);
-    updateDay({ eatenItems: allItems, eaten: newEaten, skipped: newSkipped });
-  };
-
-  // "Marcar todo" / "Desmarcar todo" para un meal fijo
-  const markAllMealItems = (mealId, value) => {
-    const meal = FIXED_MEALS.find((m) => m.id === mealId);
-    if (!meal) return;
-    const customAntojo = state.antojoCustomItems || [];
-    const items = mealItemsFor(meal, customAntojo);
-    const nextTicks = {};
-    for (const it of items) nextTicks[it.id] = !!value;
-    const allItems = { ...(day.eatenItems || {}), [mealId]: nextTicks };
-    const newEaten = { ...(day.eaten || {}), [mealId]: !!value };
-    const newSkipped = value
-      ? (day.skipped || []).filter((s) => s !== mealId)
-      : (day.skipped || []);
-    updateDay({ eatenItems: allItems, eaten: newEaten, skipped: newSkipped });
-  };
-
   // Agrega un ítem custom al antojo (persiste en state, disponible todos los días)
   const addAntojoItem = ({ label, kcal, protein, carbs, fat, fiber }) => {
     setState((prev) => {
@@ -6488,8 +6260,32 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
   };
 
   const totals = computeDayTotals(day, state.snackBank, state.proteinBank, targets, state.dessertBank, state.antojoCustomItems || []);
-  const desayuno = FIXED_MEALS[0];
-  const almuerzo = FIXED_MEALS[1];
+
+  // Render de un slot fijo (desayuno/almuerzo) ya sin ítems predeterminados: solo encabezado,
+  // el toggle "no comí" y lo que Hugo registró por chat en ese slot. Lo demás se loguea con el
+  // botón 📷 Foto · Voz · Texto de arriba.
+  const renderFixedSlot = (slot, label, time, slotExtras) => {
+    const isSkipped = skippedSet.has(slot);
+    return (
+      <div>
+        <div className="flex items-end justify-between mb-1">
+          <SectionHeader title={`${label} · ${time}`}
+            hint={isSkipped ? `🚫 Hoy no comí ${label.toLowerCase()}` : 'Registra con 📷 Foto · Voz · Texto'} />
+          <button onClick={() => toggleSkipped(slot)}
+            className={`px-2.5 py-1 rounded-full text-[11px] font-semibold ${
+              isSkipped
+                ? 'bg-gray-200 dark:bg-gray-800 text-gray-700 dark:text-gray-300'
+                : 'bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'
+            }`}>
+            {isSkipped ? '↩️ Deshacer' : '🚫 No comí'}
+          </button>
+        </div>
+        {!isSkipped && (
+          <SlotLoggedItems items={slotExtras} onRemove={(id) => removeSlotExtra(slot, id)} onEdit={setEditTarget} />
+        )}
+      </div>
+    );
+  };
 
   // Render de una colación (1 ó 2). Las aptas para llevar van primero; el resto del banco,
   // bajo un separador. requireNoRefrig exige también 'sin-refrigeración' (colación 2 a las 18h,
@@ -6685,21 +6481,9 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
 
         <WaterTracker day={day} onUpdate={updateDay} target={targets?.waterTarget || 3000} />
 
-        <div>
-          <MealCard meal={desayuno} day={day} skipped={skippedSet.has('desayuno')}
-            onToggleItem={(itemId) => toggleMealItem('desayuno', itemId)}
-            onMarkAll={(value) => markAllMealItems('desayuno', value)}
-            onSkipToggle={() => toggleSkipped('desayuno')} targets={targets} />
-          <SlotLoggedItems items={desayunoExtras} onRemove={(id) => removeSlotExtra('desayuno', id)} onEdit={setEditTarget} />
-        </div>
+        {renderFixedSlot('desayuno', 'Desayuno', '08:00', desayunoExtras)}
         {renderColacion('colacion1', 'Colación 1', '11:00', false, colacion1Extras)}
-        <div>
-          <MealCard meal={almuerzo} day={day} skipped={skippedSet.has('almuerzo')}
-            onToggleItem={(itemId) => toggleMealItem('almuerzo', itemId)}
-            onMarkAll={(value) => markAllMealItems('almuerzo', value)}
-            onSkipToggle={() => toggleSkipped('almuerzo')} targets={targets} />
-          <SlotLoggedItems items={almuerzoExtras} onRemove={(id) => removeSlotExtra('almuerzo', id)} onEdit={setEditTarget} />
-        </div>
+        {renderFixedSlot('almuerzo', 'Almuerzo', '13:30', almuerzoExtras)}
         <DessertSection meal="almuerzo" dessertBank={state.dessertBank} day={day} eaten={eaten}
           onSelect={selectDessert} onToggleEaten={toggleDessertEaten} targets={targets}
           onSuggest={() => setSuggestSlot('dessert_almuerzo')} />
