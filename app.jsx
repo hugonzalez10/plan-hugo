@@ -2206,9 +2206,13 @@ function computeDayTotals(day, snackBank, proteinBank, targets, dessertBank, cus
   const planFiber = sumField(planEaten, 'fiber');
 
   return {
-    kcal: kcalNet, kcalIn, kcalBurned, kcalNet,
+    // `kcal` es la cifra que toda la app muestra y compara contra la meta: BRUTO (lo comido),
+    // NO neto. El TDEE adaptativo ya incorpora la actividad (se calibra desde kcalIn vs peso),
+    // así que restar el ejercicio aquí lo contaría dos veces e inflaría el déficit. El ejercicio
+    // (kcalBurned) se muestra aparte como dato informativo. kcalNet queda disponible por compat.
+    kcal: kcalIn, kcalIn, kcalBurned, kcalNet,
     planIn, planProtein, planCarbs, planFat, planFiber,
-    kcalRemaining: T.kcalMax - kcalNet,
+    kcalRemaining: T.kcalMax - kcalIn,
     protein, proteinRemaining: T.proteinMin - protein,
     carbs, carbsRemaining: T.carbsTarget - carbs,
     fat, fatRemaining: T.fatTarget - fat,
@@ -3081,7 +3085,7 @@ function computeTrendAnalysis(weights, days, snackBank, proteinBank, targets, de
     const day = days[k];
     if (!day) continue;
     const totals = computeDayTotals(day, snackBank, proteinBank, targets, dessertBank, customAntojoItems);
-    if (totals.eatenAny) { kcalSum += totals.kcalNet; daysCount++; }
+    if (totals.eatenAny) { kcalSum += totals.kcalIn; daysCount++; }
   }
 
   const promedioKcal = daysCount > 0 ? Math.round(kcalSum / daysCount) : null;
@@ -3477,8 +3481,8 @@ function BentoTodayHero({ totals, targets, streak, onStreakClick, weightSeries, 
             </div>
             {kcalBurned > 0 && (
               <div>
-                <div className="bento-label">Quemado</div>
-                <div className="text-2xl font-bold" style={{ letterSpacing: '-0.02em', fontVariantNumeric: 'tabular-nums', color: 'var(--bento-pos)' }}>−{kcalBurned} <span className="text-xs font-normal" style={{ color: 'var(--bento-faint)' }}>kcal</span></div>
+                <div className="bento-label">Quemado · informativo</div>
+                <div className="text-2xl font-bold" style={{ letterSpacing: '-0.02em', fontVariantNumeric: 'tabular-nums', color: 'var(--bento-pos)' }}>{kcalBurned} <span className="text-xs font-normal" style={{ color: 'var(--bento-faint)' }}>kcal</span></div>
               </div>
             )}
           </div>
@@ -4881,7 +4885,7 @@ ESTADO AHORA:
 - Grasas: ${Math.round(totals.fat)} / ${T.fatTarget} g
 - Fibra: ${Math.round(totals.fiber)} / ${T.fiberTarget} g
 - Agua: ${totals.waterMl} / ${T.waterTarget} ml
-- Ejercicio quemado hoy: ${Math.round(totals.kcalBurned)} kcal
+- Ejercicio quemado hoy: ${Math.round(totals.kcalBurned)} kcal (SOLO informativo — NO lo restes de las calorías; el TDEE y la meta ya incorporan la actividad)
 - Comidas sin marcar todavía: ${slotsPendientes.length ? slotsPendientes.join(', ') : 'ninguna'}
 
 Devuelve SOLO JSON, sin markdown, así:
@@ -6767,7 +6771,7 @@ function InsightsView({ state, setState, targets }) {
 METAS:
 - kcal: ${T.kcalMin}-${T.kcalMax} · proteína ≥ ${T.proteinMin}g · agua ${T.waterTarget} ml
 
-DATOS (28 días, dow 0=domingo, 6=sábado):
+DATOS (28 días, dow 0=domingo, 6=sábado). "kcal" = comida consumida (BRUTA), ya comparable contra la meta; "ejercicio_kcal" es solo contexto — NO lo restes de "kcal" (el TDEE y la meta ya incorporan la actividad):
 ${JSON.stringify(series, null, 2)}
 
 Devuelve SOLO JSON, sin markdown:
