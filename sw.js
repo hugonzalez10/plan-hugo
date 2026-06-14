@@ -4,7 +4,7 @@
  * NO interceptamos llamadas a api.anthropic.com.
  */
 
-const CACHE_NAME = 'plan-hugo-v35-registro-rapido';
+const CACHE_NAME = 'plan-hugo-v36-bento-ejercicios';
 const CORE_URLS = [
   './index.html',
   './app.js',
