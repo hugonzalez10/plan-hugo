@@ -3902,54 +3902,6 @@ function SectionHeader({ title, hint }) {
   );
 }
 
-function DessertSection({ meal, dessertBank, day, eaten, onSelect, onToggleEaten, targets, onSuggest }) {
-  const selectedId = meal === 'almuerzo' ? day.dessertAlmuerzoId : day.dessertCenaId;
-  const eatenKey = meal === 'almuerzo' ? 'dessertAlmuerzo' : 'dessertCena';
-  const [expanded, setExpanded] = useState(!!selectedId);
-
-  useEffect(() => {
-    if (selectedId) setExpanded(true);
-  }, [selectedId]);
-
-  const items = dessertBank || [];
-  if (!items.length) return null;
-
-  return (
-    <div className="ml-2 pl-3 border-l-2 border-pink-200 dark:border-pink-900/40">
-      <div className="flex items-center justify-between py-1.5">
-        <button
-          type="button"
-          onClick={() => setExpanded((v) => !v)}
-          className="flex-1 text-left text-xs font-medium text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100"
-        >
-          🍰 Postre (opcional) <span className="text-[10px] ml-1">{expanded ? '▼' : '▶'}</span>
-        </button>
-        {onSuggest && expanded && (
-          <button type="button" onClick={onSuggest}
-            className="ml-2 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-sky-100 dark:bg-sky-900/30 text-sky-700 dark:text-sky-300 hover:bg-sky-200 dark:hover:bg-sky-900/50">
-            🤔 sugerir
-          </button>
-        )}
-      </div>
-      {expanded && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pb-1">
-          {items.map((d) => (
-            <SelectableCard
-              key={d.id}
-              item={d}
-              selected={selectedId === d.id}
-              eaten={selectedId === d.id && !!eaten[eatenKey]}
-              onClick={() => onSelect(meal, d.id)}
-              onToggleEaten={() => onToggleEaten(meal)}
-              targets={targets}
-            />
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
 function QuickAddForm({ title, fields, initial, onSave, onCancel }) {
   const [values, setValues] = useState(() => {
     const v = {};
@@ -6114,8 +6066,6 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
     // Elegir desde "¿Qué como?" registra en un toque (queda marcado como comido).
     if (slot === 'snack') pickForSlot(snackSuggestTarget, item.id);
     else if (slot === 'dinner') pickForSlot('cena', item.id);
-    else if (slot === 'dessert_almuerzo') selectDessert('almuerzo', item.id);
-    else if (slot === 'dessert_cena') selectDessert('cena', item.id);
   };
   const tryWithRules = useCallback((actions, ctxExtra, doAction) => {
     const actionList = Array.isArray(actions) ? actions : [actions];
@@ -6212,23 +6162,6 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
     const snack = (state.snackBank || []).find((s) => s.id === id);
     if (isItemDulce(snack, 'snack')) tryWithRules(['add_dulce'], {}, doPick);
     else doPick();
-  };
-
-  const selectDessert = (meal, id) => {
-    const field = meal === 'almuerzo' ? 'dessertAlmuerzoId' : 'dessertCenaId';
-    const eatenKey = meal === 'almuerzo' ? 'dessertAlmuerzo' : 'dessertCena';
-    const same = day[field] === id;
-    const cur = day.eaten || {};
-    const doSelect = () => updateDay({ [field]: same ? null : id, eaten: { ...cur, [eatenKey]: false } });
-    if (same) { doSelect(); return; }
-    // Postres siempre cuentan como dulce
-    tryWithRules(['add_dulce'], {}, doSelect);
-  };
-
-  const toggleDessertEaten = (meal) => {
-    const eatenKey = meal === 'almuerzo' ? 'dessertAlmuerzo' : 'dessertCena';
-    const cur = day.eaten || {};
-    updateDay({ eaten: { ...cur, [eatenKey]: !cur[eatenKey] } });
   };
 
   const skippedSet = new Set(day.skipped || []);
@@ -6484,9 +6417,6 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
         {renderFixedSlot('desayuno', 'Desayuno', '08:00', desayunoExtras)}
         {renderColacion('colacion1', 'Colación 1', '11:00', false, colacion1Extras)}
         {renderFixedSlot('almuerzo', 'Almuerzo', '13:30', almuerzoExtras)}
-        <DessertSection meal="almuerzo" dessertBank={state.dessertBank} day={day} eaten={eaten}
-          onSelect={selectDessert} onToggleEaten={toggleDessertEaten} targets={targets}
-          onSuggest={() => setSuggestSlot('dessert_almuerzo')} />
         {renderColacion('colacion2', 'Colación 2', '18:00', true, colacion2Extras)}
         <div>
           <div className="flex items-end justify-between mb-1">
@@ -6532,11 +6462,6 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
           })()}
           {!skippedSet.has('cena') && (
             <SlotLoggedItems items={cenaExtras} onRemove={(id) => removeSlotExtra('cena', id)} onEdit={setEditTarget} />
-          )}
-          {!skippedSet.has('cena') && (
-            <DessertSection meal="cena" dessertBank={state.dessertBank} day={day} eaten={eaten}
-              onSelect={selectDessert} onToggleEaten={toggleDessertEaten} targets={targets}
-              onSuggest={() => setSuggestSlot('dessert_cena')} />
           )}
         </div>
         <ExtrasSection day={day} onUpdate={updateDay} apiKey={state.settings?.anthropicApiKey} tryWithRules={tryWithRules}
