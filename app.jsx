@@ -1833,6 +1833,7 @@ async function fetchBridge(url, token) {
     workouts: Array.isArray(data.workouts) ? data.workouts : [],
     checks: Array.isArray(data.checks) ? data.checks : [],
     water: Array.isArray(data.water) ? data.water : [],
+    health: Array.isArray(data.health) ? data.health : [],
   };
 }
 
@@ -1877,7 +1878,7 @@ function mergeBridge(state, bridge) {
   const removedBridgeIds = new Set((state.bridge?.removedBridgeIds) || []);
   const days = { ...(state.days || {}) };
   const weights = Array.isArray(state.weights) ? [...state.weights] : [];
-  const added = { meals: 0, weights: 0, workouts: 0, checks: 0, water: 0 };
+  const added = { meals: 0, weights: 0, workouts: 0, checks: 0, water: 0, health: 0 };
 
   const ensureDay = (dk) => {
     const base = days[dk] || { eaten: {}, snackId1: null, snackId2: null, proteinId: null, water: { ml: 0 }, skipped: [], nudgesDismissed: [], dessertAlmuerzoId: null, dessertCenaId: null, notes: null };
@@ -2044,6 +2045,25 @@ function mergeBridge(state, bridge) {
       const cur = d.water || { ml: 0 };
       d.water = { ...cur, bridgeMl: (Number(cur.bridgeMl) || 0) + (Number(wd.ml) || 0) };
       importedIds.add(wd.id); added.water++;
+    }
+  }
+
+  // Métricas de Apple Health (sección `health`, una fila/día). SOLO CONTEXTO: nunca se restan
+  // de las kcal ni entran como ejercicio — el TDEE adaptativo ya captura el gasto vía tendencia
+  // de peso (evita el doble conteo). Overwrite-por-fecha e idempotente: re-mergear la misma fila
+  // reescribe los mismos valores, así que NO usa importedIds (a diferencia del agua, que suma).
+  // El Shortcut re-postea el día completo, así que el último valor del día es el bueno.
+  if (Array.isArray(bridge.health)) {
+    for (const h of bridge.health) {
+      if (h == null || !h.date) continue; // sin fecha no se puede ubicar (no asumir hoy)
+      const d = ensureDay(bridgeDateKey(h));
+      const next = { ...(d.health || {}) };
+      for (const k of ['steps', 'activeEnergyKcal', 'sleepHours', 'restingHr', 'vo2max']) {
+        if (h[k] != null && h[k] !== '') next[k] = Number(h[k]);
+      }
+      if (h.ts != null) next.healthTs = Number(h.ts);
+      d.health = next;
+      added.health++;
     }
   }
 
@@ -4935,6 +4955,7 @@ function CoachModal({ state, setState, dateKey, targets, onClose, onOpenSubstitu
     fiber: totals.fiber,
     water: totals.waterMl,
     burned: totals.kcalBurned,
+    health: hashSig(day.health || null),
     dateKey,
     hour: new Date().getHours(),
   });
@@ -4960,6 +4981,11 @@ function CoachModal({ state, setState, dateKey, targets, onClose, onOpenSubstitu
       if (!eaten.colacion2) slotsPendientes.push('colación 2');
       if (!eaten.cena) slotsPendientes.push('cena');
 
+      const hh = day.health || null;
+      const actividadLinea = hh
+        ? `\n- Actividad (Apple Health, SOLO contexto — NO restes la energía activa de las kcal): ${hh.steps != null ? Math.round(hh.steps) + ' pasos' : 'pasos —'} · ${hh.activeEnergyKcal != null ? Math.round(hh.activeEnergyKcal) + ' kcal activos' : 'energía activa —'}${hh.sleepHours != null ? ' · durmió ' + hh.sleepHours.toFixed(1) + ' h' : ''}`
+        : '';
+
       const prompt = `Eres el coach nutricional de Hugo (geriatra chileno, hombre). Sé directo, conciso, sin alarmismo. USA TUTEO CHILENO (tú, tienes, puedes). NO uses voseo argentino (vos, tenés, podés). Nada de "che", "dale".
 
 ESTADO AHORA:
@@ -4970,7 +4996,7 @@ ESTADO AHORA:
 - Grasas: ${Math.round(totals.fat)} / ${T.fatTarget} g
 - Fibra: ${Math.round(totals.fiber)} / ${T.fiberTarget} g
 - Agua: ${totals.waterMl} / ${T.waterTarget} ml
-- Ejercicio quemado hoy: ${Math.round(totals.kcalBurned)} kcal (SOLO informativo — NO lo restes de las calorías; el TDEE y la meta ya incorporan la actividad)
+- Ejercicio quemado hoy: ${Math.round(totals.kcalBurned)} kcal (SOLO informativo — NO lo restes de las calorías; el TDEE y la meta ya incorporan la actividad)${actividadLinea}
 - Comidas sin marcar todavía: ${slotsPendientes.length ? slotsPendientes.join(', ') : 'ninguna'}
 
 Devuelve SOLO JSON, sin markdown, así:
@@ -5338,7 +5364,12 @@ function DailyNotesCard({ day, onUpdate }) {
             return (
               <div key={f.key}>
                 <div className="flex items-center justify-between mb-1.5">
-                  <span className="text-xs font-medium text-gray-700 dark:text-gray-300">{f.emoji} {f.label}</span>
+                  <span className="text-xs font-medium text-gray-700 dark:text-gray-300">
+                    {f.emoji} {f.label}
+                    {f.key === 'sleep' && day?.health?.sleepHours != null && (
+                      <span className="ml-1.5 text-[10px] font-normal text-sky-500 dark:text-sky-400">Health: {fmtSleepHours(day.health.sleepHours)}</span>
+                    )}
+                  </span>
                   <span className="text-[10px] text-gray-500 dark:text-gray-400">{val ? `${val} / 5` : '—'}</span>
                 </div>
                 <div className="flex items-center gap-1">
@@ -5372,6 +5403,58 @@ function DailyNotesCard({ day, onUpdate }) {
           </label>
         </div>
       )}
+    </div>
+  );
+}
+
+// Tarjeta de Actividad: pasos / energía activa / sueño de Apple Health (vía iOS Shortcut →
+// bridge → day.health). SOLO CONTEXTO: nunca toca las kcal (el TDEE adaptativo ya capta el
+// gasto). Estado vacío si no hay datos del día.
+function fmtSleepHours(hrs) {
+  if (hrs == null) return '—';
+  const h = Math.floor(hrs);
+  const m = Math.round((hrs - h) * 60);
+  return m > 0 ? `${h}h ${m}m` : `${h}h`;
+}
+
+function ActivityCard({ day }) {
+  const h = day?.health;
+  const has = h && (h.steps != null || h.activeEnergyKcal != null || h.sleepHours != null || h.restingHr != null || h.vo2max != null);
+  return (
+    <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 overflow-hidden">
+      <div className="px-4 pt-3.5 pb-2 flex items-center gap-2">
+        <span className="text-base">🏃</span>
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Actividad</h3>
+        <span className="text-[10px] text-gray-400 dark:text-gray-500">Apple Health · solo contexto</span>
+      </div>
+      {!has ? (
+        <div className="px-4 pb-4 text-xs text-gray-400 dark:text-gray-500">
+          Sin datos de Health para este día. Se actualizan con el atajo del iPhone.
+        </div>
+      ) : (
+        <>
+          <div className="grid grid-cols-3 gap-2 px-3 pb-2">
+            <ActivityMetric label="Pasos" value={h.steps != null ? Number(h.steps).toLocaleString('es-CL') : '—'} />
+            <ActivityMetric label="Energía activa" value={h.activeEnergyKcal != null ? `${Math.round(h.activeEnergyKcal)} kcal` : '—'} />
+            <ActivityMetric label="Sueño" value={fmtSleepHours(h.sleepHours)} />
+          </div>
+          {(h.restingHr != null || h.vo2max != null) && (
+            <div className="px-4 pb-3 text-[11px] text-gray-500 dark:text-gray-400 flex gap-3">
+              {h.restingHr != null && <span>❤️ FC reposo {Math.round(h.restingHr)} lpm</span>}
+              {h.vo2max != null && <span>🫁 VO₂máx {Number(h.vo2max).toFixed(1)}</span>}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function ActivityMetric({ label, value }) {
+  return (
+    <div className="rounded-xl bg-gray-50 dark:bg-gray-800/50 px-2 py-2 text-center">
+      <div className="text-sm font-bold text-gray-800 dark:text-gray-200">{value}</div>
+      <div className="text-[10px] text-gray-500 dark:text-gray-400 mt-0.5">{label}</div>
     </div>
   );
 }
@@ -6571,6 +6654,8 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
 
         <WaterTracker day={day} onUpdate={updateDay} target={targets?.waterTarget || 3000} />
 
+        <ActivityCard day={day} />
+
         {renderFixedSlot('desayuno', 'Desayuno', '08:00', desayunoExtras)}
         {renderColacion('colacion1', 'Colación 1', '11:00', false, colacion1Extras)}
         {renderFixedSlot('almuerzo', 'Almuerzo', '13:30', almuerzoExtras)}
@@ -6930,6 +7015,7 @@ function InsightsView({ state, setState, targets }) {
       const totals = computeDayTotals(day, state.snackBank, state.proteinBank, targets, state.dessertBank, state.antojoCustomItems || []);
       const dow = new Date(cursor + 'T12:00:00').getDay();
       const weight = (state.weights || []).find((w) => w.date === cursor && w.weightKg != null);
+      const dh = day?.health || null;
       out.push({
         fecha: cursor,
         dow,
@@ -6943,6 +7029,9 @@ function InsightsView({ state, setState, targets }) {
         ejercicio_kcal: Math.round(totals.kcalBurned),
         registrado: totals.eatenAny,
         peso_kg: weight?.weightKg ?? null,
+        pasos: dh?.steps ?? null,
+        energia_activa_kcal: dh?.activeEnergyKcal ?? null,
+        sueno_horas: dh?.sleepHours ?? null,
       });
       cursor = shiftDate(cursor, 1);
     }
@@ -6967,7 +7056,7 @@ function InsightsView({ state, setState, targets }) {
 METAS:
 - kcal: ${T.kcalMin}-${T.kcalMax} · proteína ≥ ${T.proteinMin}g · agua ${T.waterTarget} ml
 
-DATOS (28 días, dow 0=domingo, 6=sábado). "kcal" = comida consumida (BRUTA), ya comparable contra la meta; "ejercicio_kcal" es solo contexto — NO lo restes de "kcal" (el TDEE y la meta ya incorporan la actividad):
+DATOS (28 días, dow 0=domingo, 6=sábado). "kcal" = comida consumida (BRUTA), ya comparable contra la meta; "ejercicio_kcal" es solo contexto — NO lo restes de "kcal" (el TDEE y la meta ya incorporan la actividad). "pasos"/"energia_activa_kcal"/"sueno_horas" son contexto de Apple Health (pueden venir null): úsalos para correlacionar actividad/sueño con la adherencia, pero NO restes la energía activa de las kcal:
 ${JSON.stringify(series, null, 2)}
 
 Devuelve SOLO JSON, sin markdown:
