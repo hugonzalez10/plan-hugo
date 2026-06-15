@@ -2033,6 +2033,20 @@ function bridgeDateKey(entry) {
   return todayKey();
 }
 
+// Clave de día para una fila de `health`. El iOS Shortcut puede mandar la fecha con el
+// formato local (p.ej. "14-06-26" dd-MM-yy) según cómo quedó "Aplicar formato a la fecha";
+// eso no calza con las claves YYYY-MM-DD de la app. Si la fecha NO viene en YYYY-MM-DD
+// limpio, la derivamos del `ts` que selló el servidor (hora local del navegador) — inequívoco.
+function healthDateKey(h) {
+  const d = h && h.date;
+  if (typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
+  if (h && h.ts != null) {
+    const dt = new Date(Number(h.ts));
+    if (!Number.isNaN(dt.getTime())) return todayKey(dt);
+  }
+  return null;
+}
+
 function mergeBridge(state, bridge) {
   const num = (v) => Number(v) || 0;
   const importedIds = new Set((state.bridge?.importedIds) || []);
@@ -2220,8 +2234,10 @@ function mergeBridge(state, bridge) {
   // El Shortcut re-postea el día completo, así que el último valor del día es el bueno.
   if (Array.isArray(bridge.health)) {
     for (const h of bridge.health) {
-      if (h == null || !h.date) continue; // sin fecha no se puede ubicar (no asumir hoy)
-      const d = ensureDay(bridgeDateKey(h));
+      if (h == null) continue;
+      const dk = healthDateKey(h); // normaliza fechas no-estándar del Shortcut (deriva del ts)
+      if (!dk) continue; // sin fecha ubicable
+      const d = ensureDay(dk);
       const next = { ...(d.health || {}) };
       for (const k of ['steps', 'activeEnergyKcal', 'sleepHours', 'restingHr', 'vo2max']) {
         if (h[k] != null && h[k] !== '') next[k] = Number(h[k]);
