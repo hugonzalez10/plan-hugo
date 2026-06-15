@@ -462,45 +462,66 @@ async function parseRoutineWithClaude(rawText, apiKey) {
 }
 
 // Camino template (determinista, 100% offline): formato Speediance. Encabezados
-// "## Día N — Título (~MM min)" + tablas markdown Ejercicio | Peso inicio | Series×Reps | Descanso.
+// "Día N — Título (~MM min)" (con o sin ##). Soporta DOS layouts de tabla:
+//  (a) markdown con pipes  "| Ejercicio | Peso inicio | Series × Reps | Descanso |"
+//  (b) celdas en líneas sueltas (lo que produce mammoth.extractRawText sobre las tablas de
+//      Word del .docx real): nombre / "75 kg" / "4 × 8" / "2-3 min" en 4 líneas seguidas.
+// Líneas de prosa (calentamiento, rampa, ▶ enlaces, cardio de cierre, progresión) se ignoran
+// porque no calzan el patrón fila (nombre + peso-kg + series×reps).
+const RX_DAY_HEADER = /^#{0,3}\s*Día\s*(\d+)\s*[—–-]\s*(.+?)\s*(?:\(~?\s*(\d+)\s*min\))?\s*$/i;
+const RX_WEIGHT = /^\d+([.,]\d+)?\s*kg\b/i;            // "75 kg", "42,5 kg", "8 kg"
+const RX_REPS = /\d+\s*[×xX]\s*\d+/;                    // "4 × 8", "3 × 12 c/pierna"
+const RX_REST = /\b(min|seg|s)\b/i;                     // "2-3 min", "45-60 s", "2 min"
+
+function _mkExercise(rawName, peso, reps, descanso) {
+  let name = String(rawName || '').trim();
+  let anchor = false;
+  const am = name.match(/^⚓\s*/);
+  if (am) { anchor = true; name = name.slice(am[0].length).trim(); }
+  if (!name) return null;
+  return {
+    name, anchor,
+    pesoInicio: peso ? String(peso).trim() : null,
+    seriesReps: reps ? String(reps).trim() : null,
+    descanso: descanso ? String(descanso).trim() : null,
+    notas: null,
+  };
+}
+
 function parseRoutineTemplate(rawText) {
   const lines = String(rawText || '').split(/\r?\n/).map((l) => l.trim());
-  const dayHeader = /^#{0,3}\s*Día\s*(\d+)\s*[—–-]\s*(.+?)\s*(?:\(~?\s*(\d+)\s*min\))?\s*$/i;
   const days = [];
   let cur = null;
-  for (const line of lines) {
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
     if (!line) continue;
-    const h = line.match(dayHeader);
+    const h = line.match(RX_DAY_HEADER);
     if (h) {
-      cur = {
-        label: `Día ${h[1]} — ${h[2].trim()}`,
-        durationMin: h[3] ? Number(h[3]) : null,
-        exercises: [],
-      };
+      cur = { label: `Día ${h[1]} — ${h[2].trim()}`, durationMin: h[3] ? Number(h[3]) : null, exercises: [] };
       days.push(cur);
       continue;
     }
-    if (!cur || line.indexOf('|') < 0) continue; // solo filas de tabla dentro de un día
-    const cells = line.split('|').map((c) => c.trim());
-    // El form "| a | b |" deja celdas vacías al inicio/fin → quitarlas.
-    if (cells.length && cells[0] === '') cells.shift();
-    if (cells.length && cells[cells.length - 1] === '') cells.pop();
-    if (!cells.length) continue;
-    if (/ejercicio/i.test(cells[0])) continue;             // fila de encabezado
-    if (cells.every((c) => /^:?-+:?$/.test(c) || c === '')) continue; // separador ---
-    let name = cells[0] || '';
-    let anchor = false;
-    const am = name.match(/^⚓\s*/);
-    if (am) { anchor = true; name = name.slice(am[0].length).trim(); }
-    if (!name) continue;
-    cur.exercises.push({
-      name,
-      anchor,
-      pesoInicio: cells[1] || null,
-      seriesReps: cells[2] || null,
-      descanso: cells[3] || null,
-      notas: cells[4] || null,
-    });
+    if (!cur) continue;
+    // (a) Fila markdown con pipes.
+    if (line.indexOf('|') >= 0) {
+      const cells = line.split('|').map((c) => c.trim());
+      if (cells.length && cells[0] === '') cells.shift();
+      if (cells.length && cells[cells.length - 1] === '') cells.pop();
+      if (!cells.length) continue;
+      if (/ejercicio/i.test(cells[0])) continue;                          // encabezado
+      if (cells.every((c) => /^:?-+:?$/.test(c) || c === '')) continue;   // separador ---
+      const ex = _mkExercise(cells[0], cells[1], cells[2], cells[3]);
+      if (ex) cur.exercises.push(ex);
+      continue;
+    }
+    // (b) Celdas sueltas (mammoth): nombre + línea-peso + línea-reps (+ línea-descanso).
+    const w = lines[i + 1], r = lines[i + 2], d = lines[i + 3];
+    if (w && r && RX_WEIGHT.test(w) && RX_REPS.test(r)) {
+      const hasRest = d && RX_REST.test(d) && !RX_DAY_HEADER.test(d);
+      const ex = _mkExercise(line, w, r, hasRest ? d : null);
+      if (ex) cur.exercises.push(ex);
+      i += hasRest ? 3 : 2; // saltar las celdas ya consumidas
+    }
   }
   return { title: 'Rutina Speediance', days };
 }
