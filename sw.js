@@ -4,7 +4,7 @@
  * NO interceptamos llamadas a api.anthropic.com.
  */
 
-const CACHE_NAME = 'plan-hugo-v42-rampas';
+const CACHE_NAME = 'plan-hugo-v44-detalle-salud';
 const CORE_URLS = [
   './index.html',
   './app.js',

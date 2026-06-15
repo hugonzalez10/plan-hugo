@@ -7774,6 +7774,7 @@ function HealthView({ state, setState, targets }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [response, setResponse] = useState(cached?.response || null);
+  const [detail, setDetail] = useState(null); // métrica abierta en el detalle día por día
 
   // Serie de 28 días: salud + peso + adherencia (para que Claude correlacione)
   const series = useMemo(() => {
@@ -7926,17 +7927,22 @@ Reglas: 2 a 4 recomendaciones, las más importantes y accionables. Si una dimens
             {metrics.filter((m) => m.count > 0).map((m) => {
               const a = dirArrow(m);
               return (
-                <div key={m.key} className="bento-card" style={{ padding: '14px 16px' }}>
+                <button key={m.key} type="button" onClick={() => setDetail(m)}
+                  className="bento-card text-left" style={{ padding: '14px 16px', cursor: 'pointer' }}
+                  aria-label={`Ver detalle de ${m.label}`}>
                   <div className="flex items-center justify-between">
                     <div className="bento-label">{m.icon} {m.label}</div>
-                    <span style={{ fontSize: 14, fontWeight: 700, color: a.col }}>{a.ch}</span>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                      <span style={{ fontSize: 14, fontWeight: 700, color: a.col }}>{a.ch}</span>
+                      <span style={{ fontSize: 13, color: 'var(--bento-faint)' }}>›</span>
+                    </span>
                   </div>
                   <div className="bento-num" style={{ fontSize: 26, marginTop: 4 }}>
                     {m.last != null ? m.fmt(m.last) : '—'}<span style={{ fontSize: 11, fontWeight: 400, color: 'var(--bento-faint)' }}> {m.unit}</span>
                   </div>
                   <div style={{ fontSize: 10.5, color: 'var(--bento-faint)', marginTop: 2 }}>prom {m.avg != null ? m.fmt(m.avg) : '—'} · {m.count}d</div>
                   <div style={{ marginTop: 8 }}><MetricSparkline points={m.spark} color={m.color} /></div>
-                </div>
+                </button>
               );
             })}
           </div>
@@ -8011,6 +8017,81 @@ Reglas: 2 a 4 recomendaciones, las más importantes y accionables. Si una dimens
           ))}
         </>
       )}
+
+      {detail && <HealthMetricDetail metric={detail} series={series} onClose={() => setDetail(null)} />}
+    </div>
+  );
+}
+
+// Detalle día por día de una métrica de salud: lista cronológica + máx/mín/prom + gráfico grande.
+function HealthMetricDetail({ metric, series, onClose }) {
+  const rows = useMemo(() => series
+    .filter((s) => s[metric.key] != null)
+    .map((s) => ({ fecha: s.fecha, value: Number(s[metric.key]) }))
+    .reverse(), [series, metric.key]);
+  const vals = rows.map((r) => r.value);
+  const minV = vals.length ? Math.min(...vals) : null;
+  const maxV = vals.length ? Math.max(...vals) : null;
+  const fmtDay = (k) => new Date(k + 'T12:00:00').toLocaleDateString('es-CL', { weekday: 'short', day: 'numeric', month: 'short' }).replace('.', '');
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 p-4 overflow-y-auto" onClick={onClose}>
+      <div className="w-full max-w-md bg-white dark:bg-gray-900 rounded-2xl shadow-xl border border-gray-200 dark:border-gray-800 max-h-[85vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+        <div className="sticky top-0 z-10 flex items-center justify-between px-5 py-4 bg-white/95 dark:bg-gray-900/95 backdrop-blur border-b border-gray-200 dark:border-gray-800">
+          <div>
+            <div className="bento-label">{metric.icon} {metric.label}</div>
+            <div style={{ fontSize: 11, color: 'var(--bento-faint)', marginTop: 2 }}>{rows.length} días con datos</div>
+          </div>
+          <button onClick={onClose} aria-label="Cerrar" className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 text-xl leading-none px-2">✕</button>
+        </div>
+
+        <div className="p-5 space-y-4">
+          {/* Resumen máx/prom/mín */}
+          <div className="grid grid-cols-3 gap-2">
+            {[
+              { lbl: 'Mínimo', v: minV },
+              { lbl: 'Promedio', v: metric.avg },
+              { lbl: 'Máximo', v: maxV },
+            ].map((c) => (
+              <div key={c.lbl} className="bento-card text-center" style={{ padding: '10px 8px' }}>
+                <div style={{ fontSize: 9.5, letterSpacing: 0.4, textTransform: 'uppercase', color: 'var(--bento-faint)' }}>{c.lbl}</div>
+                <div className="bento-num" style={{ fontSize: 18, marginTop: 2 }}>{c.v != null ? metric.fmt(c.v) : '—'}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Gráfico grande */}
+          <div className="bento-card" style={{ padding: '14px 16px' }}>
+            <MetricSparkline points={series.map((s, i) => ({ x: i, y: s[metric.key] }))} color={metric.color} height={90} />
+            <div style={{ fontSize: 10, color: 'var(--bento-faint)', marginTop: 6, textAlign: 'center' }}>Últimos 28 días {metric.unit ? `· ${metric.unit}` : ''}</div>
+          </div>
+
+          {/* Lista día por día */}
+          <div className="space-y-1">
+            {rows.length === 0 ? (
+              <div className="text-center text-sm py-6" style={{ color: 'var(--bento-faint)' }}>Sin mediciones registradas</div>
+            ) : rows.map((r, i) => {
+              const prev = rows[i + 1]; // siguiente en la lista = día anterior (orden descendente)
+              const delta = prev ? r.value - prev.value : null;
+              const up = delta != null && delta > 0;
+              const good = delta != null && delta !== 0 && (up === metric.goodUp);
+              return (
+                <div key={r.fecha} className="flex items-center justify-between px-3 py-2 rounded-xl" style={{ background: 'var(--bento-surface)' }}>
+                  <span style={{ fontSize: 12.5, color: 'var(--bento-muted)', textTransform: 'capitalize' }}>{fmtDay(r.fecha)}</span>
+                  <span className="flex items-center gap-2">
+                    <span className="bento-num" style={{ fontSize: 15 }}>{metric.fmt(r.value)}<span style={{ fontSize: 10, fontWeight: 400, color: 'var(--bento-faint)' }}> {metric.unit}</span></span>
+                    {delta != null && delta !== 0 && (
+                      <span style={{ fontSize: 10, fontWeight: 600, minWidth: 26, textAlign: 'right', color: good ? 'var(--bento-pos)' : 'var(--bento-warm)' }}>
+                        {up ? '▲' : '▼'}
+                      </span>
+                    )}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -8022,7 +8103,6 @@ function ExercisesView({ state, setState, targets }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [response, setResponse] = useState(cached?.response || null);
-  const [editSession, setEditSession] = useState(null); // { date, id, name, exercises } | null
   const [progEx, setProgEx] = useState('');             // ejercicio elegido para la progresión
   const [historyOpen, setHistoryOpen] = useState(false);
   const [csvFrom, setCsvFrom] = useState('');           // '' = sin límite inferior (todo)
@@ -8073,16 +8153,6 @@ function ExercisesView({ state, setState, targets }) {
       return { ...prev, days: { ...prev.days, [date]: { ...d, exercise: (d.exercise || []).filter((w) => w.id !== id) } } };
     });
   };
-  const saveSessionEdit = (exs) => {
-    if (!editSession) return;
-    const { date, id } = editSession;
-    setState((prev) => {
-      const d = prev.days[date]; if (!d) return prev;
-      return { ...prev, days: { ...prev.days, [date]: { ...d, exercise: (d.exercise || []).map((w) => (w.id === id ? { ...w, exercises: exs } : w)) } } };
-    });
-    setEditSession(null);
-  };
-
   // Export CSV (reusa el patrón de exportCsv de Ajustes). Rango [csvFrom, csvTo]; csvFrom '' = todo.
   const csvCell = (v) => { const s = String(v ?? ''); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
   const downloadCsv = (lines, name) => {
@@ -8465,10 +8535,6 @@ Reglas:
                           : `${s.volumeKg ? ` · ${Math.round(s.volumeKg)} kg` : ''}${s.exercises.length ? ` · ${s.exercises.length} ej.` : ''}`}
                       </div>
                     </div>
-                    {s.exercises.length > 0 && (
-                      <button onClick={() => setEditSession({ date: s.date, id: s.id, name: s.name, exercises: s.exercises })}
-                        className="shrink-0 text-xs px-2 py-1 rounded-lg" style={{ background: 'var(--bento-surface)' }} aria-label="Editar">✏️</button>
-                    )}
                     <button onClick={() => removeSession(s.date, s.id)}
                       className="shrink-0 text-xs px-2 py-1 rounded-lg" style={{ background: 'rgba(205,122,85,0.12)', color: 'var(--bento-warm)' }} aria-label="Borrar">🗑️</button>
                   </div>
@@ -8595,45 +8661,6 @@ Reglas:
       {capturing && (
         <WorkoutCaptureModal apiKey={apiKey} onClose={() => setCapturing(false)} onSave={addCapture} />
       )}
-      {editSession && (
-        <SessionEditModal session={editSession} onClose={() => setEditSession(null)} onSave={saveSessionEdit} />
-      )}
-    </div>
-  );
-}
-
-// Corrige el grupo muscular de cada ejercicio de una sesión ya cargada (la inferencia puede
-// fallar con los nombres raros de Speediance).
-function SessionEditModal({ session, onClose, onSave }) {
-  const [exs, setExs] = useState(() => (session.exercises || []).map((e) => ({ ...e })));
-  const setMuscle = (i, m) => setExs((prev) => prev.map((e, idx) => (idx === i ? { ...e, muscle: m || null } : e)));
-  return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 p-4 overflow-y-auto">
-      <div className="w-full max-w-md bg-white dark:bg-gray-900 rounded-2xl shadow-xl border border-gray-200 dark:border-gray-800 p-5 space-y-3 my-4 max-h-[92vh] overflow-y-auto">
-        <div className="flex items-center justify-between">
-          <h2 className="text-lg font-bold">✏️ Corregir músculos</h2>
-          <button onClick={onClose} className="w-8 h-8 rounded-full bg-gray-100 dark:bg-gray-800 text-sm">✕</button>
-        </div>
-        <p className="text-xs text-gray-500 dark:text-gray-400">{session.date} · ajusta el grupo muscular de cada ejercicio.</p>
-        {exs.length === 0 && <p className="text-sm text-gray-500 dark:text-gray-400">Esta sesión no tiene desglose por ejercicio.</p>}
-        <div className="space-y-2">
-          {exs.map((e, i) => (
-            <div key={i} className="flex items-center gap-2">
-              <span className="text-lg shrink-0">{emojiForExercise(e.name)}</span>
-              <div className="flex-1 min-w-0 text-sm truncate">{e.name}</div>
-              <select value={e.muscle || ''} onChange={(ev) => setMuscle(i, ev.target.value)}
-                className="shrink-0 text-xs rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 px-2 py-1">
-                <option value="">—</option>
-                {MUSCLE_GROUPS.map((m) => <option key={m} value={m}>{m}</option>)}
-              </select>
-            </div>
-          ))}
-        </div>
-        <div className="flex gap-2 pt-1">
-          <button onClick={onClose} className="flex-1 py-2.5 rounded-xl border border-gray-300 dark:border-gray-700 font-medium text-sm">Cancelar</button>
-          <button onClick={() => onSave(exs)} className="flex-1 py-2.5 rounded-xl bg-emerald-500 text-white font-semibold text-sm hover:bg-emerald-600">Guardar</button>
-        </div>
-      </div>
     </div>
   );
 }
