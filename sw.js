@@ -4,7 +4,7 @@
  * NO interceptamos llamadas a api.anthropic.com.
  */
 
-const CACHE_NAME = 'plan-hugo-v48-tailwind-prebuild';
+const CACHE_NAME = 'plan-hugo-v49-fix-salud-modal-header-overlap';
 const CORE_URLS = [
   './index.html',
   './app.js',
