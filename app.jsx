@@ -419,6 +419,133 @@ async function extractWorkoutFromImage(attachments, apiKey) {
   return extractFromAttachments(list, apiKey, PROMPT_EXTRACT_WORKOUT, { model: MODEL_DEFAULT, maxTokens: 1500 });
 }
 
+// ───────────────── Parser de rutina (.docx → JSON) ─────────────────
+// Dos caminos que convergen en normalizeRoutine: IA (Claude sobre texto libre) con fallback a
+// un parser determinista del formato fijo Speediance. Los videos NO se tocan acá; se re-vinculan
+// por slug en la vista (exercise_videos persiste entre renovaciones).
+
+const PROMPT_PARSE_ROUTINE = `Eres un parser de rutinas de gimnasio. Recibes el texto plano de un documento con una rutina semanal. Extrae los días y, por cada día, sus ejercicios.
+
+Devuelve SOLO JSON válido, sin markdown ni backticks, con este esquema exacto:
+{
+  "title": "título corto de la rutina (o 'Rutina')",
+  "days": [
+    {
+      "label": "Día N — Título (ej. 'Día 1 — Pierna')",
+      "durationMin": número entero o null,
+      "exercises": [
+        {
+          "name": "nombre del ejercicio sin el símbolo de ancla",
+          "anchor": true si el ejercicio trae el símbolo ⚓ o la palabra 'ancla', si no false,
+          "pesoInicio": "peso inicial tal cual aparece (ej. '70 kg') o null",
+          "seriesReps": "series y reps tal cual (ej. '4×8' o '4 series × 8 reps') o null",
+          "descanso": "descanso tal cual (ej. '2-3 min') o null",
+          "notas": "notas del ejercicio o null"
+        }
+      ]
+    }
+  ]
+}
+
+Reglas:
+- Respeta el orden de días y ejercicios del documento.
+- No inventes ejercicios ni pesos: si un campo no aparece, usa null.
+- anchor=true SOLO si hay ⚓ o la palabra 'ancla' junto al ejercicio.`;
+
+// Camino IA: manda el texto a Claude y parsea con parseJsonLoose (tolera fences/truncado).
+async function parseRoutineWithClaude(rawText, apiKey) {
+  const prompt = `${PROMPT_PARSE_ROUTINE}\n\nTexto del documento:\n"""\n${(rawText || '').slice(0, 24000)}\n"""`;
+  const text = await askClaude(prompt, apiKey, 4000, MODEL_DEFAULT);
+  const json = parseJsonLoose(text);
+  if (!json || !Array.isArray(json.days)) throw new Error('La IA no devolvió una rutina válida');
+  return json;
+}
+
+// Camino template (determinista, 100% offline): formato Speediance. Encabezados
+// "## Día N — Título (~MM min)" + tablas markdown Ejercicio | Peso inicio | Series×Reps | Descanso.
+function parseRoutineTemplate(rawText) {
+  const lines = String(rawText || '').split(/\r?\n/).map((l) => l.trim());
+  const dayHeader = /^#{0,3}\s*Día\s*(\d+)\s*[—–-]\s*(.+?)\s*(?:\(~?\s*(\d+)\s*min\))?\s*$/i;
+  const days = [];
+  let cur = null;
+  for (const line of lines) {
+    if (!line) continue;
+    const h = line.match(dayHeader);
+    if (h) {
+      cur = {
+        label: `Día ${h[1]} — ${h[2].trim()}`,
+        durationMin: h[3] ? Number(h[3]) : null,
+        exercises: [],
+      };
+      days.push(cur);
+      continue;
+    }
+    if (!cur || line.indexOf('|') < 0) continue; // solo filas de tabla dentro de un día
+    const cells = line.split('|').map((c) => c.trim());
+    // El form "| a | b |" deja celdas vacías al inicio/fin → quitarlas.
+    if (cells.length && cells[0] === '') cells.shift();
+    if (cells.length && cells[cells.length - 1] === '') cells.pop();
+    if (!cells.length) continue;
+    if (/ejercicio/i.test(cells[0])) continue;             // fila de encabezado
+    if (cells.every((c) => /^:?-+:?$/.test(c) || c === '')) continue; // separador ---
+    let name = cells[0] || '';
+    let anchor = false;
+    const am = name.match(/^⚓\s*/);
+    if (am) { anchor = true; name = name.slice(am[0].length).trim(); }
+    if (!name) continue;
+    cur.exercises.push({
+      name,
+      anchor,
+      pesoInicio: cells[1] || null,
+      seriesReps: cells[2] || null,
+      descanso: cells[3] || null,
+      notas: cells[4] || null,
+    });
+  }
+  return { title: 'Rutina Speediance', days };
+}
+
+// Converge ambos caminos: estampa updatedAt, id por día y slug por ejercicio.
+function normalizeRoutine(j) {
+  const days = (Array.isArray(j?.days) ? j.days : []).map((d, i) => ({
+    id: `dia-${i + 1}`,
+    label: String(d?.label || `Día ${i + 1}`).trim(),
+    durationMin: d?.durationMin != null && !isNaN(Number(d.durationMin)) ? Number(d.durationMin) : null,
+    exercises: (Array.isArray(d?.exercises) ? d.exercises : []).map((ex) => {
+      const name = String(ex?.name || '').trim();
+      return {
+        slug: slugifyExercise(name),
+        name,
+        anchor: !!ex?.anchor,
+        pesoInicio: ex?.pesoInicio ? String(ex.pesoInicio).trim() : null,
+        seriesReps: ex?.seriesReps ? String(ex.seriesReps).trim() : null,
+        descanso: ex?.descanso ? String(ex.descanso).trim() : null,
+        notas: ex?.notas ? String(ex.notas).trim() : null,
+      };
+    }).filter((ex) => ex.name),
+  }));
+  return {
+    title: String(j?.title || 'Rutina').trim() || 'Rutina',
+    updatedAt: new Date().toISOString(),
+    days,
+  };
+}
+
+// Orquestador: IA preferente (si hay API key), siempre con fallback a template.
+async function parseRoutineDocx(rawText, apiKey) {
+  if (apiKey) {
+    try {
+      const j = await parseRoutineWithClaude(rawText, apiKey);
+      if (j && Array.isArray(j.days) && j.days.length) {
+        return { routine: normalizeRoutine(j), source: 'ai' };
+      }
+    } catch (e) {
+      console.warn('Parseo IA de rutina falló, uso template:', e);
+    }
+  }
+  return { routine: normalizeRoutine(parseRoutineTemplate(rawText)), source: 'template' };
+}
+
 const PROMPT_ESTIMATE_EXTRA = `Eres un nutricionista chileno. Estima los macros de un alimento individual o pequeño combo (un snack, una bebida, una galleta — no un plato completo).
 
 Si recibes solo texto, infiere porción razonable (mediana). Si hay foto del producto/empaque, usa la tabla nutricional si es legible; si solo se ve el alimento, estima porción visible.
@@ -1049,6 +1176,14 @@ async function fileToAttachment(file) {
     const b64 = dataUrl.split(',')[1];
     return { kind: 'pdf', b64, name: file.name };
   }
+  // .docx (rutina) — extraer texto plano con mammoth.js (cargado por CDN, cacheado por el SW)
+  if (file.name.toLowerCase().endsWith('.docx') ||
+      file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+    if (!window.mammoth) throw new Error('mammoth.js no cargó (revisa la conexión y reintenta)');
+    const arrayBuffer = await file.arrayBuffer();
+    const { value } = await window.mammoth.extractRawText({ arrayBuffer });
+    return { kind: 'text', text: value || '', name: file.name };
+  }
   // CSV, JSON, TXT, XML — leer como texto
   const text = await file.text();
   return { kind: 'text', text, name: file.name };
@@ -1459,6 +1594,9 @@ function buildSeed() {
     },
     weights: [],
     recipeBank: SEED_RECIPES.map((r) => ({ ...r, id: uuid(), builtin: true, createdAt: null })),
+    favorites: [],
+    routine: null,
+    exercise_videos: {},
     arsenalVersion: 3,
     bridge: { lastSyncAt: null, importedIds: [], pushedIds: [], removedBridgeIds: [] },
     aiCache: { coach: {}, weekly: {}, patterns: null, lastSubstitution: null },
@@ -1646,6 +1784,10 @@ function migrateState(parsed) {
     };
   }
   next.days = migratedDays;
+  next.favorites = Array.isArray(next.favorites) ? next.favorites : [];
+  // Rutina (objeto singleton, null = sin rutina) + mapa de videos por slug (back-fill defensivo).
+  if (next.routine !== null && (typeof next.routine !== 'object' || Array.isArray(next.routine))) next.routine = null;
+  if (typeof next.exercise_videos !== 'object' || next.exercise_videos === null || Array.isArray(next.exercise_videos)) next.exercise_videos = {};
   next.aiCache = next.aiCache || { coach: {}, weekly: {}, patterns: null, lastSubstitution: null };
   next.aiCache.coach = next.aiCache.coach || {};
   next.aiCache.weekly = next.aiCache.weekly || {};
@@ -1831,6 +1973,11 @@ async function fetchBridge(url, token) {
     workouts: Array.isArray(data.workouts) ? data.workouts : [],
     checks: Array.isArray(data.checks) ? data.checks : [],
     water: Array.isArray(data.water) ? data.water : [],
+    health: Array.isArray(data.health) ? data.health : [],
+    // Singletons (objetos, no arrays). El doGet del bridge devuelve el archivo completo, así que
+    // basta con forwardearlos acá para que fluyan bridge→app (energy no está y por eso nunca fluyó).
+    routine: (data.routine && typeof data.routine === 'object' && !Array.isArray(data.routine)) ? data.routine : null,
+    exercise_videos: (data.exercise_videos && typeof data.exercise_videos === 'object' && !Array.isArray(data.exercise_videos)) ? data.exercise_videos : {},
   };
 }
 
@@ -1875,7 +2022,7 @@ function mergeBridge(state, bridge) {
   const removedBridgeIds = new Set((state.bridge?.removedBridgeIds) || []);
   const days = { ...(state.days || {}) };
   const weights = Array.isArray(state.weights) ? [...state.weights] : [];
-  const added = { meals: 0, weights: 0, workouts: 0, checks: 0, water: 0 };
+  const added = { meals: 0, weights: 0, workouts: 0, checks: 0, water: 0, health: 0 };
 
   const ensureDay = (dk) => {
     const base = days[dk] || { eaten: {}, snackId1: null, snackId2: null, proteinId: null, water: { ml: 0 }, skipped: [], nudgesDismissed: [], dessertAlmuerzoId: null, dessertCenaId: null, notes: null };
@@ -2045,6 +2192,25 @@ function mergeBridge(state, bridge) {
     }
   }
 
+  // Métricas de Apple Health (sección `health`, una fila/día). SOLO CONTEXTO: nunca se restan
+  // de las kcal ni entran como ejercicio — el TDEE adaptativo ya captura el gasto vía tendencia
+  // de peso (evita el doble conteo). Overwrite-por-fecha e idempotente: re-mergear la misma fila
+  // reescribe los mismos valores, así que NO usa importedIds (a diferencia del agua, que suma).
+  // El Shortcut re-postea el día completo, así que el último valor del día es el bueno.
+  if (Array.isArray(bridge.health)) {
+    for (const h of bridge.health) {
+      if (h == null || !h.date) continue; // sin fecha no se puede ubicar (no asumir hoy)
+      const d = ensureDay(bridgeDateKey(h));
+      const next = { ...(d.health || {}) };
+      for (const k of ['steps', 'activeEnergyKcal', 'sleepHours', 'restingHr', 'vo2max']) {
+        if (h[k] != null && h[k] !== '') next[k] = Number(h[k]);
+      }
+      if (h.ts != null) next.healthTs = Number(h.ts);
+      d.health = next;
+      added.health++;
+    }
+  }
+
   // Marca secciones FIJAS del plan como comidas (sin duplicar). Backward-compatible:
   // los bridges antiguos no traen `checks`. Cada check se aplica una sola vez (id en
   // importedIds), para no re-marcar si Hugo lo destilda manualmente en la app.
@@ -2082,8 +2248,27 @@ function mergeBridge(state, bridge) {
     energy = Array.from(byDate.values()).sort((a, b) => a.date.localeCompare(b.date));
   }
 
+  // Rutina: objeto singleton, gana el más nuevo por updatedAt (el bridge solo pisa si es posterior).
+  let routine = state.routine;
+  if (bridge.routine && bridge.routine.updatedAt) {
+    const cur = state.routine?.updatedAt || '';
+    if (!cur || bridge.routine.updatedAt > cur) routine = bridge.routine;
+  }
+  // Videos por ejercicio: unión de claves del mapa (NUNCA reemplazo total, así devices concurrentes
+  // conservan sus slugs). Por slug, gana el assignedAt más reciente.
+  let exercise_videos = { ...(state.exercise_videos || {}) };
+  if (bridge.exercise_videos && typeof bridge.exercise_videos === 'object') {
+    for (const [slug, v] of Object.entries(bridge.exercise_videos)) {
+      if (!v || !v.youtube_id) continue;
+      const local = exercise_videos[slug];
+      if (!local || (v.assignedAt && (!local.assignedAt || v.assignedAt > local.assignedAt))) {
+        exercise_videos[slug] = v;
+      }
+    }
+  }
+
   const nextState = {
-    ...state, days, weights, energy,
+    ...state, days, weights, energy, routine, exercise_videos,
     bridge: {
       ...(state.bridge || {}),
       lastSyncAt: new Date().toISOString(),
@@ -2229,6 +2414,24 @@ function computeDayTotals(day, snackBank, proteinBank, targets, dessertBank, cus
 
 function normalizeName(name) {
   return (name || '').toLowerCase().trim().replace(/\s+/g, ' ');
+}
+
+// Slug estable de un ejercicio: minúsculas, sin tildes, espacios/símbolos → guiones. Es la
+// clave de unión entre la rutina y el mapa exercise_videos, así un video sobrevive a renovar
+// la rutina (se re-vincula por slug). OJO: distinto de normalizeName (que NO quita tildes y se
+// usa para el dedup de comidas — no tocar ese).
+function slugifyExercise(name) {
+  return (name || '').toLowerCase().normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/(^-|-$)/g, '');
+}
+
+// Extrae el youtube_id (11 chars) de una URL pegada. Cubre watch?v=, youtu.be/, /shorts/ y
+// /embed/. Devuelve null si no parsea (la app nunca auto-asigna: Hugo siempre pega y confirma).
+function extractYoutubeId(url) {
+  const m = String(url || '').match(/(?:youtu\.be\/|watch\?v=|\/shorts\/|\/embed\/)([A-Za-z0-9_-]{11})/);
+  return m ? m[1] : null;
 }
 
 // Cubeta de despliegue de un extra. Las comidas con slot de una sección del plan
@@ -2815,6 +3018,13 @@ function computeRecents(days, limit = 10, windowDays = 21) {
       fat: Number(b.sample.fat) || 0,
       fiber: Number(b.sample.fiber) || 0,
       count: b.count,
+      // Fidelidad para re-loguear de un toque (todos opcionales, backward-compatible):
+      key: b.norm,
+      barcode: b.sample.barcode || undefined,
+      per100: b.sample.per100 || undefined,
+      portion: b.sample.portion || undefined,
+      source: b.sample.source || undefined,
+      tags: Array.isArray(b.sample.tags) ? b.sample.tags : undefined,
     }));
 }
 
@@ -4273,6 +4483,7 @@ function AddExtraModal({ apiKey, onCancel, onSave }) {
   const [error, setError] = useState(null);
   const [showScanner, setShowScanner] = useState(false);
   const [fromBarcode, setFromBarcode] = useState(null); // {barcode, name}
+  const [productMeta, setProductMeta] = useState(null); // { barcode, per100 } para recordar el producto
   const [tags, setTags] = useState([]); // ['dulce', 'delivery', 'alcohol']
 
   const toggleTag = (tag) => {
@@ -4290,6 +4501,7 @@ function AddExtraModal({ apiKey, onCancel, onSave }) {
     setFiber(String(Number(product.fiber || 0).toFixed(1)));
     setEstimated(null);
     setFromBarcode({ barcode: product.barcode, name: product.name });
+    setProductMeta({ barcode: product.barcode || null, per100: product.raw || null });
     setError(null);
   };
 
@@ -4314,6 +4526,8 @@ function AddExtraModal({ apiKey, onCancel, onSave }) {
     if (!apiKey) { setError('Configura tu API key en ⚙️ Ajustes primero.'); return; }
     if (!canEstimate) { setError('Escribe el nombre o sube una foto.'); return; }
     setEstimating(true); setError(null);
+    setProductMeta(null); // los macros estimados ya no corresponden al producto escaneado
+    setFromBarcode(null);
     try {
       const data = await estimateExtraMacros({ name, attachments, apiKey });
       if (data?.name && !name.trim()) setName(String(data.name));
@@ -4351,7 +4565,10 @@ function AddExtraModal({ apiKey, onCancel, onSave }) {
       fat: num(fat),
       fiber: num(fiber),
       tags: tags.length ? tags.slice() : undefined,
-      source: estimated ? 'haiku-estimate' : 'manual',
+      source: productMeta?.barcode ? 'barcode' : (estimated ? 'haiku-estimate' : 'manual'),
+      barcode: productMeta?.barcode || undefined,
+      per100: productMeta?.per100 || undefined,
+      portion: portion || undefined,
     });
   };
 
@@ -4496,7 +4713,7 @@ function AddExtraModal({ apiKey, onCancel, onSave }) {
 
 // Lista compacta de alimentos registrados (vía WhatsApp/bridge o captura) asignados a un slot
 // del plan (colación/cena), para mostrarlos DENTRO de su sección en vez de en "Extras del día".
-function SlotLoggedItems({ items, onRemove, onEdit }) {
+function SlotLoggedItems({ items, onRemove, onEdit, onToggleFav, favKeys }) {
   if (!items || items.length === 0) return null;
   const meta = (item) => (
     <>
@@ -4524,10 +4741,79 @@ function SlotLoggedItems({ items, onRemove, onEdit }) {
               <div className="text-xs text-gray-500 dark:text-gray-400">{meta(item)}</div>
             </div>
           )}
+          {onToggleFav && (() => {
+            const starred = favKeys?.has(normalizeName(item.name));
+            return (
+              <button onClick={() => onToggleFav(item)} aria-label={starred ? 'Quitar de favoritos' : 'Marcar como favorito'}
+                className={`shrink-0 w-9 h-9 rounded-full flex items-center justify-center text-base ${starred ? 'text-amber-500 bg-amber-50 dark:bg-amber-900/20' : 'text-gray-400 bg-gray-50 dark:bg-gray-800 hover:text-amber-500'}`}>
+                {starred ? '★' : '☆'}
+              </button>
+            );
+          })()}
           <button onClick={() => onRemove(item.id)} aria-label="Borrar"
             className="shrink-0 w-9 h-9 rounded-full bg-rose-50 dark:bg-rose-900/30 text-rose-600 dark:text-rose-300 flex items-center justify-center text-base hover:bg-rose-100 dark:hover:bg-rose-900/50">✕</button>
         </div>
       ))}
+    </div>
+  );
+}
+
+// Tarjeta de "Registro rápido": chips de favoritos + recientes para re-loguear de un toque.
+// Recientes se derivan de computeRecents (no hay store nuevo); favoritos viven en state.favorites.
+function QuickLogChip({ item, starred, onLog, onToggleFav }) {
+  return (
+    <div className="inline-flex items-center rounded-full border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 overflow-hidden">
+      <button type="button" onClick={() => onLog(item)} aria-label={`Registrar ${item.name}`}
+        className="flex items-center gap-1.5 pl-3 pr-2 py-1.5 text-xs hover:bg-emerald-50 dark:hover:bg-emerald-900/20">
+        <span className="text-sm leading-none">{emojiForFood(item.name)}</span>
+        <span className="font-medium text-gray-800 dark:text-gray-200 max-w-[11rem] truncate">{item.name}</span>
+        <span className="text-gray-500 dark:text-gray-400">· {Math.round(Number(item.kcal) || 0)} kcal</span>
+        {Number(item.protein) > 0 && <span className="text-gray-500 dark:text-gray-400">· P {Math.round(item.protein)}g</span>}
+      </button>
+      <button type="button" onClick={() => onToggleFav(item)}
+        aria-label={starred ? 'Quitar de favoritos' : 'Marcar como favorito'}
+        className={`px-2 py-1.5 text-sm border-l border-gray-200 dark:border-gray-700 ${starred ? 'text-amber-500' : 'text-gray-400 hover:text-amber-500'}`}>
+        {starred ? '★' : '☆'}
+      </button>
+    </div>
+  );
+}
+
+function QuickLogCard({ recents, favorites, bankNames, favKeys, onQuickLog, onToggleFav }) {
+  const favChips = favorites || [];
+  // Recientes: fuera los ya favoritos y los que ya se pueden elegir desde el banco (no duplicar).
+  const recentChips = (recents || [])
+    .filter((r) => r.key && !favKeys.has(r.key) && !bankNames.has(r.key))
+    .slice(0, 8);
+  if (favChips.length === 0 && recentChips.length === 0) return null;
+
+  return (
+    <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-3">
+      <div className="flex items-center gap-2">
+        <span className="text-base">⚡</span>
+        <h3 className="text-sm font-bold text-gray-800 dark:text-gray-200">Registro rápido</h3>
+        <span className="text-[11px] text-gray-400 dark:text-gray-500">un toque para repetir</span>
+      </div>
+      {favChips.length > 0 && (
+        <div className="space-y-1.5">
+          <div className="text-[11px] font-semibold uppercase tracking-wide text-amber-600 dark:text-amber-400">★ Favoritos</div>
+          <div className="flex flex-wrap gap-2">
+            {favChips.map((item) => (
+              <QuickLogChip key={`fav-${item.key}`} item={item} starred onLog={onQuickLog} onToggleFav={onToggleFav} />
+            ))}
+          </div>
+        </div>
+      )}
+      {recentChips.length > 0 && (
+        <div className="space-y-1.5">
+          <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Recientes</div>
+          <div className="flex flex-wrap gap-2">
+            {recentChips.map((item) => (
+              <QuickLogChip key={`rec-${item.key}`} item={item} starred={false} onLog={onQuickLog} onToggleFav={onToggleFav} />
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -4850,6 +5136,7 @@ function CoachModal({ state, setState, dateKey, targets, onClose, onOpenSubstitu
     fiber: totals.fiber,
     water: totals.waterMl,
     burned: totals.kcalBurned,
+    health: hashSig(day.health || null),
     dateKey,
     hour: new Date().getHours(),
   });
@@ -4875,6 +5162,11 @@ function CoachModal({ state, setState, dateKey, targets, onClose, onOpenSubstitu
       if (!eaten.colacion2) slotsPendientes.push('colación 2');
       if (!eaten.cena) slotsPendientes.push('cena');
 
+      const hh = day.health || null;
+      const actividadLinea = hh
+        ? `\n- Actividad (Apple Health, SOLO contexto — NO restes la energía activa de las kcal): ${hh.steps != null ? Math.round(hh.steps) + ' pasos' : 'pasos —'} · ${hh.activeEnergyKcal != null ? Math.round(hh.activeEnergyKcal) + ' kcal activos' : 'energía activa —'}${hh.sleepHours != null ? ' · durmió ' + hh.sleepHours.toFixed(1) + ' h' : ''}`
+        : '';
+
       const prompt = `Eres el coach nutricional de Hugo (geriatra chileno, hombre). Sé directo, conciso, sin alarmismo. USA TUTEO CHILENO (tú, tienes, puedes). NO uses voseo argentino (vos, tenés, podés). Nada de "che", "dale".
 
 ESTADO AHORA:
@@ -4885,7 +5177,7 @@ ESTADO AHORA:
 - Grasas: ${Math.round(totals.fat)} / ${T.fatTarget} g
 - Fibra: ${Math.round(totals.fiber)} / ${T.fiberTarget} g
 - Agua: ${totals.waterMl} / ${T.waterTarget} ml
-- Ejercicio quemado hoy: ${Math.round(totals.kcalBurned)} kcal (SOLO informativo — NO lo restes de las calorías; el TDEE y la meta ya incorporan la actividad)
+- Ejercicio quemado hoy: ${Math.round(totals.kcalBurned)} kcal (SOLO informativo — NO lo restes de las calorías; el TDEE y la meta ya incorporan la actividad)${actividadLinea}
 - Comidas sin marcar todavía: ${slotsPendientes.length ? slotsPendientes.join(', ') : 'ninguna'}
 
 Devuelve SOLO JSON, sin markdown, así:
@@ -5253,7 +5545,12 @@ function DailyNotesCard({ day, onUpdate }) {
             return (
               <div key={f.key}>
                 <div className="flex items-center justify-between mb-1.5">
-                  <span className="text-xs font-medium text-gray-700 dark:text-gray-300">{f.emoji} {f.label}</span>
+                  <span className="text-xs font-medium text-gray-700 dark:text-gray-300">
+                    {f.emoji} {f.label}
+                    {f.key === 'sleep' && day?.health?.sleepHours != null && (
+                      <span className="ml-1.5 text-[10px] font-normal text-sky-500 dark:text-sky-400">Health: {fmtSleepHours(day.health.sleepHours)}</span>
+                    )}
+                  </span>
                   <span className="text-[10px] text-gray-500 dark:text-gray-400">{val ? `${val} / 5` : '—'}</span>
                 </div>
                 <div className="flex items-center gap-1">
@@ -5287,6 +5584,58 @@ function DailyNotesCard({ day, onUpdate }) {
           </label>
         </div>
       )}
+    </div>
+  );
+}
+
+// Tarjeta de Actividad: pasos / energía activa / sueño de Apple Health (vía iOS Shortcut →
+// bridge → day.health). SOLO CONTEXTO: nunca toca las kcal (el TDEE adaptativo ya capta el
+// gasto). Estado vacío si no hay datos del día.
+function fmtSleepHours(hrs) {
+  if (hrs == null) return '—';
+  const h = Math.floor(hrs);
+  const m = Math.round((hrs - h) * 60);
+  return m > 0 ? `${h}h ${m}m` : `${h}h`;
+}
+
+function ActivityCard({ day }) {
+  const h = day?.health;
+  const has = h && (h.steps != null || h.activeEnergyKcal != null || h.sleepHours != null || h.restingHr != null || h.vo2max != null);
+  return (
+    <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 overflow-hidden">
+      <div className="px-4 pt-3.5 pb-2 flex items-center gap-2">
+        <span className="text-base">🏃</span>
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Actividad</h3>
+        <span className="text-[10px] text-gray-400 dark:text-gray-500">Apple Health · solo contexto</span>
+      </div>
+      {!has ? (
+        <div className="px-4 pb-4 text-xs text-gray-400 dark:text-gray-500">
+          Sin datos de Health para este día. Se actualizan con el atajo del iPhone.
+        </div>
+      ) : (
+        <>
+          <div className="grid grid-cols-3 gap-2 px-3 pb-2">
+            <ActivityMetric label="Pasos" value={h.steps != null ? Number(h.steps).toLocaleString('es-CL') : '—'} />
+            <ActivityMetric label="Energía activa" value={h.activeEnergyKcal != null ? `${Math.round(h.activeEnergyKcal)} kcal` : '—'} />
+            <ActivityMetric label="Sueño" value={fmtSleepHours(h.sleepHours)} />
+          </div>
+          {(h.restingHr != null || h.vo2max != null) && (
+            <div className="px-4 pb-3 text-[11px] text-gray-500 dark:text-gray-400 flex gap-3">
+              {h.restingHr != null && <span>❤️ FC reposo {Math.round(h.restingHr)} lpm</span>}
+              {h.vo2max != null && <span>🫁 VO₂máx {Number(h.vo2max).toFixed(1)}</span>}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function ActivityMetric({ label, value }) {
+  return (
+    <div className="rounded-xl bg-gray-50 dark:bg-gray-800/50 px-2 py-2 text-center">
+      <div className="text-sm font-bold text-gray-800 dark:text-gray-200">{value}</div>
+      <div className="text-[10px] text-gray-500 dark:text-gray-400 mt-0.5">{label}</div>
     </div>
   );
 }
@@ -6088,6 +6437,72 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
     setPendingViolation({ violations: allViolations, onConfirm: doAction });
   }, [state, today, targets]);
 
+  // ── Registro rápido: recientes + favoritos de un toque ────────────────────────
+  const favorites = useMemo(() => (Array.isArray(state.favorites) ? state.favorites : []), [state.favorites]);
+  const favKeys = useMemo(() => new Set(favorites.map((f) => f.key)), [favorites]);
+  const recents = useMemo(() => computeRecents(state.days || {}, 12), [state.days]);
+  const bankNames = useMemo(() => new Set([
+    ...(state.snackBank || []),
+    ...(state.proteinBank || []),
+    ...(state.dessertBank || []),
+  ].map((b) => normalizeName(b.name))), [state.snackBank, state.proteinBank, state.dessertBank]);
+
+  // Re-loguea un ítem (reciente o favorito) como extra de hoy, de un toque. id/ts FRESCOS en
+  // cada registro (nunca reusar: rompería el dedup del bridge y el guard multi-pestaña). Rutea
+  // por las MISMAS reglas que el modal vía tryWithRules.
+  const quickLogExtra = (item) => {
+    const tagSet = new Set(item.tags || []);
+    const actions = ['add_extra'];
+    if (tagSet.has('dulce')) actions.push('add_dulce');
+    if (tagSet.has('delivery')) actions.push('add_delivery');
+    if (tagSet.has('alcohol')) actions.push('add_alcohol');
+    const doSave = () => updateDay({
+      extras: [...(day.extras || []), {
+        name: item.name,
+        kcal: Number(item.kcal) || 0,
+        protein: Number(item.protein) || 0,
+        carbs: Number(item.carbs) || 0,
+        fat: Number(item.fat) || 0,
+        fiber: Number(item.fiber) || 0,
+        tags: Array.isArray(item.tags) && item.tags.length ? item.tags.slice() : undefined,
+        barcode: item.barcode || undefined,
+        per100: item.per100 || undefined,
+        portion: item.portion || undefined,
+        source: 'quicklog',
+        id: uuid(),
+        ts: Date.now(),
+      }],
+    });
+    tryWithRules(actions, { prospectiveKcal: Number(item.kcal) || 0 }, doSave);
+  };
+
+  // Marca/desmarca un alimento como favorito (estado global, persiste entre días). Keyed por
+  // normalizeName para coincidir con computeRecents y el dedup.
+  const toggleFavorite = (item) => {
+    setState((prev) => {
+      const key = normalizeName(item.name);
+      if (!key) return prev;
+      const list = Array.isArray(prev.favorites) ? prev.favorites : [];
+      if (list.some((f) => f.key === key)) {
+        return { ...prev, favorites: list.filter((f) => f.key !== key) };
+      }
+      return { ...prev, favorites: [...list, {
+        key,
+        name: item.name,
+        kcal: Number(item.kcal) || 0,
+        protein: Number(item.protein) || 0,
+        carbs: Number(item.carbs) || 0,
+        fat: Number(item.fat) || 0,
+        fiber: Number(item.fiber) || 0,
+        barcode: item.barcode || undefined,
+        per100: item.per100 || undefined,
+        portion: item.portion || undefined,
+        source: item.source || 'manual',
+        addedAt: Date.now(),
+      }] };
+    });
+  };
+
   const toggleEaten = (key) => {
     const cur = day.eaten || {};
     updateDay({ eaten: { ...cur, [key]: !cur[key] } });
@@ -6218,7 +6633,8 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
           </button>
         </div>
         {!isSkipped && (
-          <SlotLoggedItems items={slotExtras} onRemove={(id) => removeSlotExtra(slot, id)} onEdit={setEditTarget} />
+          <SlotLoggedItems items={slotExtras} onRemove={(id) => removeSlotExtra(slot, id)} onEdit={setEditTarget}
+            onToggleFav={toggleFavorite} favKeys={favKeys} />
         )}
       </div>
     );
@@ -6275,7 +6691,8 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
           )
         )}
         {!isSkipped && (
-          <SlotLoggedItems items={slotExtras} onRemove={(id) => removeSlotExtra(slot, id)} onEdit={setEditTarget} />
+          <SlotLoggedItems items={slotExtras} onRemove={(id) => removeSlotExtra(slot, id)} onEdit={setEditTarget}
+            onToggleFav={toggleFavorite} favKeys={favKeys} />
         )}
       </div>
     );
@@ -6418,6 +6835,8 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
 
         <WaterTracker day={day} onUpdate={updateDay} target={targets?.waterTarget || 3000} />
 
+        <ActivityCard day={day} />
+
         {renderFixedSlot('desayuno', 'Desayuno', '08:00', desayunoExtras)}
         {renderColacion('colacion1', 'Colación 1', '11:00', false, colacion1Extras)}
         {renderFixedSlot('almuerzo', 'Almuerzo', '13:30', almuerzoExtras)}
@@ -6465,9 +6884,12 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
             );
           })()}
           {!skippedSet.has('cena') && (
-            <SlotLoggedItems items={cenaExtras} onRemove={(id) => removeSlotExtra('cena', id)} onEdit={setEditTarget} />
+            <SlotLoggedItems items={cenaExtras} onRemove={(id) => removeSlotExtra('cena', id)} onEdit={setEditTarget}
+              onToggleFav={toggleFavorite} favKeys={favKeys} />
           )}
         </div>
+        <QuickLogCard recents={recents} favorites={favorites} bankNames={bankNames} favKeys={favKeys}
+          onQuickLog={quickLogExtra} onToggleFav={toggleFavorite} />
         <ExtrasSection day={day} onUpdate={updateDay} apiKey={state.settings?.anthropicApiKey} tryWithRules={tryWithRules}
           onRemoveExtra={(id) => removeSlotExtra('extra', id)} onEditExtra={setEditTarget} />
         <ExerciseSection day={day} onUpdate={updateDay} apiKey={state.settings?.anthropicApiKey} userWeightKg={state.userProfile?.weightKg}
@@ -6655,64 +7077,104 @@ function WeekView({ state, setState, onSelectDay, targets }) {
   const avgKcal = completedRows.length ? Math.round(completedRows.reduce((s, r) => s + r.totals.kcal, 0) / completedRows.length) : 0;
   const avgProtein = completedRows.length ? Math.round(completedRows.reduce((s, r) => s + r.totals.protein, 0) / completedRows.length) : 0;
 
+  // Δ peso de la semana (primer vs último registro dentro de la semana)
+  const weekWeights = (state.weights || []).filter((w) => weekKeys.includes(w.date) && w.weightKg != null).slice().sort((a, b) => (a.date < b.date ? -1 : 1));
+  const deltaKg = weekWeights.length >= 2 ? +(weekWeights[weekWeights.length - 1].weightKg - weekWeights[0].weightKg).toFixed(1) : null;
+  const daysMet = completedRows.filter((r) => colorForKcal(r.totals.kcal, targets) === 'green' && colorForProtein(r.totals.protein, targets) !== 'red').length;
+  const maxKcal = Math.max(1, ...rows.map((r) => r.totals.kcal));
+
   return (
     <div className="px-4 py-4 space-y-4">
       <div className="px-1">
         <h1 className="text-2xl font-bold tracking-tight">Esta semana</h1>
-        <p className="text-sm text-gray-500 dark:text-gray-400">Lunes a sábado</p>
+        <p className="text-sm" style={{ color: 'var(--bento-faint)' }}>Lunes a sábado</p>
       </div>
-      <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 overflow-hidden">
+
+      {/* Resumen · 4 métricas */}
+      <div className="bento-card">
+        <div className="bento-label" style={{ marginBottom: 14 }}>Resumen</div>
+        <div className="grid grid-cols-4 gap-2">
+          <div>
+            <div className="bento-label">Δ Peso</div>
+            <div className="bento-num" style={{ fontSize: 23, marginTop: 4, color: deltaKg == null ? 'var(--bento-ink)' : deltaKg <= 0 ? 'var(--bento-pos)' : 'var(--bento-warm)' }}>{deltaKg == null ? '—' : (deltaKg > 0 ? '+' : '') + deltaKg}</div>
+            <div style={{ fontSize: 10, color: 'var(--bento-faint)' }}>kg</div>
+          </div>
+          <div>
+            <div className="bento-label">Kcal/día</div>
+            <div className="bento-num" style={{ fontSize: 23, marginTop: 4 }}>{avgKcal || '—'}</div>
+            <div style={{ fontSize: 10, color: 'var(--bento-faint)' }}>prom</div>
+          </div>
+          <div>
+            <div className="bento-label">En meta</div>
+            <div className="bento-num" style={{ fontSize: 23, marginTop: 4 }}>{daysMet}<span style={{ fontSize: 12, fontWeight: 400, color: 'var(--bento-faint)' }}>/{completedRows.length}</span></div>
+            <div style={{ fontSize: 10, color: 'var(--bento-faint)' }}>días</div>
+          </div>
+          <div>
+            <div className="bento-label">Proteína</div>
+            <div className="bento-num" style={{ fontSize: 23, marginTop: 4 }}>{avgProtein || '—'}</div>
+            <div style={{ fontSize: 10, color: 'var(--bento-faint)' }}>g/día</div>
+          </div>
+        </div>
+      </div>
+
+      {/* Calorías por día */}
+      <div className="bento-card">
+        <div className="bento-label" style={{ marginBottom: 16 }}>Calorías por día · meta {targets.kcalMax}</div>
+        <div className="flex items-end gap-2" style={{ height: 130 }}>
+          {rows.map((r) => {
+            const has = r.totals.hasSnack && r.totals.hasDinner;
+            const col = !has ? 'var(--bento-surface)' : colorForKcal(r.totals.kcal, targets) === 'green' ? 'var(--bento-ink)' : 'var(--bento-warm)';
+            const h = has ? Math.max(6, (r.totals.kcal / maxKcal) * 96) : 6;
+            return (
+              <div key={r.key} className="flex-1 flex flex-col items-center gap-1.5">
+                <div className="bento-mono" style={{ fontSize: 9, color: 'var(--bento-faint)' }}>{has ? Math.round(r.totals.kcal) : ''}</div>
+                <div style={{ width: '100%', maxWidth: 44, height: `${h}px`, background: col, borderRadius: 4 }} title={`${r.label}: ${Math.round(r.totals.kcal)} kcal`} />
+                <div style={{ fontSize: 11, color: 'var(--bento-muted)' }}>{r.label}</div>
+              </div>
+            );
+          })}
+        </div>
+        <div className="flex gap-4" style={{ marginTop: 14, fontSize: 11, color: 'var(--bento-muted)' }}>
+          <span className="inline-flex items-center gap-1.5"><span style={{ width: 9, height: 9, borderRadius: 2, background: 'var(--bento-ink)' }} /> En meta</span>
+          <span className="inline-flex items-center gap-1.5"><span style={{ width: 9, height: 9, borderRadius: 2, background: 'var(--bento-warm)' }} /> Sobre meta</span>
+        </div>
+      </div>
+
+      {/* Lista de días (tap para abrir) */}
+      <div className="bento-card" style={{ padding: 0, overflow: 'hidden' }}>
         {rows.map((r, i) => {
           const kcalColor = r.totals.hasSnack && r.totals.hasDinner ? colorForKcal(r.totals.kcal, targets) : null;
           const proteinColor = r.totals.hasSnack && r.totals.hasDinner ? colorForProtein(r.totals.protein, targets) : null;
           const worst = kcalColor === 'red' || proteinColor === 'red' ? 'red'
             : kcalColor === 'amber' || proteinColor === 'amber' ? 'amber'
             : kcalColor ? 'green' : null;
+          const worstColor = worst === 'red' ? 'var(--bento-warm)' : worst === 'amber' ? 'var(--bento-yellow)' : worst === 'green' ? 'var(--bento-pos)' : null;
           return (
             <button key={r.key} onClick={() => onSelectDay && onSelectDay(r.key)}
-              className={`w-full text-left flex items-center gap-3 px-4 py-3 active:bg-gray-100 dark:active:bg-gray-800 ${i !== rows.length - 1 ? 'border-b border-gray-200 dark:border-gray-800' : ''} ${r.isToday ? 'bg-gray-50 dark:bg-gray-800/40' : ''}`}>
+              className="w-full text-left flex items-center gap-3 px-4 py-3"
+              style={{ borderTop: i ? '1px solid var(--bento-hairline)' : 'none', background: r.isToday ? 'var(--bento-surface)' : 'transparent' }}>
               <div className="w-14 shrink-0">
-                <div className={`font-semibold text-sm ${r.isToday ? 'text-emerald-600 dark:text-emerald-400' : ''}`}>{r.label}</div>
-                <div className="text-xs text-gray-500 dark:text-gray-400">{r.dateStr}</div>
+                <div className="font-semibold text-sm" style={r.isToday ? { color: 'var(--bento-pos)' } : undefined}>{r.label}</div>
+                <div style={{ fontSize: 12, color: 'var(--bento-faint)' }}>{r.dateStr}</div>
               </div>
-              <div className="flex-1 min-w-0 text-xs text-gray-600 dark:text-gray-400 truncate">
+              <div className="flex-1 min-w-0 truncate" style={{ fontSize: 12, color: 'var(--bento-muted)' }}>
                 {r.totals.snackLabel ? r.totals.snackLabel : <span className="italic">— sin colación</span>}
                 <br />
                 {r.totals.dinnerLabel ? r.totals.dinnerLabel : <span className="italic">— sin cena</span>}
               </div>
               <div className="text-right shrink-0">
-                <div className="text-sm font-semibold">{Math.round(r.totals.kcal)} kcal</div>
-                <div className="text-xs text-gray-500 dark:text-gray-400">{Math.round(r.totals.protein)}g prot</div>
+                <div className="bento-num text-sm">{Math.round(r.totals.kcal)} kcal</div>
+                <div style={{ fontSize: 12, color: 'var(--bento-faint)' }}>{Math.round(r.totals.protein)}g prot</div>
               </div>
               <div className="w-3 shrink-0 flex justify-end">
-                {worst && <div className={`w-2.5 h-2.5 rounded-full ${COLOR_CLASSES[worst].dot}`} />}
+                {worstColor && <div style={{ width: 10, height: 10, borderRadius: 99, background: worstColor }} />}
               </div>
             </button>
           );
         })}
       </div>
-      <WeeklyAnalysisCard state={state} setState={setState} weekKey={weekKey} rows={rows} targets={targets} />
 
-      <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4">
-        <h3 className="text-sm font-semibold mb-2">Promedio semanal</h3>
-        {completedRows.length === 0 ? (
-          <p className="text-sm text-gray-500 dark:text-gray-400">Aún no hay días completos esta semana.</p>
-        ) : (
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <div className="text-xs text-gray-500 dark:text-gray-400">Calorías</div>
-              <div className={`text-xl font-bold ${COLOR_CLASSES[colorForKcal(avgKcal, targets)].text}`}>{avgKcal} kcal</div>
-            </div>
-            <div>
-              <div className="text-xs text-gray-500 dark:text-gray-400">Proteína</div>
-              <div className={`text-xl font-bold ${COLOR_CLASSES[colorForProtein(avgProtein, targets)].text}`}>{avgProtein}g</div>
-            </div>
-          </div>
-        )}
-        <p className="text-xs text-gray-500 dark:text-gray-400 mt-2">
-          Basado en {completedRows.length} día{completedRows.length === 1 ? '' : 's'} con colación y cena.
-        </p>
-      </div>
+      <WeeklyAnalysisCard state={state} setState={setState} weekKey={weekKey} rows={rows} targets={targets} />
     </div>
   );
 }
@@ -6734,6 +7196,7 @@ function InsightsView({ state, setState, targets }) {
       const totals = computeDayTotals(day, state.snackBank, state.proteinBank, targets, state.dessertBank, state.antojoCustomItems || []);
       const dow = new Date(cursor + 'T12:00:00').getDay();
       const weight = (state.weights || []).find((w) => w.date === cursor && w.weightKg != null);
+      const dh = day?.health || null;
       out.push({
         fecha: cursor,
         dow,
@@ -6747,6 +7210,9 @@ function InsightsView({ state, setState, targets }) {
         ejercicio_kcal: Math.round(totals.kcalBurned),
         registrado: totals.eatenAny,
         peso_kg: weight?.weightKg ?? null,
+        pasos: dh?.steps ?? null,
+        energia_activa_kcal: dh?.activeEnergyKcal ?? null,
+        sueno_horas: dh?.sleepHours ?? null,
       });
       cursor = shiftDate(cursor, 1);
     }
@@ -6771,7 +7237,7 @@ function InsightsView({ state, setState, targets }) {
 METAS:
 - kcal: ${T.kcalMin}-${T.kcalMax} · proteína ≥ ${T.proteinMin}g · agua ${T.waterTarget} ml
 
-DATOS (28 días, dow 0=domingo, 6=sábado). "kcal" = comida consumida (BRUTA), ya comparable contra la meta; "ejercicio_kcal" es solo contexto — NO lo restes de "kcal" (el TDEE y la meta ya incorporan la actividad):
+DATOS (28 días, dow 0=domingo, 6=sábado). "kcal" = comida consumida (BRUTA), ya comparable contra la meta; "ejercicio_kcal" es solo contexto — NO lo restes de "kcal" (el TDEE y la meta ya incorporan la actividad). "pasos"/"energia_activa_kcal"/"sueno_horas" son contexto de Apple Health (pueden venir null): úsalos para correlacionar actividad/sueño con la adherencia, pero NO restes la energía activa de las kcal:
 ${JSON.stringify(series, null, 2)}
 
 Devuelve SOLO JSON, sin markdown:
@@ -6815,60 +7281,70 @@ Reglas:
   };
 
   const confidenceColor = response?.confidence === 'alta' ? 'green' : response?.confidence === 'media' ? 'amber' : 'red';
+  const insightTones = ['var(--bento-warm)', 'var(--bento-pos)', 'var(--bento-blue)', 'var(--bento-yellow)', 'var(--bento-lilac)'];
 
   return (
     <div className="px-4 py-4 space-y-4">
       <div className="px-1">
         <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2"><span>🧠</span>Insights</h1>
-        <p className="text-sm text-gray-500 dark:text-gray-400">Patrones de las últimas 4 semanas</p>
+        <p className="text-sm" style={{ color: 'var(--bento-faint)' }}>Patrones de las últimas 4 semanas</p>
       </div>
 
-      <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-3">
-        <div className="flex items-center justify-between text-sm">
-          <span className="text-gray-600 dark:text-gray-400">Días con registro:</span>
-          <span className="font-semibold">{recordedCount} / 28</span>
+      {/* 3 stats */}
+      <div className="grid grid-cols-3 gap-2.5">
+        <div className="bento-card" style={{ padding: '14px' }}>
+          <div className="bento-label">Registro</div>
+          <div className="bento-num" style={{ fontSize: 26, marginTop: 4 }}>{recordedCount}<span style={{ fontSize: 12, fontWeight: 400, color: 'var(--bento-faint)' }}>/28</span></div>
+          <div style={{ fontSize: 11, color: 'var(--bento-faint)', marginTop: 3 }}>{Math.round(recordedCount / 28 * 100)}% cobertura</div>
         </div>
+        <div className="bento-card" style={{ padding: '14px' }}>
+          <div className="bento-label">Patrones</div>
+          <div className="bento-num" style={{ fontSize: 26, marginTop: 4 }}>{response?.insights?.length ?? '—'}</div>
+          <div style={{ fontSize: 11, color: 'var(--bento-faint)', marginTop: 3 }}>por Claude</div>
+        </div>
+        <div className="bento-card" style={{ padding: '14px' }}>
+          <div className="bento-label">Confianza</div>
+          <div className="bento-num" style={{ fontSize: 22, marginTop: 6 }}>{response?.confidence ? response.confidence.charAt(0).toUpperCase() + response.confidence.slice(1) : '—'}</div>
+          <div style={{ fontSize: 11, color: 'var(--bento-faint)', marginTop: 3 }}>{response ? 'del análisis' : 'sin análisis'}</div>
+        </div>
+      </div>
+
+      {/* Generar */}
+      <div className="bento-card space-y-3">
         {!apiKey && (
-          <p className="text-xs text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/30 p-2 rounded-lg">
-            ⚠️ Configura tu API key en ⚙️ Ajustes primero.
-          </p>
+          <p className="text-xs p-2 rounded-lg" style={{ color: 'var(--bento-warm)', background: 'rgba(205,122,85,0.10)' }}>⚠️ Configura tu API key en ⚙️ Ajustes primero.</p>
         )}
         <button onClick={generate} disabled={loading || !apiKey || recordedCount < 7}
-          className="w-full py-2.5 rounded-xl bg-emerald-500 text-white font-semibold hover:bg-emerald-600 disabled:bg-gray-300 dark:disabled:bg-gray-700 disabled:text-gray-500">
+          className="w-full py-2.5 rounded-xl font-semibold"
+          style={loading || !apiKey || recordedCount < 7 ? { background: 'var(--bento-surface)', color: 'var(--bento-faint)' } : { background: 'var(--bento-ink)', color: 'var(--bento-on-ink)' }}>
           {loading ? 'Buscando patrones…' : (response ? (isStale || cacheOlderThan7Days ? 'Actualizar análisis' : 'Regenerar') : 'Detectar patrones con Claude ✨')}
         </button>
-        {error && <p className="text-xs text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-900/30 p-2 rounded-lg">{error}</p>}
+        {recordedCount < 7 && <p style={{ fontSize: 11, color: 'var(--bento-faint)' }}>Necesitas al menos 7 días con registro ({recordedCount} hasta ahora).</p>}
+        {error && <p className="text-xs p-2 rounded-lg" style={{ color: 'var(--bento-warm)', background: 'rgba(205,122,85,0.10)' }}>{error}</p>}
       </div>
 
       {response && (
         <>
-          <div className={`flex items-center gap-2 px-3 py-2 rounded-xl ${COLOR_CLASSES[confidenceColor].bg}`}>
-            <span className="text-base">{response.confidence === 'alta' ? '✅' : response.confidence === 'media' ? 'ℹ️' : '⚠️'}</span>
-            <span className={`text-xs ${COLOR_CLASSES[confidenceColor].text}`}>
-              Confianza {response.confidence}{isStale && ' · datos cambiaron'}
-            </span>
-          </div>
+          {response.confidence && (
+            <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full" style={{ background: 'var(--bento-surface)' }}>
+              <span style={{ width: 8, height: 8, borderRadius: 99, background: confidenceColor === 'green' ? 'var(--bento-pos)' : confidenceColor === 'amber' ? 'var(--bento-yellow)' : 'var(--bento-warm)' }} />
+              <span style={{ fontSize: 11, color: 'var(--bento-muted)' }}>Confianza {response.confidence}{isStale && ' · datos cambiaron'}</span>
+            </div>
+          )}
 
           {response.insights.map((ins, i) => (
-            <div key={i} className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-2">
-              <h3 className="text-sm font-bold">{ins.title}</h3>
-              {ins.evidence && (
-                <p className="text-xs text-gray-600 dark:text-gray-400">
-                  <span className="font-semibold uppercase tracking-wide text-[10px] text-gray-500 dark:text-gray-500">Evidencia</span>
-                  <br />
-                  {ins.evidence}
-                </p>
-              )}
-              {ins.suggestion && (
-                <p className="text-xs text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-900/20 p-2 rounded-lg">
-                  💡 {ins.suggestion}
-                </p>
-              )}
+            <div key={i} className="bento-card space-y-2.5">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <span style={{ width: 9, height: 9, borderRadius: 99, background: insightTones[i % insightTones.length], flexShrink: 0 }} />
+                <span style={{ fontSize: 15, fontWeight: 600, letterSpacing: '-0.01em' }}>{ins.title}</span>
+              </div>
+              {ins.evidence && <p style={{ fontSize: 13, color: 'var(--bento-muted)', lineHeight: 1.5, paddingLeft: 19 }}>{ins.evidence}</p>}
+              {ins.suggestion && <p style={{ fontSize: 12.5, lineHeight: 1.5, padding: '10px 12px', background: 'var(--bento-surface)', borderRadius: 8, marginLeft: 19 }}>💡 {ins.suggestion}</p>}
             </div>
           ))}
 
           {cached?.generatedAt && (
-            <p className="text-[10px] text-gray-500 dark:text-gray-400 text-center">
+            <p className="text-center" style={{ fontSize: 10, color: 'var(--bento-faint)' }}>
               Generado {new Date(cached.generatedAt).toLocaleString('es-CL', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
             </p>
           )}
@@ -6881,6 +7357,274 @@ Reglas:
 // Pestaña Ejercicios: stats locales (siempre visibles) + evaluación crítica con Claude (a
 // pedido, cacheada). Las capturas se suben con WorkoutCaptureModal y guardan el detalle por
 // ejercicio que alimenta los desbalances/progresión.
+// Subida de .docx para renovar la rutina (control reutilizado en vacío y en cabecera).
+function RoutineUpload({ apiKey, onParsed, label = 'Renovar rutina (.docx)' }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const handleFile = async (e) => {
+    const file = (e.target.files || [])[0];
+    e.target.value = '';
+    if (!file) return;
+    setBusy(true); setError(null);
+    try {
+      const att = await fileToAttachment(file);
+      const { routine, source } = await parseRoutineDocx(att.text || '', apiKey);
+      if (!routine.days.length) throw new Error('No se detectaron días/ejercicios en el documento.');
+      onParsed(routine, source);
+    } catch (err) {
+      setError(err.message || 'No se pudo leer el documento.');
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div>
+      <label className={`inline-flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-medium cursor-pointer ${busy ? 'opacity-60 pointer-events-none' : ''}`}
+        style={{ background: 'var(--bento-ink)', color: 'var(--bento-on-ink)' }}>
+        <input type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onChange={handleFile} className="hidden" disabled={busy} />
+        {busy ? '⏳ Leyendo…' : `📄 ${label}`}
+      </label>
+      {error && <p className="text-xs mt-2" style={{ color: 'var(--bento-warm)' }}>{error}</p>}
+    </div>
+  );
+}
+
+// Modal de video por ejercicio: reproduce el embed si hay video, o muestra pegar-link + buscar.
+function RoutineVideoModal({ exercise, video, onAssign, onRemove, onClose }) {
+  const [url, setUrl] = useState('');
+  const [editing, setEditing] = useState(!video);
+  const [error, setError] = useState(null);
+  const save = () => {
+    const id = extractYoutubeId(url);
+    if (!id) { setError('No reconocí un link de YouTube válido.'); return; }
+    onAssign(id);
+    setError(null); setEditing(false); setUrl('');
+  };
+  const search = () => {
+    window.open('https://www.youtube.com/results?search_query=' + encodeURIComponent(exercise.name + ' form technique'), '_blank', 'noopener');
+  };
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 p-4" onClick={onClose}>
+      <div className="w-full max-w-md bg-white dark:bg-gray-900 rounded-2xl shadow-xl border border-gray-200 dark:border-gray-800 p-5 space-y-4" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between gap-2">
+          <h2 className="text-base font-bold truncate">{exercise.anchor ? '⚓ ' : ''}{exercise.name}</h2>
+          <button onClick={onClose} className="w-8 h-8 rounded-full bg-gray-100 dark:bg-gray-800 text-sm shrink-0">✕</button>
+        </div>
+
+        {video && !editing ? (
+          <div className="space-y-3">
+            <div className="relative w-full rounded-xl overflow-hidden bg-black" style={{ aspectRatio: '16 / 9' }}>
+              <iframe
+                src={`https://www.youtube.com/embed/${video.youtube_id}`}
+                title={exercise.name}
+                className="absolute inset-0 w-full h-full"
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                allowFullScreen
+              />
+            </div>
+            <p className="text-xs text-gray-500 dark:text-gray-400">El video necesita conexión para reproducir.</p>
+            <div className="flex gap-2">
+              <button onClick={() => { setEditing(true); setUrl(''); }} className="flex-1 px-3 py-2 rounded-xl text-sm font-medium border border-gray-300 dark:border-gray-700">Cambiar</button>
+              <button onClick={onRemove} className="flex-1 px-3 py-2 rounded-xl text-sm font-medium" style={{ background: 'var(--bento-warm)', color: '#fff' }}>Quitar</button>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {!video && <p className="text-sm text-gray-500 dark:text-gray-400">Sin video. Pega un link de YouTube o búscalo y luego pégalo.</p>}
+            <input
+              type="url" inputMode="url" placeholder="https://youtube.com/watch?v=…"
+              value={url} onChange={(e) => { setUrl(e.target.value); setError(null); }}
+              className="w-full px-3 py-2 rounded-xl text-sm bg-gray-100 dark:bg-gray-800 border border-transparent focus:border-emerald-500 outline-none"
+            />
+            {error && <p className="text-xs" style={{ color: 'var(--bento-warm)' }}>{error}</p>}
+            <div className="flex gap-2">
+              <button onClick={save} className="flex-1 px-3 py-2 rounded-xl text-sm font-medium" style={{ background: 'var(--bento-ink)', color: 'var(--bento-on-ink)' }}>Guardar</button>
+              <button onClick={search} className="flex-1 px-3 py-2 rounded-xl text-sm font-medium border border-gray-300 dark:border-gray-700">🔎 Buscar</button>
+            </div>
+            {video && <button onClick={() => setEditing(false)} className="w-full text-xs text-gray-500 dark:text-gray-400 underline">Cancelar</button>}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function RoutineView({ state, setState }) {
+  const apiKey = state.settings?.anthropicApiKey;
+  const routine = state.routine;
+  const videos = state.exercise_videos || {};
+  const [activeDayId, setActiveDayId] = useState(routine?.days?.[0]?.id ?? null);
+  const [videoModal, setVideoModal] = useState(null); // { slug, name, anchor } | null
+  const [preview, setPreview] = useState(null);        // { routine, source } | null
+
+  // Si cambia la rutina (renovación) y el día activo ya no existe, vuelve al primero.
+  const activeDay = useMemo(() => {
+    const days = routine?.days || [];
+    return days.find((d) => d.id === activeDayId) || days[0] || null;
+  }, [routine, activeDayId]);
+
+  const assignVideo = (slug, youtube_id) => {
+    setState((prev) => ({
+      ...prev,
+      exercise_videos: { ...(prev.exercise_videos || {}), [slug]: { youtube_id, assignedAt: new Date().toISOString() } },
+    }));
+  };
+  const removeVideo = (slug) => {
+    setState((prev) => {
+      const next = { ...(prev.exercise_videos || {}) };
+      delete next[slug];
+      return { ...prev, exercise_videos: next };
+    });
+  };
+
+  const confirmRenew = () => {
+    if (!preview) return;
+    const saved = { ...preview.routine, updatedAt: new Date().toISOString() };
+    setState((prev) => ({ ...prev, routine: saved })); // exercise_videos intacto → videos persisten por slug
+    setActiveDayId(saved.days[0]?.id ?? null);
+    setPreview(null);
+  };
+
+  // ── Preview de renovación (antes de guardar) ──
+  if (preview) {
+    const allEx = preview.routine.days.flatMap((d) => d.exercises);
+    const sinVideo = allEx.filter((ex) => !videos[ex.slug]);
+    return (
+      <div className="space-y-4 pb-24">
+        <div className="bento-card">
+          <div className="flex items-center justify-between">
+            <h2 className="text-lg font-bold">Revisar rutina</h2>
+            <span className="text-xs px-2 py-1 rounded-full" style={{ background: 'var(--bento-surface)', color: 'var(--bento-faint)' }}>
+              {preview.source === 'ai' ? '🤖 IA' : '📐 Plantilla'}
+            </span>
+          </div>
+          <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+            {preview.routine.days.length} días · {allEx.length} ejercicios
+          </p>
+        </div>
+
+        {preview.routine.days.map((d) => (
+          <div key={d.id} className="bento-card">
+            <div className="font-semibold text-sm">{d.label}{d.durationMin ? ` · ~${d.durationMin} min` : ''}</div>
+            <ul className="mt-2 space-y-1">
+              {d.exercises.map((ex, i) => (
+                <li key={i} className="text-sm text-gray-600 dark:text-gray-300">
+                  {ex.anchor ? '⚓ ' : ''}{ex.name}
+                  {(ex.pesoInicio || ex.seriesReps) ? <span className="text-gray-400"> · {[ex.pesoInicio, ex.seriesReps].filter(Boolean).join(' × ')}</span> : null}
+                </li>
+              ))}
+              {!d.exercises.length && <li className="text-sm text-gray-400">Sin ejercicios detectados</li>}
+            </ul>
+          </div>
+        ))}
+
+        {sinVideo.length > 0 && (
+          <div className="bento-card">
+            <div className="bento-label" style={{ marginBottom: 8 }}>Ejercicios nuevos sin video ({sinVideo.length})</div>
+            <div className="flex flex-wrap gap-1.5">
+              {sinVideo.map((ex, i) => (
+                <span key={i} className="text-xs px-2 py-1 rounded-full" style={{ background: 'var(--bento-surface)', color: 'var(--bento-faint)' }}>{ex.name}</span>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="flex gap-2">
+          <button onClick={confirmRenew} className="flex-1 px-3 py-3 rounded-xl text-sm font-bold" style={{ background: 'var(--bento-ink)', color: 'var(--bento-on-ink)' }}>Guardar rutina</button>
+          <button onClick={() => setPreview(null)} className="flex-1 px-3 py-3 rounded-xl text-sm font-medium border border-gray-300 dark:border-gray-700">Cancelar</button>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Estado vacío ──
+  if (!routine || !routine.days?.length) {
+    return (
+      <div className="space-y-4 pb-24">
+        <div className="bento-card text-center py-10 space-y-3">
+          <div className="text-4xl">📐</div>
+          <h2 className="text-lg font-bold">Sin rutina aún</h2>
+          <p className="text-sm text-gray-500 dark:text-gray-400 max-w-xs mx-auto">Sube el documento de tu rutina (.docx) para verla por día y asignar videos de técnica.</p>
+          <div className="flex justify-center pt-1"><RoutineUpload apiKey={apiKey} onParsed={(r, s) => setPreview({ routine: r, source: s })} label="Subir rutina (.docx)" /></div>
+          {!apiKey && <p className="text-xs text-gray-400">Sin API key se usa el parser de plantilla (formato Speediance).</p>}
+        </div>
+      </div>
+    );
+  }
+
+  // ── Vista principal ──
+  const modalEx = videoModal;
+  return (
+    <div className="space-y-4 pb-24">
+      <div className="bento-card">
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <h2 className="text-lg font-bold truncate">{routine.title || 'Rutina'}</h2>
+            {routine.updatedAt && <p className="text-xs text-gray-400 mt-0.5">Actualizada {shortDate(routine.updatedAt.slice(0, 10))}</p>}
+          </div>
+          <RoutineUpload apiKey={apiKey} onParsed={(r, s) => setPreview({ routine: r, source: s })} />
+        </div>
+      </div>
+
+      {/* Day tabs */}
+      <div className="flex gap-2 overflow-x-auto pb-1" style={{ scrollbarWidth: 'none' }}>
+        {routine.days.map((d) => {
+          const on = d.id === activeDay?.id;
+          return (
+            <button key={d.id} onClick={() => setActiveDayId(d.id)}
+              className="px-3 py-2 rounded-xl text-sm font-medium whitespace-nowrap shrink-0"
+              style={on
+                ? { background: 'var(--bento-ink)', color: 'var(--bento-on-ink)' }
+                : { background: 'var(--bento-surface)', color: 'var(--bento-faint)' }}>
+              {d.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {activeDay && (
+        <div className="space-y-3">
+          {activeDay.durationMin && <div className="bento-label">~{activeDay.durationMin} min</div>}
+          {activeDay.exercises.map((ex, i) => {
+            const hasVideo = !!videos[ex.slug]?.youtube_id;
+            const detail = [ex.pesoInicio, ex.seriesReps].filter(Boolean).join(' × ');
+            return (
+              <div key={i} className="bento-card">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="font-semibold text-sm">{ex.anchor ? '⚓ ' : ''}{ex.name}</div>
+                    {detail && <div className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">{detail}</div>}
+                    {ex.descanso && <div className="text-xs text-gray-400 mt-0.5">Descanso {ex.descanso}</div>}
+                    {ex.notas && <div className="text-xs text-gray-400 mt-1 italic">{ex.notas}</div>}
+                  </div>
+                  <button onClick={() => setVideoModal({ slug: ex.slug, name: ex.name, anchor: ex.anchor })}
+                    className="shrink-0 flex items-center gap-1 px-3 py-2 rounded-xl text-sm font-medium"
+                    style={hasVideo
+                      ? { background: 'var(--bento-ink)', color: 'var(--bento-on-ink)' }
+                      : { background: 'var(--bento-surface)', color: 'var(--bento-faint)' }}>
+                    ▶ {hasVideo ? '🎬' : 'Video'}
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+          {!activeDay.exercises.length && <div className="bento-card text-sm text-gray-400 text-center py-6">Este día no tiene ejercicios.</div>}
+        </div>
+      )}
+
+      {modalEx && (
+        <RoutineVideoModal
+          exercise={modalEx}
+          video={videos[modalEx.slug] || null}
+          onAssign={(id) => assignVideo(modalEx.slug, id)}
+          onRemove={() => { removeVideo(modalEx.slug); setVideoModal(null); }}
+          onClose={() => setVideoModal(null)}
+        />
+      )}
+    </div>
+  );
+}
+
 function ExercisesView({ state, setState, targets }) {
   const apiKey = state.settings?.anthropicApiKey;
   const [capturing, setCapturing] = useState(false);
@@ -7116,126 +7860,167 @@ Reglas:
   const maxWeekSessions = Math.max(1, ...stats.weekBuckets.map((w) => w.sessions));
   const maxMuscle = Math.max(1, ...stats.muscleVolume.map((m) => m.sets));
   const confColor = response?.confidence === 'alta' ? 'green' : response?.confidence === 'media' ? 'amber' : 'red';
+  // Color por grupo muscular (variante B): piernas→ink, espalda→blue, pecho/brazos→warm,
+  // core→yellow, movilidad→lilac, glúteos/hombros→pos. Las claves vienen en minúscula.
+  const muscleColorVar = (m) => {
+    const k = (m || '').toLowerCase();
+    if (k.includes('pierna') || k.includes('cuad') || k.includes('cuád')) return 'var(--bento-ink)';
+    if (k.includes('espalda') || k.includes('dorsal')) return 'var(--bento-blue)';
+    if (k.includes('pecho') || k.includes('brazo') || k.includes('bicep') || k.includes('bícep') || k.includes('tricep') || k.includes('trícep')) return 'var(--bento-warm)';
+    if (k.includes('core') || k.includes('abdom')) return 'var(--bento-yellow)';
+    if (k.includes('movil')) return 'var(--bento-lilac)';
+    if (k.includes('glute') || k.includes('glúte') || k.includes('hombro')) return 'var(--bento-pos)';
+    return 'var(--bento-blue)';
+  };
 
   return (
     <div className="px-4 py-4 space-y-4">
       <div className="px-1">
         <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2"><span>🏋️</span>Ejercicios</h1>
-        <p className="text-sm text-gray-500 dark:text-gray-400">Tus rutinas, consistencia y evaluación crítica</p>
+        <p className="text-sm" style={{ color: 'var(--bento-faint)' }}>Tus rutinas, consistencia y evaluación crítica</p>
       </div>
 
       <button onClick={() => setCapturing(true)}
-        className="w-full py-3 rounded-2xl bg-emerald-500 text-white font-semibold text-sm hover:bg-emerald-600 flex items-center justify-center gap-2 shadow-sm">
+        className="w-full py-3.5 rounded-2xl font-semibold text-sm flex items-center justify-center gap-2"
+        style={{ background: 'var(--bento-ink)', color: 'var(--bento-on-ink)' }}>
         <span className="text-base">📸</span><span>Subir captura de entrenamiento</span>
       </button>
 
       {stats.totalSessions === 0 ? (
-        <div className="rounded-2xl border-2 border-dashed border-gray-200 dark:border-gray-800 p-6 text-center text-sm text-gray-500 dark:text-gray-400">
+        <div className="bento-card text-center text-sm" style={{ borderStyle: 'dashed', color: 'var(--bento-muted)' }}>
           Aún no hay entrenamientos registrados. Sube una captura cada día que entrenes y acá verás tu consistencia y una evaluación crítica de tu rutina.
         </div>
       ) : (
         <>
-          {/* KPIs */}
-          <div className="grid grid-cols-2 gap-2">
-            <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-3">
-              <div className="text-2xl font-bold">{stats.freqPerWeek.toFixed(1)}<span className="text-xs font-normal text-gray-500 dark:text-gray-400"> /sem</span></div>
-              <div className="text-[11px] text-gray-500 dark:text-gray-400">
+          {/* Hero · 4 stats */}
+          <div className="bento-grid4">
+            <div className="bento-card" style={{ padding: '16px 18px' }}>
+              <div className="bento-label">Frecuencia</div>
+              <div className="bento-num" style={{ fontSize: 32, marginTop: 4 }}>
+                {stats.freqPerWeek.toFixed(1)}<span style={{ fontSize: 13, fontWeight: 400, color: 'var(--bento-faint)' }}> /sem</span>
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--bento-faint)', marginTop: 4 }}>
                 {stats.cardioSessions > 0
-                  ? `🏋️ ${stats.freqStrengthPerWeek.toFixed(1)} + 🚴 ${stats.freqCardioPerWeek.toFixed(1)} /sem`
-                  : `Frecuencia (${stats.weeks} sem)`}
+                  ? `🏋️ ${stats.freqStrengthPerWeek.toFixed(1)} · 🚴 ${stats.freqCardioPerWeek.toFixed(1)} /sem`
+                  : `últimas ${stats.weeks} sem`}
               </div>
             </div>
-            <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-3">
-              <div className="text-2xl font-bold">{stats.sessionsThisMonth}</div>
-              <div className="text-[11px] text-gray-500 dark:text-gray-400">Sesiones este mes</div>
+            <div className="bento-card" style={{ padding: '16px 18px' }}>
+              <div className="bento-label">Este mes</div>
+              <div className="bento-num" style={{ fontSize: 32, marginTop: 4 }}>{stats.sessionsThisMonth}</div>
+              <div style={{ fontSize: 11, color: 'var(--bento-faint)', marginTop: 4 }}>sesiones</div>
             </div>
-            <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-3">
-              <div className="text-2xl font-bold">{stats.daysSinceLast === 0 ? 'Hoy' : stats.daysSinceLast != null ? `${stats.daysSinceLast}d` : '—'}</div>
-              <div className="text-[11px] text-gray-500 dark:text-gray-400">Desde la última</div>
+            <div className="bento-card" style={{ padding: '16px 18px' }}>
+              <div className="bento-label">Totales</div>
+              <div className="bento-num" style={{ fontSize: 32, marginTop: 4 }}>{stats.totalSessions}</div>
+              <div style={{ fontSize: 11, color: 'var(--bento-faint)', marginTop: 4 }}>sesiones registradas</div>
             </div>
-            <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-3">
-              <div className="text-2xl font-bold">{stats.totalSessions}</div>
-              <div className="text-[11px] text-gray-500 dark:text-gray-400">Sesiones totales</div>
-            </div>
-          </div>
-
-          {/* Días entrenados (últimos 28) */}
-          <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-2">
-            <div className="text-xs font-semibold text-gray-600 dark:text-gray-400">Días entrenados · últimas 4 semanas</div>
-            <div className="flex flex-wrap gap-1">
-              {last28.map((d) => (
-                <div key={d.date} title={d.date}
-                  className={`w-5 h-5 rounded ${d.trained ? 'bg-emerald-500' : 'bg-gray-100 dark:bg-gray-800'} ${(d.dow === 0 || d.dow === 6) && !d.trained ? 'ring-1 ring-gray-200 dark:ring-gray-700' : ''}`} />
-              ))}
+            <div className="bento-card" style={{ padding: '16px 18px' }}>
+              <div className="bento-label">Última</div>
+              <div className="bento-num" style={{ fontSize: 32, marginTop: 4 }}>{stats.daysSinceLast === 0 ? 'Hoy' : stats.daysSinceLast != null ? `${stats.daysSinceLast}d` : '—'}</div>
+              <div style={{ fontSize: 11, color: 'var(--bento-faint)', marginTop: 4 }}>desde la última</div>
             </div>
           </div>
 
-          {/* Tendencia semanal (sesiones) */}
-          <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-2">
-            <div className="text-xs font-semibold text-gray-600 dark:text-gray-400">Sesiones por semana</div>
-            <div className="flex items-end gap-1.5 h-20">
-              {stats.weekBuckets.map((w, i) => (
-                <div key={i} className="flex-1 flex flex-col items-center gap-1">
-                  <div className="w-full bg-emerald-500/80 rounded-t" style={{ height: `${Math.max(4, (w.sessions / maxWeekSessions) * 64)}px` }} title={`${w.sessions} sesiones`} />
-                  <div className="text-[9px] text-gray-400 dark:text-gray-500">{w.label}</div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Volumen por grupo muscular */}
-          {stats.muscleVolume.length > 0 && (
-            <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-2">
-              <div className="text-xs font-semibold text-gray-600 dark:text-gray-400">Volumen por grupo muscular · series ({stats.weeks} sem)</div>
-              {stats.muscleVolume.map((m) => (
-                <div key={m.muscle} className="flex items-center gap-2">
-                  <div className="w-20 text-xs capitalize shrink-0">{m.muscle}</div>
-                  <div className="flex-1 h-4 rounded bg-gray-100 dark:bg-gray-800 overflow-hidden">
-                    <div className="h-full bg-sky-500/80 rounded" style={{ width: `${(m.sets / maxMuscle) * 100}%` }} />
+          {/* Sesiones por semana · Días entrenados */}
+          <div className="bento-grid2 is-a items-start">
+            <div className="bento-card">
+              <div className="bento-label" style={{ marginBottom: 16 }}>Sesiones por semana</div>
+              <div className="flex items-end gap-2.5" style={{ height: 104 }}>
+                {stats.weekBuckets.map((w, i) => (
+                  <div key={i} className="flex-1 flex flex-col items-center gap-1.5">
+                    <div className="bento-num" style={{ fontSize: 11, color: 'var(--bento-faint)' }}>{w.sessions}</div>
+                    <div style={{ width: '100%', maxWidth: 54, height: `${Math.max(4, (w.sessions / maxWeekSessions) * 72)}px`, background: 'var(--bento-ink)', borderRadius: 4 }} title={`${w.sessions} sesiones`} />
+                    <div className="bento-mono" style={{ fontSize: 9, color: 'var(--bento-faint)' }}>{w.label}</div>
                   </div>
-                  <div className="w-8 text-right text-xs font-semibold">{m.sets}</div>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {/* Top ejercicios */}
-          {stats.topExercises.length > 0 && (
-            <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-2">
-              <div className="text-xs font-semibold text-gray-600 dark:text-gray-400">Ejercicios más frecuentes</div>
-              <div className="flex flex-wrap gap-1.5">
-                {stats.topExercises.map((e) => (
-                  <span key={e.name} className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-[11px] bg-gray-100 dark:bg-gray-800">
-                    {emojiForExercise(e.name)} {e.name} <span className="text-gray-400">×{e.count}</span>
-                  </span>
                 ))}
               </div>
+            </div>
+            <div className="bento-card">
+              <div className="bento-label" style={{ marginBottom: 14 }}>Días entrenados · últimas 4 semanas</div>
+              <div className="flex flex-wrap gap-1.5">
+                {last28.map((d) => (
+                  <div key={d.date} title={d.date} style={{ width: 18, height: 18, borderRadius: 4, background: d.trained ? 'var(--bento-ink)' : 'var(--bento-surface)' }} />
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Volumen por grupo · Ejercicios frecuentes */}
+          {(stats.muscleVolume.length > 0 || stats.topExercises.length > 0) && (
+            <div className={`items-start ${stats.muscleVolume.length > 0 && stats.topExercises.length > 0 ? 'bento-grid2 is-b' : 'bento-grid2'}`}>
+              {stats.muscleVolume.length > 0 && (
+                <div className="bento-card">
+                  <div className="bento-label" style={{ marginBottom: 16 }}>Volumen por grupo muscular · series ({stats.weeks} sem)</div>
+                  <div className="flex flex-col gap-3">
+                    {stats.muscleVolume.map((m) => (
+                      <div key={m.muscle} className="grid items-center gap-3" style={{ gridTemplateColumns: '84px 1fr 40px' }}>
+                        <div className="capitalize" style={{ fontSize: 12, color: 'var(--bento-muted)' }}>{m.muscle}</div>
+                        <div style={{ height: 6, borderRadius: 99, background: 'var(--bento-surface)', overflow: 'hidden' }}>
+                          <div style={{ height: '100%', borderRadius: 99, width: `${(m.sets / maxMuscle) * 100}%`, background: muscleColorVar(m.muscle) }} />
+                        </div>
+                        <div className="bento-mono" style={{ fontSize: 12, textAlign: 'right', fontWeight: 600 }}>{m.sets}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {stats.topExercises.length > 0 && (
+                <div className="bento-card">
+                  <div className="bento-label" style={{ marginBottom: 14 }}>Ejercicios más frecuentes</div>
+                  <div className="flex flex-wrap gap-2">
+                    {stats.topExercises.map((e) => (
+                      <span key={e.name} className="inline-flex items-center gap-1.5" style={{ padding: '6px 10px', borderRadius: 8, background: 'var(--bento-surface)', fontSize: 12 }}>
+                        {emojiForExercise(e.name)} {e.name} <span className="bento-mono" style={{ color: 'var(--bento-faint)' }}>×{e.count}</span>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
           {stats.detailSessions === 0 && (
-            <p className="text-[11px] text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/30 p-2 rounded-lg">
+            <p className="text-[11px] p-2 rounded-lg" style={{ color: 'var(--bento-warm)', background: 'rgba(205,122,85,0.10)' }}>
               💡 Ninguna captura trae el desglose por ejercicio todavía. Sube capturas que listen los movimientos (series/reps/peso) para desbloquear el análisis de desbalances y progresión.
             </p>
           )}
 
-          {/* Récords (PRs) */}
+          {/* Récords (PRs) · grilla 2 columnas */}
           {stats.byExercise.length > 0 && (
-            <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-2">
-              <div className="text-xs font-semibold text-gray-600 dark:text-gray-400">🏆 Récords por ejercicio</div>
-              {stats.byExercise.slice(0, 6).map((x) => (
-                <div key={x.name} className="flex items-center justify-between gap-2 text-xs">
-                  <span className="flex items-center gap-1 min-w-0"><span>{emojiForExercise(x.name)}</span><span className="truncate">{x.name}</span></span>
-                  <span className="shrink-0 font-semibold">
-                    {x.bestRm != null ? `1RM ${x.bestRm}` : x.bestWeight != null ? `${x.bestWeight} kg` : ''}
-                    {x.bestVolume != null ? <span className="font-normal text-gray-400"> · vol {Math.round(x.bestVolume)}</span> : null}
-                  </span>
-                </div>
-              ))}
+            <div className="bento-card">
+              <div className="bento-label" style={{ marginBottom: 14 }}>🏆 Récords por ejercicio</div>
+              <div className="bento-grid2 is-eq">
+                {stats.byExercise.slice(0, 6).map((x) => {
+                  const primLabel = x.bestRm != null ? '1RM' : 'Peso';
+                  const primVal = x.bestRm != null ? x.bestRm : x.bestWeight;
+                  return (
+                    <div key={x.name} style={{ padding: '12px 14px', border: '1px solid var(--bento-hairline)', borderRadius: 10 }}>
+                      <div className="flex items-center gap-1.5" style={{ fontSize: 12.5, fontWeight: 600, lineHeight: 1.3 }}>
+                        <span>{emojiForExercise(x.name)}</span><span className="truncate">{x.name}</span>
+                      </div>
+                      <div className="flex gap-4" style={{ marginTop: 8 }}>
+                        {primVal != null && (
+                          <div>
+                            <div className="bento-label" style={{ fontSize: 9 }}>{primLabel}</div>
+                            <div className="bento-num" style={{ fontSize: 18 }}>{primVal}<span style={{ fontSize: 10, color: 'var(--bento-faint)' }}> kg</span></div>
+                          </div>
+                        )}
+                        {x.bestVolume != null && (
+                          <div>
+                            <div className="bento-label" style={{ fontSize: 9 }}>Volumen</div>
+                            <div className="bento-num" style={{ fontSize: 18 }}>{Math.round(x.bestVolume)}</div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           )}
 
-          {/* Progresión por ejercicio */}
+          {/* Progresión por ejercicio (interactivo) */}
           {stats.byExercise.length > 0 && (() => {
             const sel = stats.byExercise.find((x) => x.name === progEx) || stats.byExercise[0];
             const valOf = (e) => (e.oneRepMaxKg ?? e.weightKg ?? null);
@@ -7245,23 +8030,24 @@ Reglas:
             const last = vals.length ? vals[vals.length - 1] : null;
             const delta = first != null && last != null ? last - first : null;
             return (
-              <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-2">
+              <div className="bento-card space-y-2">
                 <div className="flex items-center justify-between gap-2">
-                  <div className="text-xs font-semibold text-gray-600 dark:text-gray-400 shrink-0">📈 Progresión</div>
+                  <div className="bento-label shrink-0">📈 Progresión</div>
                   <select value={sel.name} onChange={(e) => setProgEx(e.target.value)}
-                    className="text-xs rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 px-2 py-1 max-w-[62%] truncate">
+                    className="text-xs rounded-lg px-2 py-1 max-w-[62%] truncate"
+                    style={{ border: '1px solid var(--bento-hairline)', background: 'var(--bento-surface)', color: 'var(--bento-ink)' }}>
                     {stats.byExercise.map((x) => <option key={x.name} value={x.name}>{x.name}</option>)}
                   </select>
                 </div>
-                <div className="text-[11px] text-gray-500 dark:text-gray-400">
+                <div style={{ fontSize: 11, color: 'var(--bento-faint)' }}>
                   1RM / peso máx por sesión · {sel.entries.length} registros
-                  {delta != null ? <span className={delta >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}> · {first}→{last} kg ({delta >= 0 ? '+' : ''}{delta})</span> : null}
+                  {delta != null ? <span style={{ color: delta >= 0 ? 'var(--bento-pos)' : 'var(--bento-warm)' }}> · {first}→{last} kg ({delta >= 0 ? '+' : ''}{delta})</span> : null}
                 </div>
-                <div className="flex items-end gap-1.5 h-20">
+                <div className="flex items-end gap-1.5" style={{ height: 80 }}>
                   {sel.entries.map((e, i) => { const v = valOf(e); return (
                     <div key={i} className="flex-1 flex flex-col items-center gap-1" title={`${e.date}: ${v ?? '—'} kg`}>
-                      <div className="w-full bg-sky-500/80 rounded-t" style={{ height: `${v != null ? Math.max(4, (v / maxV) * 64) : 2}px` }} />
-                      <div className="text-[8px] text-gray-400 dark:text-gray-500">{e.date.slice(5)}</div>
+                      <div style={{ width: '100%', borderRadius: '4px 4px 0 0', background: 'var(--bento-blue)', height: `${v != null ? Math.max(4, (v / maxV) * 64) : 2}px` }} />
+                      <div className="bento-mono" style={{ fontSize: 8, color: 'var(--bento-faint)' }}>{e.date.slice(5)}</div>
                     </div>
                   ); })}
                 </div>
@@ -7270,19 +8056,19 @@ Reglas:
           })()}
 
           {/* Historial de sesiones (ver/editar/borrar) */}
-          <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-2">
+          <div className="bento-card space-y-2">
             <button onClick={() => setHistoryOpen((v) => !v)} className="w-full flex items-center justify-between">
-              <span className="text-xs font-semibold text-gray-600 dark:text-gray-400">📜 Historial de sesiones ({stats.sessions.length})</span>
-              <span className="text-[10px] text-gray-400">{historyOpen ? '▼' : '▶'}</span>
+              <span className="bento-label">📜 Historial de sesiones ({stats.sessions.length})</span>
+              <span style={{ fontSize: 10, color: 'var(--bento-faint)' }}>{historyOpen ? '▼' : '▶'}</span>
             </button>
             {historyOpen && (
               <div className="space-y-1.5 pt-1">
                 {stats.sessions.map((s) => (
-                  <div key={s.id || s.date + s.name} className="flex items-center gap-2 rounded-xl border border-gray-100 dark:border-gray-800 px-3 py-2">
+                  <div key={s.id || s.date + s.name} className="flex items-center gap-2 rounded-xl px-3 py-2" style={{ border: '1px solid var(--bento-hairline)' }}>
                     <span className="text-base shrink-0">{s.type === 'cardio' ? '🚴' : '🏋️'}</span>
                     <div className="flex-1 min-w-0">
                       <div className="text-sm font-medium truncate">{new Date(s.date + 'T12:00:00').toLocaleDateString('es-CL', { weekday: 'short', day: 'numeric', month: 'short' })}</div>
-                      <div className="text-[11px] text-gray-500 dark:text-gray-400">
+                      <div style={{ fontSize: 11, color: 'var(--bento-faint)' }}>
                         {Math.round(s.kcal)} kcal
                         {s.type === 'cardio'
                           ? `${s.distanceM != null ? ` · ${(s.distanceM / 1000).toFixed(1)} km` : ''}${s.avgPowerW != null ? ` · ${s.avgPowerW} W` : ''}${s.minutes != null ? ` · ${s.minutes} min` : ''}`
@@ -7291,10 +8077,10 @@ Reglas:
                     </div>
                     {s.exercises.length > 0 && (
                       <button onClick={() => setEditSession({ date: s.date, id: s.id, name: s.name, exercises: s.exercises })}
-                        className="shrink-0 text-xs px-2 py-1 rounded-lg bg-gray-100 dark:bg-gray-800" aria-label="Editar">✏️</button>
+                        className="shrink-0 text-xs px-2 py-1 rounded-lg" style={{ background: 'var(--bento-surface)' }} aria-label="Editar">✏️</button>
                     )}
                     <button onClick={() => removeSession(s.date, s.id)}
-                      className="shrink-0 text-xs px-2 py-1 rounded-lg bg-rose-50 dark:bg-rose-900/30 text-rose-600 dark:text-rose-300" aria-label="Borrar">🗑️</button>
+                      className="shrink-0 text-xs px-2 py-1 rounded-lg" style={{ background: 'rgba(205,122,85,0.12)', color: 'var(--bento-warm)' }} aria-label="Borrar">🗑️</button>
                   </div>
                 ))}
               </div>
@@ -7302,106 +8088,114 @@ Reglas:
           </div>
 
           {/* Exportar CSV */}
-          <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-3">
-            <div className="text-xs font-semibold text-gray-600 dark:text-gray-400">📤 Exportar CSV</div>
+          <div className="bento-card space-y-3">
+            <div className="bento-label">📤 Exportar CSV</div>
             <div className="flex items-center gap-2 text-xs">
               <label className="flex-1">Desde
                 <input type="date" value={csvFrom} max={csvTo || todayKey()} onChange={(e) => setCsvFrom(e.target.value)}
-                  className="mt-0.5 w-full px-2 py-1.5 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800" />
+                  className="mt-0.5 w-full px-2 py-1.5 rounded-lg" style={{ border: '1px solid var(--bento-hairline)', background: 'var(--bento-surface)', color: 'var(--bento-ink)' }} />
               </label>
               <label className="flex-1">Hasta
                 <input type="date" value={csvTo} max={todayKey()} onChange={(e) => setCsvTo(e.target.value || todayKey())}
-                  className="mt-0.5 w-full px-2 py-1.5 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800" />
+                  className="mt-0.5 w-full px-2 py-1.5 rounded-lg" style={{ border: '1px solid var(--bento-hairline)', background: 'var(--bento-surface)', color: 'var(--bento-ink)' }} />
               </label>
             </div>
-            <p className="text-[10px] text-gray-400 dark:text-gray-500">Deja "Desde" vacío para exportar todo el historial.</p>
+            <p style={{ fontSize: 10, color: 'var(--bento-faint)' }}>Deja "Desde" vacío para exportar todo el historial.</p>
             <div className="grid grid-cols-2 gap-2">
-              <button onClick={exportDetailed} className="py-2 rounded-xl border border-gray-300 dark:border-gray-700 text-xs font-semibold hover:bg-gray-50 dark:hover:bg-gray-800">📊 Por ejercicio</button>
-              <button onClick={exportSummary} className="py-2 rounded-xl border border-gray-300 dark:border-gray-700 text-xs font-semibold hover:bg-gray-50 dark:hover:bg-gray-800">📋 Por sesión</button>
+              <button onClick={exportDetailed} className="py-2 rounded-xl text-xs font-semibold" style={{ border: '1px solid var(--bento-hairline)' }}>📊 Por ejercicio</button>
+              <button onClick={exportSummary} className="py-2 rounded-xl text-xs font-semibold" style={{ border: '1px solid var(--bento-hairline)' }}>📋 Por sesión</button>
             </div>
           </div>
         </>
       )}
 
       {/* Evaluación crítica con Claude */}
-      <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-3">
-        <div className="text-sm font-bold">Evaluación crítica</div>
+      <div className="bento-label" style={{ marginTop: 8 }}>Evaluación crítica · Claude</div>
+      <div className="bento-card space-y-3">
         {!apiKey && (
-          <p className="text-xs text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/30 p-2 rounded-lg">⚠️ Configura tu API key en ⚙️ Ajustes primero.</p>
+          <p className="text-xs p-2 rounded-lg" style={{ color: 'var(--bento-warm)', background: 'rgba(205,122,85,0.10)' }}>⚠️ Configura tu API key en ⚙️ Ajustes primero.</p>
         )}
         <button onClick={generate} disabled={loading || !apiKey || stats.totalSessions < 3}
-          className="w-full py-2.5 rounded-xl bg-emerald-500 text-white font-semibold hover:bg-emerald-600 disabled:bg-gray-300 dark:disabled:bg-gray-700 disabled:text-gray-500">
+          className="w-full py-2.5 rounded-xl font-semibold"
+          style={loading || !apiKey || stats.totalSessions < 3
+            ? { background: 'var(--bento-surface)', color: 'var(--bento-faint)' }
+            : { background: 'var(--bento-ink)', color: 'var(--bento-on-ink)' }}>
           {loading ? 'Evaluando tu rutina…' : (response ? (isStale || cacheOld ? 'Actualizar evaluación' : 'Regenerar') : 'Evaluar mi rutina con Claude ✨')}
         </button>
         {stats.totalSessions < 3 && (
-          <p className="text-[11px] text-gray-500 dark:text-gray-400">Necesitas al menos 3 sesiones registradas ({stats.totalSessions} hasta ahora).</p>
+          <p style={{ fontSize: 11, color: 'var(--bento-faint)' }}>Necesitas al menos 3 sesiones registradas ({stats.totalSessions} hasta ahora).</p>
         )}
-        {error && <p className="text-xs text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-900/30 p-2 rounded-lg">{error}</p>}
+        {error && <p className="text-xs p-2 rounded-lg" style={{ color: 'var(--bento-warm)', background: 'rgba(205,122,85,0.10)' }}>{error}</p>}
       </div>
 
       {response && (
         <>
           {response.confidence && (
-            <div className={`flex items-center gap-2 px-3 py-2 rounded-xl ${COLOR_CLASSES[confColor].bg}`}>
-              <span className="text-base">{response.confidence === 'alta' ? '✅' : response.confidence === 'media' ? 'ℹ️' : '⚠️'}</span>
-              <span className={`text-xs ${COLOR_CLASSES[confColor].text}`}>Confianza {response.confidence}{isStale && ' · datos cambiaron'}</span>
+            <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full" style={{ background: 'var(--bento-surface)' }}>
+              <span style={{ width: 8, height: 8, borderRadius: 99, background: confColor === 'green' ? 'var(--bento-pos)' : confColor === 'amber' ? 'var(--bento-yellow)' : 'var(--bento-warm)' }} />
+              <span style={{ fontSize: 11, color: 'var(--bento-muted)' }}>Confianza {response.confidence}{isStale && ' · datos cambiaron'}</span>
             </div>
           )}
 
           {(response.resumen || response.consistencia) && (
-            <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-2">
+            <div className="bento-card space-y-2">
               {response.resumen && <p className="text-sm">{response.resumen}</p>}
-              {response.consistencia && <p className="text-xs text-gray-600 dark:text-gray-400">📅 {response.consistencia}</p>}
+              {response.consistencia && <p style={{ fontSize: 12, color: 'var(--bento-muted)' }}>📅 {response.consistencia}</p>}
             </div>
           )}
 
           {Array.isArray(response.seguir) && response.seguir.length > 0 && (
-            <div className="rounded-2xl border border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-900/20 p-4 space-y-1.5">
-              <div className="text-xs font-bold text-emerald-800 dark:text-emerald-200 uppercase tracking-wide">✅ Qué seguir</div>
-              {response.seguir.map((s, i) => (<p key={i} className="text-xs text-emerald-800 dark:text-emerald-200">• {s}</p>))}
+            <div className="bento-card" style={{ background: 'rgba(122,154,120,0.10)', borderColor: 'transparent' }}>
+              <div className="bento-label" style={{ color: 'var(--bento-pos)', marginBottom: 10 }}>✅ Qué seguir</div>
+              <ul className="space-y-1.5" style={{ margin: 0, paddingLeft: 18 }}>
+                {response.seguir.map((s, i) => (<li key={i} style={{ fontSize: 13, lineHeight: 1.45 }}>{s}</li>))}
+              </ul>
             </div>
           )}
 
           {Array.isArray(response.mejorar) && response.mejorar.map((m, i) => (
-            <div key={i} className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-2">
-              <h3 className="text-sm font-bold">🔧 {typeof m === 'string' ? m : m.que}</h3>
-              {m.porque && <p className="text-xs text-gray-600 dark:text-gray-400"><span className="font-semibold uppercase tracking-wide text-[10px] text-gray-500">Por qué</span><br />{m.porque}</p>}
-              {m.como && <p className="text-xs text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-900/20 p-2 rounded-lg">💡 {m.como}</p>}
+            <div key={i} className="bento-card space-y-2.5">
+              <div className="bento-label">🔧 {typeof m === 'string' ? m : m.que}</div>
+              {m.porque && <p style={{ fontSize: 12.5, color: 'var(--bento-muted)', lineHeight: 1.5 }}>{m.porque}</p>}
+              {m.como && <p style={{ fontSize: 12.5, lineHeight: 1.5, padding: '10px 12px', background: 'var(--bento-surface)', borderRadius: 8 }}>💡 {m.como}</p>}
             </div>
           ))}
 
-          {response.desbalances && (
-            <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-1">
-              <div className="text-xs font-bold uppercase tracking-wide text-gray-500">⚖️ Desbalances</div>
-              <p className="text-xs text-gray-700 dark:text-gray-300">{response.desbalances}</p>
-            </div>
-          )}
-
-          {response.progresion && (
-            <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-1">
-              <div className="text-xs font-bold uppercase tracking-wide text-gray-500">📈 Progresión</div>
-              <p className="text-xs text-gray-700 dark:text-gray-300">{response.progresion}</p>
+          {(response.desbalances || response.progresion) && (
+            <div className="bento-grid2 is-eq items-start">
+              {response.desbalances && (
+                <div className="bento-card">
+                  <div className="bento-label" style={{ marginBottom: 10 }}>⚖️ Desbalances</div>
+                  <p style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--bento-muted)' }}>{response.desbalances}</p>
+                </div>
+              )}
+              {response.progresion && (
+                <div className="bento-card">
+                  <div className="bento-label" style={{ marginBottom: 10 }}>📉 Progresión</div>
+                  <p style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--bento-muted)' }}>{response.progresion}</p>
+                </div>
+              )}
             </div>
           )}
 
           {response.nota_critica && (
-            <div className="rounded-2xl border border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-900/20 p-4 space-y-1">
-              <div className="text-xs font-bold uppercase tracking-wide text-amber-700 dark:text-amber-300">🎯 Nota crítica</div>
-              <p className="text-sm text-amber-900 dark:text-amber-100">{response.nota_critica}</p>
+            <div className="bento-card" style={{ background: 'rgba(205,122,85,0.10)', borderColor: 'transparent' }}>
+              <div className="bento-label" style={{ color: 'var(--bento-warm)', marginBottom: 10 }}>🐂 Nota crítica</div>
+              <p className="text-sm" style={{ lineHeight: 1.6 }}>{response.nota_critica}</p>
             </div>
           )}
 
-          <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4 space-y-2">
-            <div className="text-xs font-semibold text-gray-600 dark:text-gray-400">📤 Exportar evaluación (para discutir con otra IA)</div>
+          <div className="bento-card space-y-2">
+            <div className="bento-label">📤 Exportar evaluación (para discutir con otra IA)</div>
             <div className="grid grid-cols-2 gap-2">
-              <button onClick={exportEvalPdf} className="py-2 rounded-xl border border-gray-300 dark:border-gray-700 text-xs font-semibold hover:bg-gray-50 dark:hover:bg-gray-800">📄 PDF</button>
-              <button onClick={exportEvalMarkdown} className="py-2 rounded-xl border border-gray-300 dark:border-gray-700 text-xs font-semibold hover:bg-gray-50 dark:hover:bg-gray-800">📝 Texto (Markdown)</button>
+              <button onClick={exportEvalPdf} className="py-2 rounded-xl text-xs font-semibold" style={{ border: '1px solid var(--bento-hairline)' }}>📄 PDF</button>
+              <button onClick={exportEvalMarkdown} className="py-2 rounded-xl text-xs font-semibold" style={{ border: '1px solid var(--bento-hairline)' }}>📝 Texto (Markdown)</button>
             </div>
-            <p className="text-[10px] text-gray-400 dark:text-gray-500">Incluyen la evaluación + datos de respaldo (frecuencia, volumen por músculo, récords, progresión e historial). El Markdown agrega el historial completo en JSON.</p>
+            <p style={{ fontSize: 10, color: 'var(--bento-faint)' }}>Incluyen la evaluación + datos de respaldo (frecuencia, volumen por músculo, récords, progresión e historial). El Markdown agrega el historial completo en JSON.</p>
           </div>
 
           {cached?.generatedAt && (
-            <p className="text-[10px] text-gray-500 dark:text-gray-400 text-center">
+            <p className="text-center" style={{ fontSize: 10, color: 'var(--bento-faint)' }}>
               Generado {new Date(cached.generatedAt).toLocaleString('es-CL', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
             </p>
           )}
@@ -7630,16 +8424,16 @@ function BankItemForm({ initial, kind, apiKey, onSave, onCancel }) {
 
 function BankList({ items, kind, onAdd, onEdit, onDelete }) {
   return (
-    <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 overflow-hidden">
+    <div className="bento-card" style={{ padding: 0, overflow: 'hidden' }}>
       {items.length === 0 ? (
-        <div className="p-4 text-sm text-gray-500 dark:text-gray-400 italic">Sin opciones todavía.</div>
+        <div className="p-4 text-sm italic" style={{ color: 'var(--bento-faint)' }}>Sin opciones todavía.</div>
       ) : (
         items.map((item, i) => (
-          <div key={item.id} className={`flex items-center gap-3 px-4 py-3 ${i !== items.length - 1 ? 'border-b border-gray-200 dark:border-gray-800' : ''}`}>
+          <div key={item.id} className="flex items-center gap-3 px-4 py-3" style={{ borderTop: i ? '1px solid var(--bento-hairline)' : 'none' }}>
             <div className="flex-1 min-w-0">
               <div className="font-medium text-sm">{item.name}</div>
-              <div className="text-xs text-gray-500 dark:text-gray-400">
-                {item.kcal} kcal · P {item.protein}g
+              <div style={{ fontSize: 12, color: 'var(--bento-faint)' }}>
+                <span className="bento-num" style={{ color: 'var(--bento-ink)' }}>{item.kcal}</span> kcal · P {item.protein}g
                 {(item.carbs || item.fat || item.fiber) ? <> · C {Math.round(item.carbs || 0)} · G {Math.round(item.fat || 0)} · F {Number(item.fiber || 0).toFixed(0)}</> : null}
                 {kind === 'snack' && item.category && ` · ${item.category}`}
                 {item.gi && item.gi !== 'bajo' ? ` · GI ${item.gi}` : null}
@@ -7648,18 +8442,18 @@ function BankList({ items, kind, onAdd, onEdit, onDelete }) {
               {Array.isArray(item.tags) && item.tags.length > 0 && (
                 <div className="mt-1 flex flex-wrap gap-1">
                   {item.tags.map((t) => (
-                    <span key={t} className="px-1.5 py-0.5 rounded-full text-[9px] font-semibold bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400">{t}</span>
+                    <span key={t} className="px-1.5 py-0.5 rounded-full text-[9px] font-semibold" style={{ background: 'var(--bento-surface)', color: 'var(--bento-faint)' }}>{t}</span>
                   ))}
                 </div>
               )}
             </div>
-            <button onClick={() => onEdit(item)} className="text-xs font-medium px-2.5 py-1.5 rounded-lg bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700">Editar</button>
+            <button onClick={() => onEdit(item)} className="text-xs font-medium px-2.5 py-1.5 rounded-lg" style={{ background: 'var(--bento-surface)' }}>Editar</button>
             <button onClick={() => { if (confirm(`¿Eliminar "${item.name}"?`)) onDelete(item.id); }}
-              className="text-xs font-medium px-2.5 py-1.5 rounded-lg bg-rose-100 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300 hover:bg-rose-200">Borrar</button>
+              className="text-xs font-medium px-2.5 py-1.5 rounded-lg" style={{ background: 'rgba(205,122,85,0.12)', color: 'var(--bento-warm)' }}>Borrar</button>
           </div>
         ))
       )}
-      <button onClick={onAdd} className="w-full py-3 text-sm font-semibold text-emerald-600 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 border-t border-gray-200 dark:border-gray-800">
+      <button onClick={onAdd} className="w-full py-3 text-sm font-semibold" style={{ color: 'var(--bento-ink)', borderTop: '1px solid var(--bento-hairline)' }}>
         + Agregar {kind === 'snack' ? 'colación' : kind === 'dessert' ? 'postre' : 'proteína'}
       </button>
     </div>
@@ -7888,24 +8682,25 @@ function BankView({ state, setState }) {
     <div className="px-4 py-4 space-y-5">
       <div className="px-1">
         <h1 className="text-2xl font-bold tracking-tight">Banco</h1>
-        <p className="text-sm text-gray-500 dark:text-gray-400">Edita colaciones, proteínas de cena y postres</p>
+        <p className="text-sm" style={{ color: 'var(--bento-faint)' }}>Tus comidas frecuentes · colaciones, cenas y postres</p>
       </div>
 
       <button onClick={() => setShowShopping(true)}
-        className="w-full flex items-center gap-3 rounded-2xl bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800 p-3.5 hover:bg-emerald-100 dark:hover:bg-emerald-900/30 transition-colors">
-        <span className="text-2xl shrink-0">🛒</span>
+        className="w-full flex items-center gap-3 bento-card"
+        style={{ padding: 14 }}>
+        <span className="w-9 h-9 rounded-lg shrink-0 flex items-center justify-center text-lg" style={{ background: 'var(--bento-surface)' }}>🛒</span>
         <div className="flex-1 min-w-0 text-left">
-          <div className="text-sm font-semibold text-emerald-800 dark:text-emerald-200">Generar lista de compras</div>
-          <div className="text-[11px] text-emerald-700 dark:text-emerald-300 mt-0.5">Basada en lo que comiste esta semana · compartible por WhatsApp</div>
+          <div className="text-sm font-semibold">Generar lista de compras</div>
+          <div style={{ fontSize: 11, color: 'var(--bento-faint)', marginTop: 2 }}>Basada en lo que comiste esta semana · compartible por WhatsApp</div>
         </div>
-        <span className="shrink-0 text-emerald-700 dark:text-emerald-300 font-bold">→</span>
+        <span className="shrink-0 font-bold" style={{ color: 'var(--bento-faint)' }}>→</span>
       </button>
 
       <div>
         <div className="flex items-end justify-between mb-1">
           <SectionHeader title="Colaciones" />
           <button onClick={() => setSuggesting('snack')}
-            className="px-2.5 py-1 rounded-full text-[11px] font-semibold bg-sky-100 dark:bg-sky-900/30 text-sky-700 dark:text-sky-300 hover:bg-sky-200 dark:hover:bg-sky-900/50">
+            className="px-2.5 py-1 rounded-full text-[11px] font-semibold" style={{ background: 'rgba(90,141,181,0.14)', color: 'var(--bento-blue)' }}>
             ✨ Sugerir más
           </button>
         </div>
@@ -7918,7 +8713,7 @@ function BankView({ state, setState }) {
         <div className="flex items-end justify-between mb-1">
           <SectionHeader title="Proteínas de cena" />
           <button onClick={() => setSuggesting('protein')}
-            className="px-2.5 py-1 rounded-full text-[11px] font-semibold bg-sky-100 dark:bg-sky-900/30 text-sky-700 dark:text-sky-300 hover:bg-sky-200 dark:hover:bg-sky-900/50">
+            className="px-2.5 py-1 rounded-full text-[11px] font-semibold" style={{ background: 'rgba(90,141,181,0.14)', color: 'var(--bento-blue)' }}>
             ✨ Sugerir más
           </button>
         </div>
@@ -7931,7 +8726,7 @@ function BankView({ state, setState }) {
         <div className="flex items-end justify-between mb-1">
           <SectionHeader title="Postres" hint="Opcional, para almuerzo o cena" />
           <button onClick={() => setSuggesting('dessert')}
-            className="px-2.5 py-1 rounded-full text-[11px] font-semibold bg-sky-100 dark:bg-sky-900/30 text-sky-700 dark:text-sky-300 hover:bg-sky-200 dark:hover:bg-sky-900/50">
+            className="px-2.5 py-1 rounded-full text-[11px] font-semibold" style={{ background: 'rgba(90,141,181,0.14)', color: 'var(--bento-blue)' }}>
             ✨ Sugerir más
           </button>
         </div>
@@ -10246,55 +11041,59 @@ function WeightView({ state, setState, targets }) {
     });
   };
 
+  const metricDots = ['var(--bento-warm)', 'var(--bento-blue)', 'var(--bento-lilac)', 'var(--bento-yellow)', 'var(--bento-pos)', 'var(--bento-ink)'];
+
   return (
     <div className="px-4 py-4 space-y-4">
       <div className="px-1">
         <h1 className="text-2xl font-bold tracking-tight">⚖️ Peso & composición</h1>
-        <p className="text-sm text-gray-500 dark:text-gray-400">Sube la captura de tu Speediance o ingresa manual</p>
+        <p className="text-sm" style={{ color: 'var(--bento-faint)' }}>{last ? `Última medición · ${last.date}${last.time ? ' · ' + last.time : ''}` : 'Sube la captura de tu Speediance o ingresa manual'}</p>
       </div>
 
       <WeighInNudge weights={weights} onAction={() => setAdding(true)} />
 
       {last ? (
-        <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4">
-          <div className="flex items-center justify-between mb-2">
-            <span className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Última medición</span>
-            <span className="text-xs text-gray-500 dark:text-gray-400">{last.date}{last.time ? ` · ${last.time}` : ''}</span>
-          </div>
-          {last.bodyType && (
-            <div className="mb-3 inline-block px-2.5 py-1 rounded-full bg-amber-100 dark:bg-amber-900/30 text-amber-800 dark:text-amber-200 text-[11px] font-semibold uppercase tracking-wide">
-              {last.bodyType}
+        <div className="bento-card">
+          <div className="flex items-start justify-between" style={{ marginBottom: 16 }}>
+            <div>
+              <div className="bento-label">Peso actual</div>
+              <div className="bento-num" style={{ fontSize: 44, lineHeight: 1, marginTop: 6 }}>{last.weightKg != null ? Number(last.weightKg).toFixed(1) : '—'}<span style={{ fontSize: 15, fontWeight: 400, color: 'var(--bento-faint)' }}> kg</span></div>
             </div>
-          )}
-          <div className="grid grid-cols-2 gap-3">
-            {WEIGHT_FIELDS.filter((wf) => last[wf.key] != null).map((wf) => {
+            {last.bodyType && (
+              <span className="px-2.5 py-1 rounded-full text-[11px] font-semibold uppercase tracking-wide" style={{ background: 'rgba(217,166,72,0.16)', color: 'var(--bento-yellow)' }}>{last.bodyType}</span>
+            )}
+          </div>
+          <div className="bento-label" style={{ marginBottom: 12 }}>Composición corporal</div>
+          <div className="grid grid-cols-2 gap-x-5 gap-y-4">
+            {WEIGHT_FIELDS.filter((wf) => wf.key !== 'weightKg' && last[wf.key] != null).map((wf, i) => {
               const status = evalMetric(wf.key, last[wf.key], state.userProfile);
               return (
                 <div key={wf.key}>
-                  <div className="text-[11px] text-gray-500 dark:text-gray-400">{wf.label}</div>
-                  <div className="text-base font-bold flex items-center gap-1.5">
-                    <span>{last[wf.key]}<span className="text-xs text-gray-500 dark:text-gray-400 font-normal ml-0.5">{wf.unit}</span></span>
+                  <div className="bento-label flex items-center gap-1.5"><span style={{ width: 7, height: 7, borderRadius: 99, background: metricDots[i % metricDots.length], flexShrink: 0 }} />{wf.label}</div>
+                  <div className="bento-num flex items-center gap-1.5" style={{ fontSize: 20, marginTop: 5 }}>
+                    <span>{last[wf.key]}<span style={{ fontSize: 11, fontWeight: 400, color: 'var(--bento-faint)' }}>{wf.unit ? ' ' + wf.unit : ''}</span></span>
                     <MetricStatusChip statusLabel={status} />
                   </div>
                 </div>
               );
             })}
           </div>
-          {last.note && <p className="mt-3 text-xs text-gray-500 dark:text-gray-400 italic">{last.note}</p>}
+          {last.note && <p className="mt-3 text-xs italic" style={{ color: 'var(--bento-faint)' }}>{last.note}</p>}
         </div>
       ) : (
-        <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-6 text-center">
+        <div className="bento-card text-center" style={{ padding: 24 }}>
           <div className="text-3xl mb-2">⚖️</div>
           <div className="text-sm font-medium">Sin mediciones aún</div>
-          <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">Agrega tu primera medición para empezar a ver la tendencia</div>
+          <div style={{ fontSize: 12, color: 'var(--bento-faint)', marginTop: 4 }}>Agrega tu primera medición para empezar a ver la tendencia</div>
         </div>
       )}
 
-      <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4">
+      <div className="bento-card">
         <div className="flex items-center gap-1.5 mb-3 overflow-x-auto -mx-1 px-1">
           {CHART_METRICS.map((m) => (
             <button key={m.key} onClick={() => setMetric(m.key)}
-              className={`shrink-0 px-3 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap ${metric === m.key ? 'bg-emerald-500 text-white' : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400'}`}>
+              className="shrink-0 px-3 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap"
+              style={metric === m.key ? { background: 'var(--bento-ink)', color: 'var(--bento-on-ink)' } : { background: 'var(--bento-surface)', color: 'var(--bento-muted)' }}>
               {m.label}
             </button>
           ))}
@@ -10313,25 +11112,25 @@ function WeightView({ state, setState, targets }) {
       <NotesHistory state={state} />
 
       {weights.length > 0 && (
-        <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 overflow-hidden">
+        <div className="bento-card" style={{ padding: 0, overflow: 'hidden' }}>
           <div className="px-4 pt-3.5 pb-2">
-            <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Historial</h3>
+            <div className="bento-label">Historial</div>
           </div>
-          <div className="border-t border-gray-100 dark:border-gray-800">
-            {weights.map((w, i) => (
-              <div key={w.id} className={`flex items-center gap-3 px-4 py-2.5 ${i !== weights.length - 1 ? 'border-b border-gray-100 dark:border-gray-800' : ''}`}>
-                <div className="w-16 shrink-0 text-xs text-gray-500 dark:text-gray-400">{w.date.slice(5)}{w.time ? ` ${w.time}` : ''}</div>
+          <div>
+            {weights.map((w) => (
+              <div key={w.id} className="flex items-center gap-3 px-4 py-2.5" style={{ borderTop: '1px solid var(--bento-hairline)' }}>
+                <div className="w-16 shrink-0" style={{ fontSize: 12, color: 'var(--bento-faint)' }}>{w.date.slice(5)}{w.time ? ` ${w.time}` : ''}</div>
                 <div className="flex-1 min-w-0 flex flex-wrap gap-x-3 gap-y-0.5 text-xs">
-                  {w.weightKg != null && <span><span className="font-semibold">{Number(w.weightKg).toFixed(1)}</span> kg</span>}
-                  {w.bodyFatPct != null && <span><span className="font-semibold">{Number(w.bodyFatPct).toFixed(1)}</span>% grasa</span>}
-                  {w.skeletalMuscleKg != null && <span><span className="font-semibold">{Number(w.skeletalMuscleKg).toFixed(1)}</span> kg m.esq.</span>}
-                  {w.bmi != null && <span><span className="font-semibold">{Number(w.bmi).toFixed(1)}</span> IMC</span>}
-                  {w.waistCm != null && <span><span className="font-semibold">{Number(w.waistCm).toFixed(1)}</span> cintura</span>}
-                  {w.visceralFat != null && <span><span className="font-semibold">{Number(w.visceralFat).toFixed(1)}</span> visc.</span>}
+                  {w.weightKg != null && <span><span className="bento-num">{Number(w.weightKg).toFixed(1)}</span> kg</span>}
+                  {w.bodyFatPct != null && <span><span className="bento-num">{Number(w.bodyFatPct).toFixed(1)}</span>% grasa</span>}
+                  {w.skeletalMuscleKg != null && <span><span className="bento-num">{Number(w.skeletalMuscleKg).toFixed(1)}</span> kg m.esq.</span>}
+                  {w.bmi != null && <span><span className="bento-num">{Number(w.bmi).toFixed(1)}</span> IMC</span>}
+                  {w.waistCm != null && <span><span className="bento-num">{Number(w.waistCm).toFixed(1)}</span> cintura</span>}
+                  {w.visceralFat != null && <span><span className="bento-num">{Number(w.visceralFat).toFixed(1)}</span> visc.</span>}
                 </div>
-                <button onClick={() => setEditing(w)} className="text-xs font-medium px-2 py-1 rounded-lg bg-gray-100 dark:bg-gray-800">Editar</button>
+                <button onClick={() => setEditing(w)} className="text-xs font-medium px-2 py-1 rounded-lg" style={{ background: 'var(--bento-surface)' }}>Editar</button>
                 <button onClick={() => remove(w.id)} aria-label="Borrar"
-                  className="shrink-0 w-7 h-7 rounded-full bg-rose-50 dark:bg-rose-900/30 text-rose-600 dark:text-rose-300 flex items-center justify-center text-sm">✕</button>
+                  className="shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-sm" style={{ background: 'rgba(205,122,85,0.12)', color: 'var(--bento-warm)' }}>✕</button>
               </div>
             ))}
           </div>
@@ -10339,7 +11138,7 @@ function WeightView({ state, setState, targets }) {
       )}
 
       <button onClick={() => setAdding(true)}
-        className="w-full py-3.5 rounded-2xl bg-emerald-500 text-white font-semibold hover:bg-emerald-600">
+        className="w-full py-3.5 rounded-2xl font-semibold" style={{ background: 'var(--bento-ink)', color: 'var(--bento-on-ink)' }}>
         + Nueva medición
       </button>
 
@@ -11250,6 +12049,7 @@ const BENTO_TABS = [
   { id: 'plan',     label: 'Plan',     short: 'Plan', icon: '📋' },
   { id: 'insights', label: 'Insights', short: 'Stats',icon: '🧠' },
   { id: 'exercise', label: 'Ejercicios', short: 'Gym', icon: '🏋️' },
+  { id: 'routine',  label: 'Rutina',   short: 'Rutina', icon: '📐' },
   { id: 'weight',   label: 'Peso',     short: 'Peso', icon: '⚖️' },
   { id: 'bank',     label: 'Banco',    short: 'Banco',icon: '📚' },
 ];
@@ -11784,6 +12584,41 @@ function App() {
     return () => clearTimeout(id);
   }, [bridgePost, energyBody]);
 
+  // Rutina app→bridge (op:'routine', timestamp-gated del lado servidor). Objeto singleton.
+  const routineBody = useMemo(() => {
+    if (!state.routine || !state.routine.updatedAt) return null;
+    return JSON.stringify({ op: 'routine', routine: state.routine });
+  }, [state.routine]);
+  useEffect(() => {
+    if (!bridgeUrl || !routineBody) return;
+    const id = setTimeout(() => {
+      fetch(bridgePost, {
+        method: 'POST', mode: 'no-cors', keepalive: true,
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: routineBody,
+      }).catch(() => {});
+    }, 2400);
+    return () => clearTimeout(id);
+  }, [bridgePost, routineBody]);
+
+  // Videos por ejercicio app→bridge (op:'exercise_videos', el servidor mergea por clave).
+  const videosBody = useMemo(() => {
+    const v = state.exercise_videos;
+    if (!v || !Object.keys(v).length) return null;
+    return JSON.stringify({ op: 'exercise_videos', exercise_videos: v });
+  }, [state.exercise_videos]);
+  useEffect(() => {
+    if (!bridgeUrl || !videosBody) return;
+    const id = setTimeout(() => {
+      fetch(bridgePost, {
+        method: 'POST', mode: 'no-cors', keepalive: true,
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: videosBody,
+      }).catch(() => {});
+    }, 2600);
+    return () => clearTimeout(id);
+  }, [bridgePost, videosBody]);
+
   // Empuje app→bridge de entradas creadas en la app (extras, ejercicios, pesos) para que el
   // chat y el bridge las vean (bidireccional). El servidor reasigna el id y dedup por contenido,
   // así que reenviar es inocuo. NO se reenvía lo que vino del bridge (id en importedIds) ni lo ya
@@ -11934,6 +12769,7 @@ function App() {
         {tab === 'plan' && <PlanWeekView state={state} setState={setState} targets={targets} />}
         {tab === 'insights' && <InsightsView state={state} setState={setState} targets={targets} />}
         {tab === 'exercise' && <ExercisesView state={state} setState={setState} targets={targets} />}
+        {tab === 'routine' && <RoutineView state={state} setState={setState} />}
         {tab === 'weight' && <WeightView state={state} setState={setState} targets={targets} />}
         {tab === 'bank' && <BankView state={state} setState={setState} />}
       </div>

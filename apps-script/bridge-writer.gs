@@ -160,12 +160,19 @@ var UPLOAD_TITLE = 'plan-hugo-bridge.upload.json';
 //     adaptativo de la app necesita para reconstruir el gasto. Como meals se poda a 30 días,
 //     sin esto el historial de ingesta para estimar gasto se perdería entre dispositivos.
 //     Nunca se poda; mergea por fecha (no duplica).
-var RETENTION    = { weights: 0, meals: 30, workouts: 30, checks: 30, water: 30, energy: 0 };
+//   · health → 0: serie diaria de Apple Health {date, steps, activeEnergyKcal, sleepHours,
+//     restingHr, vo2max} que la app muestra como CONTEXTO (nunca resta de las kcal: el TDEE
+//     adaptativo ya captura el gasto vía tendencia de peso). Compacta; nunca se poda; mergea
+//     por fecha (latest gana, no duplica). La postea un iOS Shortcut.
+var RETENTION    = { weights: 0, meals: 30, workouts: 30, checks: 30, water: 30, energy: 0, health: 0 };
 var SNAPSHOT_RETENTION_DAYS = 30; // los snapshots por fecha siguen la misma ventana que meals
-var SECTIONS     = ['meals', 'weights', 'workouts', 'checks', 'water', 'energy'];
+var SECTIONS     = ['meals', 'weights', 'workouts', 'checks', 'water', 'energy', 'health'];
 // Campos de la sección `energy` que se mergean por fecha (latest gana). Mantener en sync con
 // buildEnergySeries() de app.jsx.
 var ENERGY_MERGE_FIELDS = ['kcalIn', 'trendWeightKg'];
+// Campos de la sección `health` (Apple Health) que se mergean por fecha (latest no-nulo gana).
+// Mantener en sync con day.health de app.jsx y el JSON del iOS Shortcut.
+var HEALTH_MERGE_FIELDS = ['steps', 'activeEnergyKcal', 'sleepHours', 'restingHr', 'vo2max'];
 // Campos de un entrenamiento que se mergean sobre la entrada existente del mismo día (la versión
 // más rica gana): si primero llegó una línea simple (name/kcal) y luego una con desglose, no se
 // pierde el detalle. Mantener en sync con WORKOUT_EXTRA_FIELDS + `exercises` de app.jsx.
@@ -207,6 +214,10 @@ function _readCanonical() {
   if (typeof b.snapshots !== 'object' || b.snapshots === null || Array.isArray(b.snapshots)) b.snapshots = {};
   // `config` = perfil + metas que la APP empuja. La skill lo lee. NO se poda.
   if (typeof b.config !== 'object' || b.config === null || Array.isArray(b.config)) b.config = {};
+  // `routine` = rutina vigente (objeto único, se reemplaza al renovar). NO se poda.
+  if (typeof b.routine !== 'object' || b.routine === null || Array.isArray(b.routine)) b.routine = {};
+  // `exercise_videos` = mapa slug→{youtube_id, assignedAt}. Persiste entre rutinas. NO se poda.
+  if (typeof b.exercise_videos !== 'object' || b.exercise_videos === null || Array.isArray(b.exercise_videos)) b.exercise_videos = {};
   return b;
 }
 
@@ -393,6 +404,33 @@ function _mergeInto(bridge, payload, day) {
     return 0;
   }
 
+  // ROUTINE: rutina vigente (objeto único, se reemplaza al renovar). Timestamp-gated como config:
+  // solo adopta si es MÁS NUEVA (un archivo viejo no pisa la buena). La app es la autoridad.
+  if (payload.op === 'routine' && payload.routine) {
+    var incomingR = payload.routine.updatedAt || '';
+    var currentR = (bridge.routine && bridge.routine.updatedAt) || '';
+    if (!currentR || incomingR >= currentR) {
+      bridge.routine = payload.routine;
+      bridge.routine.updatedAt = incomingR || new Date().toISOString();
+    }
+    return 0;
+  }
+
+  // EXERCISE_VIDEOS: mapa slug→video. Mergea por CLAVE (no reemplaza todo, así dos devices no se
+  // pisan los slugs). Por slug, gana el assignedAt más reciente.
+  if (payload.op === 'exercise_videos' && payload.exercise_videos) {
+    if (!bridge.exercise_videos) bridge.exercise_videos = {};
+    Object.keys(payload.exercise_videos).forEach(function (slug) {
+      var inc = payload.exercise_videos[slug];
+      if (!inc || !inc.youtube_id) return;
+      var cur = bridge.exercise_videos[slug];
+      if (!cur || (inc.assignedAt && (!cur.assignedAt || inc.assignedAt >= cur.assignedAt))) {
+        bridge.exercise_videos[slug] = inc;
+      }
+    });
+    return 0;
+  }
+
   // DELTA add: agrega entradas a una sección, dedup por CONTENIDO. El servidor
   // asigna el id (autoridad) y sella el ts.
   if (payload.op === 'add' && payload.section) {
@@ -468,6 +506,7 @@ function _sig(sec, e) {
   if (sec === 'workouts') return _norm(e.name) + '|' + (e.date || '');
   if (sec === 'weights')  return (e.date || '');
   if (sec === 'energy')   return (e.date || '');
+  if (sec === 'health')   return (e.date || '');
   if (sec === 'checks')   return _norm(e.meal) + '|' + (e.date || '');
   return null;
 }
@@ -591,6 +630,14 @@ function _contentUnion(bridge, sec, entries, assignId) {
         ENERGY_MERGE_FIELDS.forEach(function (k) {
           if (e[k] != null && e[k] !== '') curE[k] = e[k];
         });
+      } else if (sec === 'health') {
+        // Misma fecha → actualiza las métricas de Apple Health (latest no-nulo gana). El
+        // Shortcut re-postea el día completo a las 23:00; un POST repetido reescribe la fila,
+        // no la duplica. Solo CONTEXTO: el ?totals no lo lee, nunca afecta kcal.
+        var curH = bridge[sec][hitIdx];
+        HEALTH_MERGE_FIELDS.forEach(function (k) {
+          if (e[k] != null && e[k] !== '') curH[k] = e[k];
+        });
       } else if (sec === 'workouts') {
         // Mismo entrenamiento (nombre+fecha en la ventana) → la versión más rica gana, para que
         // un push posterior con desglose mejore la línea simple ya guardada. `exercises` solo
@@ -695,6 +742,7 @@ function _apply(payload) {
     var day = (payload && payload.today) || _daysAgoKey(0);
     if (!payload) return { ok: false, reason: 'empty-or-bad-payload' };
     var isKnown = payload.op === 'snapshot' || payload.op === 'config' ||
+      payload.op === 'routine' || payload.op === 'exercise_videos' ||
       payload.op === 'add' || SECTIONS.some(function (s) { return Array.isArray(payload[s]); });
     if (!isKnown) return { ok: false, reason: 'empty-or-bad-payload' };
 
@@ -704,6 +752,8 @@ function _apply(payload) {
 
     if (payload.op === 'snapshot') return { ok: true, snapshot: true, today: payload.date };
     if (payload.op === 'config')   return { ok: true, config: true };
+    if (payload.op === 'routine')         return { ok: true, routine: true };
+    if (payload.op === 'exercise_videos') return { ok: true, exercise_videos: true };
     var sum = _totals(bridge, day);
     return { ok: true, added: added, today: day, totals: sum.totals, workoutsKcal: sum.workoutsKcal, waterMl: sum.waterMl };
   } finally {

@@ -71,6 +71,17 @@
       box-shadow: 0 1px 2px rgba(0,0,0,0.02);
     }
     .bento-mono { font-family: ui-monospace, 'JetBrains Mono', 'SF Mono', Menlo, monospace; }
+    /* Números display: bold, tight, tabular (hero/stats/récords) */
+    .bento-num { font-weight: 700; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; }
+    /* Grids responsivos del rediseño Bento (1 col en móvil → 2/4 en ≥640px) */
+    .bento-grid4 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .bento-grid2 { display: grid; grid-template-columns: 1fr; gap: 12px; }
+    @media (min-width: 640px) {
+      .bento-grid4 { grid-template-columns: repeat(4, 1fr); }
+      .bento-grid2.is-a { grid-template-columns: 1.3fr 1fr; }
+      .bento-grid2.is-b { grid-template-columns: 1.4fr 1fr; }
+      .bento-grid2.is-eq { grid-template-columns: 1fr 1fr; }
+    }
     .bento-label {
       font-family: ui-monospace, 'JetBrains Mono', 'SF Mono', monospace;
       font-size: 11px; color: var(--bento-faint);
@@ -169,6 +180,158 @@
     /* Cards con rounded-2xl: sombra bento sutil + radio consistente */
     .bento-app .rounded-2xl { border-radius: 16px; }
     .bento-app .rounded-3xl { border-radius: 20px; }
+
+    /* ────────────────────────────────────────────────────────────
+       Bento accent retint — mapea los colores Tailwind (emerald/sky/
+       rose/amber/violet) a los tokens bento. Antes solo se revestían
+       los grises, por eso la pestaña Ejercicios se veía verde/azul
+       neón. Esto unifica botones, barras, heatmap y textos de toda
+       la app sin tocar el JSX.
+       · emerald (primario + éxito)  → ink / sage
+       · sky (volumen/info)          → blue
+       · rose·red (peligro)          → warm
+       · amber·orange (aviso)        → yellow / warm
+       · violet                      → lilac
+       ──────────────────────────────────────────────────────────── */
+    /* accent bg */
+    .bento-app [class~="bg-emerald-500"],
+    .bento-app [class~="bg-emerald-600"],
+    .bento-app [class~="bg-emerald-500/80"] {
+      background-color: var(--bento-ink) !important;
+    }
+    .bento-app [class~="bg-emerald-100"],
+    .bento-app [class~="dark:bg-emerald-900/30"],
+    .bento-app [class~="bg-emerald-50"],
+    .bento-app [class~="dark:bg-emerald-900/20"],
+    .bento-app [class~="bg-emerald-50/40"],
+    .bento-app [class~="dark:bg-emerald-900/10"],
+    .bento-app [class~="bg-emerald-900/30"],
+    .bento-app [class~="bg-emerald-900/20"],
+    .bento-app [class~="dark:bg-emerald-900/40"] {
+      background-color: rgba(122,154,120,0.12) !important;
+    }
+    .bento-app [class~="bg-amber-500"],
+    .bento-app [class~="bg-amber-600"] {
+      background-color: var(--bento-yellow) !important;
+    }
+    .bento-app [class~="bg-amber-100"],
+    .bento-app [class~="dark:bg-amber-900/30"],
+    .bento-app [class~="bg-amber-50"],
+    .bento-app [class~="bg-orange-50"],
+    .bento-app [class~="dark:bg-orange-900/30"],
+    .bento-app [class~="dark:bg-amber-900/20"] {
+      background-color: rgba(217,166,72,0.12) !important;
+    }
+    .bento-app [class~="bg-rose-500"],
+    .bento-app [class~="bg-red-500"] {
+      background-color: var(--bento-warm) !important;
+    }
+    .bento-app [class~="bg-rose-100"],
+    .bento-app [class~="dark:bg-rose-900/30"],
+    .bento-app [class~="bg-rose-50"],
+    .bento-app [class~="bg-rose-900/50"],
+    .bento-app [class~="bg-rose-200"],
+    .bento-app [class~="bg-rose-900/20"],
+    .bento-app [class~="dark:bg-rose-900/20"],
+    .bento-app [class~="bg-red-50"],
+    .bento-app [class~="dark:bg-red-900/30"] {
+      background-color: rgba(205,122,85,0.10) !important;
+    }
+    .bento-app [class~="bg-sky-100"],
+    .bento-app [class~="dark:bg-sky-900/30"],
+    .bento-app [class~="bg-sky-200"],
+    .bento-app [class~="bg-sky-900/50"],
+    .bento-app [class~="bg-sky-50"],
+    .bento-app [class~="dark:bg-sky-900/20"] {
+      background-color: rgba(90,141,181,0.12) !important;
+    }
+    .bento-app [class~="bg-sky-500"],
+    .bento-app [class~="bg-sky-500/80"] {
+      background-color: var(--bento-blue) !important;
+    }
+    .bento-app [class~="bg-violet-500"],
+    .bento-app [class~="bg-violet-600"] {
+      background-color: var(--bento-lilac) !important;
+    }
+    /* accent text */
+    .bento-app [class~="text-emerald-700"],
+    .bento-app [class~="dark:text-emerald-300"],
+    .bento-app [class~="text-emerald-600"],
+    .bento-app [class~="dark:text-emerald-400"],
+    .bento-app [class~="text-emerald-800"],
+    .bento-app [class~="dark:text-emerald-200"],
+    .bento-app [class~="text-emerald-400"],
+    .bento-app [class~="text-emerald-300"] {
+      color: var(--bento-pos) !important;
+    }
+    .bento-app [class~="text-amber-700"],
+    .bento-app [class~="dark:text-amber-300"],
+    .bento-app [class~="text-rose-700"],
+    .bento-app [class~="dark:text-rose-300"],
+    .bento-app [class~="text-rose-600"],
+    .bento-app [class~="text-amber-800"],
+    .bento-app [class~="dark:text-amber-200"],
+    .bento-app [class~="text-orange-700"],
+    .bento-app [class~="dark:text-orange-300"],
+    .bento-app [class~="text-orange-800"],
+    .bento-app [class~="dark:text-orange-200"],
+    .bento-app [class~="text-amber-900"],
+    .bento-app [class~="dark:text-amber-100"],
+    .bento-app [class~="dark:text-rose-400"],
+    .bento-app [class~="text-rose-400"],
+    .bento-app [class~="text-rose-800"],
+    .bento-app [class~="dark:text-rose-200"],
+    .bento-app [class~="text-amber-600"],
+    .bento-app [class~="dark:text-amber-400"],
+    .bento-app [class~="text-amber-500"],
+    .bento-app [class~="text-rose-500"],
+    .bento-app [class~="text-red-700"],
+    .bento-app [class~="dark:text-red-300"] {
+      color: var(--bento-warm) !important;
+    }
+    .bento-app [class~="text-sky-700"],
+    .bento-app [class~="dark:text-sky-300"],
+    .bento-app [class~="text-sky-900"],
+    .bento-app [class~="dark:text-sky-100"],
+    .bento-app [class~="text-sky-600"],
+    .bento-app [class~="dark:text-sky-400"],
+    .bento-app [class~="text-sky-500"] {
+      color: var(--bento-blue) !important;
+    }
+    /* accent border */
+    .bento-app [class~="border-emerald-500"],
+    .bento-app [class~="border-emerald-200"],
+    .bento-app [class~="dark:border-emerald-800"],
+    .bento-app [class~="border-emerald-400"],
+    .bento-app [class~="border-emerald-300"],
+    .bento-app [class~="dark:border-emerald-700"],
+    .bento-app [class~="border-emerald-700"],
+    .bento-app [class~="dark:border-emerald-900/50"],
+    .bento-app [class~="dark:border-emerald-600"] {
+      border-color: var(--bento-pos) !important;
+    }
+    .bento-app [class~="border-amber-200"],
+    .bento-app [class~="dark:border-amber-800"],
+    .bento-app [class~="border-amber-300"],
+    .bento-app [class~="dark:border-amber-700"],
+    .bento-app [class~="dark:border-amber-900/50"] {
+      border-color: var(--bento-yellow) !important;
+    }
+    .bento-app [class~="border-rose-300"],
+    .bento-app [class~="dark:border-rose-700"],
+    .bento-app [class~="border-rose-200"],
+    .bento-app [class~="dark:border-rose-900/50"],
+    .bento-app [class~="border-red-200"],
+    .bento-app [class~="dark:border-red-800"] {
+      border-color: var(--bento-warm) !important;
+    }
+    /* texto blanco sobre rellenos que se mapean a ink (se invierten en
+       dark) → usar on-ink para que el botón "Subir captura"/CTA quede
+       legible igual que "+ Comida" */
+    .bento-app [class~="bg-emerald-500"][class~="text-white"],
+    .bento-app [class~="bg-emerald-600"][class~="text-white"],
+    .bento-app [class~="bg-emerald-500/80"][class~="text-white"] {
+      color: var(--bento-on-ink) !important;
   </style>
 
   <script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"
@@ -181,6 +344,8 @@
 
   <!-- jsPDF (UMD) para exportar la evaluación a PDF. Desde unpkg → el SW lo cachea (offline). -->
   <script defer src="https://unpkg.com/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+  <!-- mammoth.js: extrae texto de .docx para renovar la rutina. Desde unpkg → el SW lo cachea. -->
+  <script defer src="https://unpkg.com/mammoth@1.8.0/mammoth.browser.min.js"></script>
   <script src="app.js" defer></script>
 </body>
 </html>
