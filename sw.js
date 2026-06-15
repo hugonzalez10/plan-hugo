@@ -4,7 +4,7 @@
  * NO interceptamos llamadas a api.anthropic.com.
  */
 
-const CACHE_NAME = 'plan-hugo-v46-publish-via-pr';
+const CACHE_NAME = 'plan-hugo-v47-lazy-jspdf-mammoth';
 const CORE_URLS = [
   './index.html',
   './app.js',
