@@ -342,10 +342,9 @@
 <body class="bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-100 font-sans">
   <div id="root"></div>
 
-  <!-- jsPDF (UMD) para exportar la evaluación a PDF. Desde unpkg → el SW lo cachea (offline). -->
-  <script defer src="https://unpkg.com/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
-  <!-- mammoth.js: extrae texto de .docx para renovar la rutina. Desde unpkg → el SW lo cachea. -->
-  <script defer src="https://unpkg.com/mammoth@1.8.0/mammoth.browser.min.js"></script>
+  <!-- jsPDF (PDF de la evaluación) y mammoth (.docx de la rutina) ya NO se cargan aquí: pesan
+       ~250 KB y son features puntuales. app.jsx los inyecta bajo demanda con loadScript() la
+       primera vez que se usan; el SW (cache-first en unpkg) los conserva offline tras ese uso. -->
   <script src="app.js" defer></script>
 </body>
 </html>

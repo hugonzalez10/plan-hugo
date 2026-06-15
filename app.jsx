@@ -1165,6 +1165,25 @@ function loadZXing() {
   return _zxingPromise;
 }
 
+// Carga perezosa de un <script> de CDN, una sola vez por URL (resuelve cuando cargó). jsPDF y
+// mammoth pesan ~250 KB juntos pero solo se usan al exportar un PDF o renovar la rutina .docx,
+// así que NO se cargan en index.html: se inyectan recién al usarlos. El SW cachea unpkg.com
+// (cache-first), por lo que tras el primer uso quedan disponibles offline.
+const JSPDF_SRC = 'https://unpkg.com/jspdf@2.5.1/dist/jspdf.umd.min.js';
+const MAMMOTH_SRC = 'https://unpkg.com/mammoth@1.8.0/mammoth.browser.min.js';
+const _scriptPromises = {};
+function loadScript(src) {
+  if (_scriptPromises[src]) return _scriptPromises[src];
+  _scriptPromises[src] = new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error('No se pudo cargar ' + src));
+    document.head.appendChild(s);
+  });
+  return _scriptPromises[src];
+}
+
 async function searchOpenFoodFacts(barcode) {
   const url = `https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(barcode)}.json?fields=product_name,brands,nutriments,serving_size,serving_quantity,quantity,image_front_small_url`;
   const resp = await fetch(url);
@@ -1230,9 +1249,10 @@ async function fileToAttachment(file) {
     const b64 = dataUrl.split(',')[1];
     return { kind: 'pdf', b64, name: file.name };
   }
-  // .docx (rutina) — extraer texto plano con mammoth.js (cargado por CDN, cacheado por el SW)
+  // .docx (rutina) — extraer texto plano con mammoth.js (lazy: se inyecta recién aquí, cacheado por el SW)
   if (file.name.toLowerCase().endsWith('.docx') ||
       file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+    try { await loadScript(MAMMOTH_SRC); } catch {}
     if (!window.mammoth) throw new Error('mammoth.js no cargó (revisa la conexión y reintenta)');
     const arrayBuffer = await file.arrayBuffer();
     const { value } = await window.mammoth.extractRawText({ arrayBuffer });
@@ -8037,7 +8057,7 @@ function HealthMetricDetail({ metric, series, onClose }) {
   return (
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 p-4 overflow-y-auto" onClick={onClose}>
       <div className="w-full max-w-md bg-white dark:bg-gray-900 rounded-2xl shadow-xl border border-gray-200 dark:border-gray-800 max-h-[85vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
-        <div className="sticky top-0 z-10 flex items-center justify-between px-5 py-4 bg-white/95 dark:bg-gray-900/95 backdrop-blur border-b border-gray-200 dark:border-gray-800">
+        <div className="sticky top-0 z-10 flex items-center justify-between px-5 py-4 bg-white/95 dark:bg-gray-900/95 backdrop-blur border-b border-gray-200 dark:border-gray-800" style={{ top: 0 }}>
           <div>
             <div className="bento-label">{metric.icon} {metric.label}</div>
             <div style={{ fontSize: 11, color: 'var(--bento-faint)', marginTop: 2 }}>{rows.length} días con datos</div>
@@ -8249,7 +8269,8 @@ function ExercisesView({ state, setState, targets }) {
     downloadBlob(md, `plan-hugo-evaluacion-${todayKey()}.md`, 'text/markdown;charset=utf-8');
   };
 
-  const exportEvalPdf = () => {
+  const exportEvalPdf = async () => {
+    try { await loadScript(JSPDF_SRC); } catch {}
     const JsPDF = window.jspdf && window.jspdf.jsPDF;
     if (!JsPDF) { setError('No se pudo cargar el generador de PDF. Usa "Exportar texto", o reintenta con conexión.'); return; }
     const doc = new JsPDF({ unit: 'pt', format: 'a4' });
