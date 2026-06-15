@@ -214,6 +214,10 @@ function _readCanonical() {
   if (typeof b.snapshots !== 'object' || b.snapshots === null || Array.isArray(b.snapshots)) b.snapshots = {};
   // `config` = perfil + metas que la APP empuja. La skill lo lee. NO se poda.
   if (typeof b.config !== 'object' || b.config === null || Array.isArray(b.config)) b.config = {};
+  // `routine` = rutina vigente (objeto único, se reemplaza al renovar). NO se poda.
+  if (typeof b.routine !== 'object' || b.routine === null || Array.isArray(b.routine)) b.routine = {};
+  // `exercise_videos` = mapa slug→{youtube_id, assignedAt}. Persiste entre rutinas. NO se poda.
+  if (typeof b.exercise_videos !== 'object' || b.exercise_videos === null || Array.isArray(b.exercise_videos)) b.exercise_videos = {};
   return b;
 }
 
@@ -397,6 +401,33 @@ function _mergeInto(bridge, payload, day) {
       bridge.config = payload.config;
       bridge.config.updatedAt = incoming || new Date().toISOString();
     }
+    return 0;
+  }
+
+  // ROUTINE: rutina vigente (objeto único, se reemplaza al renovar). Timestamp-gated como config:
+  // solo adopta si es MÁS NUEVA (un archivo viejo no pisa la buena). La app es la autoridad.
+  if (payload.op === 'routine' && payload.routine) {
+    var incomingR = payload.routine.updatedAt || '';
+    var currentR = (bridge.routine && bridge.routine.updatedAt) || '';
+    if (!currentR || incomingR >= currentR) {
+      bridge.routine = payload.routine;
+      bridge.routine.updatedAt = incomingR || new Date().toISOString();
+    }
+    return 0;
+  }
+
+  // EXERCISE_VIDEOS: mapa slug→video. Mergea por CLAVE (no reemplaza todo, así dos devices no se
+  // pisan los slugs). Por slug, gana el assignedAt más reciente.
+  if (payload.op === 'exercise_videos' && payload.exercise_videos) {
+    if (!bridge.exercise_videos) bridge.exercise_videos = {};
+    Object.keys(payload.exercise_videos).forEach(function (slug) {
+      var inc = payload.exercise_videos[slug];
+      if (!inc || !inc.youtube_id) return;
+      var cur = bridge.exercise_videos[slug];
+      if (!cur || (inc.assignedAt && (!cur.assignedAt || inc.assignedAt >= cur.assignedAt))) {
+        bridge.exercise_videos[slug] = inc;
+      }
+    });
     return 0;
   }
 
@@ -711,6 +742,7 @@ function _apply(payload) {
     var day = (payload && payload.today) || _daysAgoKey(0);
     if (!payload) return { ok: false, reason: 'empty-or-bad-payload' };
     var isKnown = payload.op === 'snapshot' || payload.op === 'config' ||
+      payload.op === 'routine' || payload.op === 'exercise_videos' ||
       payload.op === 'add' || SECTIONS.some(function (s) { return Array.isArray(payload[s]); });
     if (!isKnown) return { ok: false, reason: 'empty-or-bad-payload' };
 
@@ -720,6 +752,8 @@ function _apply(payload) {
 
     if (payload.op === 'snapshot') return { ok: true, snapshot: true, today: payload.date };
     if (payload.op === 'config')   return { ok: true, config: true };
+    if (payload.op === 'routine')         return { ok: true, routine: true };
+    if (payload.op === 'exercise_videos') return { ok: true, exercise_videos: true };
     var sum = _totals(bridge, day);
     return { ok: true, added: added, today: day, totals: sum.totals, workoutsKcal: sum.workoutsKcal, waterMl: sum.waterMl };
   } finally {

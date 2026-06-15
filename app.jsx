@@ -419,6 +419,133 @@ async function extractWorkoutFromImage(attachments, apiKey) {
   return extractFromAttachments(list, apiKey, PROMPT_EXTRACT_WORKOUT, { model: MODEL_DEFAULT, maxTokens: 1500 });
 }
 
+// ───────────────── Parser de rutina (.docx → JSON) ─────────────────
+// Dos caminos que convergen en normalizeRoutine: IA (Claude sobre texto libre) con fallback a
+// un parser determinista del formato fijo Speediance. Los videos NO se tocan acá; se re-vinculan
+// por slug en la vista (exercise_videos persiste entre renovaciones).
+
+const PROMPT_PARSE_ROUTINE = `Eres un parser de rutinas de gimnasio. Recibes el texto plano de un documento con una rutina semanal. Extrae los días y, por cada día, sus ejercicios.
+
+Devuelve SOLO JSON válido, sin markdown ni backticks, con este esquema exacto:
+{
+  "title": "título corto de la rutina (o 'Rutina')",
+  "days": [
+    {
+      "label": "Día N — Título (ej. 'Día 1 — Pierna')",
+      "durationMin": número entero o null,
+      "exercises": [
+        {
+          "name": "nombre del ejercicio sin el símbolo de ancla",
+          "anchor": true si el ejercicio trae el símbolo ⚓ o la palabra 'ancla', si no false,
+          "pesoInicio": "peso inicial tal cual aparece (ej. '70 kg') o null",
+          "seriesReps": "series y reps tal cual (ej. '4×8' o '4 series × 8 reps') o null",
+          "descanso": "descanso tal cual (ej. '2-3 min') o null",
+          "notas": "notas del ejercicio o null"
+        }
+      ]
+    }
+  ]
+}
+
+Reglas:
+- Respeta el orden de días y ejercicios del documento.
+- No inventes ejercicios ni pesos: si un campo no aparece, usa null.
+- anchor=true SOLO si hay ⚓ o la palabra 'ancla' junto al ejercicio.`;
+
+// Camino IA: manda el texto a Claude y parsea con parseJsonLoose (tolera fences/truncado).
+async function parseRoutineWithClaude(rawText, apiKey) {
+  const prompt = `${PROMPT_PARSE_ROUTINE}\n\nTexto del documento:\n"""\n${(rawText || '').slice(0, 24000)}\n"""`;
+  const text = await askClaude(prompt, apiKey, 4000, MODEL_DEFAULT);
+  const json = parseJsonLoose(text);
+  if (!json || !Array.isArray(json.days)) throw new Error('La IA no devolvió una rutina válida');
+  return json;
+}
+
+// Camino template (determinista, 100% offline): formato Speediance. Encabezados
+// "## Día N — Título (~MM min)" + tablas markdown Ejercicio | Peso inicio | Series×Reps | Descanso.
+function parseRoutineTemplate(rawText) {
+  const lines = String(rawText || '').split(/\r?\n/).map((l) => l.trim());
+  const dayHeader = /^#{0,3}\s*Día\s*(\d+)\s*[—–-]\s*(.+?)\s*(?:\(~?\s*(\d+)\s*min\))?\s*$/i;
+  const days = [];
+  let cur = null;
+  for (const line of lines) {
+    if (!line) continue;
+    const h = line.match(dayHeader);
+    if (h) {
+      cur = {
+        label: `Día ${h[1]} — ${h[2].trim()}`,
+        durationMin: h[3] ? Number(h[3]) : null,
+        exercises: [],
+      };
+      days.push(cur);
+      continue;
+    }
+    if (!cur || line.indexOf('|') < 0) continue; // solo filas de tabla dentro de un día
+    const cells = line.split('|').map((c) => c.trim());
+    // El form "| a | b |" deja celdas vacías al inicio/fin → quitarlas.
+    if (cells.length && cells[0] === '') cells.shift();
+    if (cells.length && cells[cells.length - 1] === '') cells.pop();
+    if (!cells.length) continue;
+    if (/ejercicio/i.test(cells[0])) continue;             // fila de encabezado
+    if (cells.every((c) => /^:?-+:?$/.test(c) || c === '')) continue; // separador ---
+    let name = cells[0] || '';
+    let anchor = false;
+    const am = name.match(/^⚓\s*/);
+    if (am) { anchor = true; name = name.slice(am[0].length).trim(); }
+    if (!name) continue;
+    cur.exercises.push({
+      name,
+      anchor,
+      pesoInicio: cells[1] || null,
+      seriesReps: cells[2] || null,
+      descanso: cells[3] || null,
+      notas: cells[4] || null,
+    });
+  }
+  return { title: 'Rutina Speediance', days };
+}
+
+// Converge ambos caminos: estampa updatedAt, id por día y slug por ejercicio.
+function normalizeRoutine(j) {
+  const days = (Array.isArray(j?.days) ? j.days : []).map((d, i) => ({
+    id: `dia-${i + 1}`,
+    label: String(d?.label || `Día ${i + 1}`).trim(),
+    durationMin: d?.durationMin != null && !isNaN(Number(d.durationMin)) ? Number(d.durationMin) : null,
+    exercises: (Array.isArray(d?.exercises) ? d.exercises : []).map((ex) => {
+      const name = String(ex?.name || '').trim();
+      return {
+        slug: slugifyExercise(name),
+        name,
+        anchor: !!ex?.anchor,
+        pesoInicio: ex?.pesoInicio ? String(ex.pesoInicio).trim() : null,
+        seriesReps: ex?.seriesReps ? String(ex.seriesReps).trim() : null,
+        descanso: ex?.descanso ? String(ex.descanso).trim() : null,
+        notas: ex?.notas ? String(ex.notas).trim() : null,
+      };
+    }).filter((ex) => ex.name),
+  }));
+  return {
+    title: String(j?.title || 'Rutina').trim() || 'Rutina',
+    updatedAt: new Date().toISOString(),
+    days,
+  };
+}
+
+// Orquestador: IA preferente (si hay API key), siempre con fallback a template.
+async function parseRoutineDocx(rawText, apiKey) {
+  if (apiKey) {
+    try {
+      const j = await parseRoutineWithClaude(rawText, apiKey);
+      if (j && Array.isArray(j.days) && j.days.length) {
+        return { routine: normalizeRoutine(j), source: 'ai' };
+      }
+    } catch (e) {
+      console.warn('Parseo IA de rutina falló, uso template:', e);
+    }
+  }
+  return { routine: normalizeRoutine(parseRoutineTemplate(rawText)), source: 'template' };
+}
+
 const PROMPT_ESTIMATE_EXTRA = `Eres un nutricionista chileno. Estima los macros de un alimento individual o pequeño combo (un snack, una bebida, una galleta — no un plato completo).
 
 Si recibes solo texto, infiere porción razonable (mediana). Si hay foto del producto/empaque, usa la tabla nutricional si es legible; si solo se ve el alimento, estima porción visible.
@@ -1049,6 +1176,14 @@ async function fileToAttachment(file) {
     const b64 = dataUrl.split(',')[1];
     return { kind: 'pdf', b64, name: file.name };
   }
+  // .docx (rutina) — extraer texto plano con mammoth.js (cargado por CDN, cacheado por el SW)
+  if (file.name.toLowerCase().endsWith('.docx') ||
+      file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+    if (!window.mammoth) throw new Error('mammoth.js no cargó (revisa la conexión y reintenta)');
+    const arrayBuffer = await file.arrayBuffer();
+    const { value } = await window.mammoth.extractRawText({ arrayBuffer });
+    return { kind: 'text', text: value || '', name: file.name };
+  }
   // CSV, JSON, TXT, XML — leer como texto
   const text = await file.text();
   return { kind: 'text', text, name: file.name };
@@ -1460,6 +1595,8 @@ function buildSeed() {
     weights: [],
     recipeBank: SEED_RECIPES.map((r) => ({ ...r, id: uuid(), builtin: true, createdAt: null })),
     favorites: [],
+    routine: null,
+    exercise_videos: {},
     arsenalVersion: 3,
     bridge: { lastSyncAt: null, importedIds: [], pushedIds: [], removedBridgeIds: [] },
     aiCache: { coach: {}, weekly: {}, patterns: null, lastSubstitution: null },
@@ -1648,6 +1785,9 @@ function migrateState(parsed) {
   }
   next.days = migratedDays;
   next.favorites = Array.isArray(next.favorites) ? next.favorites : [];
+  // Rutina (objeto singleton, null = sin rutina) + mapa de videos por slug (back-fill defensivo).
+  if (next.routine !== null && (typeof next.routine !== 'object' || Array.isArray(next.routine))) next.routine = null;
+  if (typeof next.exercise_videos !== 'object' || next.exercise_videos === null || Array.isArray(next.exercise_videos)) next.exercise_videos = {};
   next.aiCache = next.aiCache || { coach: {}, weekly: {}, patterns: null, lastSubstitution: null };
   next.aiCache.coach = next.aiCache.coach || {};
   next.aiCache.weekly = next.aiCache.weekly || {};
@@ -1834,6 +1974,10 @@ async function fetchBridge(url, token) {
     checks: Array.isArray(data.checks) ? data.checks : [],
     water: Array.isArray(data.water) ? data.water : [],
     health: Array.isArray(data.health) ? data.health : [],
+    // Singletons (objetos, no arrays). El doGet del bridge devuelve el archivo completo, así que
+    // basta con forwardearlos acá para que fluyan bridge→app (energy no está y por eso nunca fluyó).
+    routine: (data.routine && typeof data.routine === 'object' && !Array.isArray(data.routine)) ? data.routine : null,
+    exercise_videos: (data.exercise_videos && typeof data.exercise_videos === 'object' && !Array.isArray(data.exercise_videos)) ? data.exercise_videos : {},
   };
 }
 
@@ -2104,8 +2248,27 @@ function mergeBridge(state, bridge) {
     energy = Array.from(byDate.values()).sort((a, b) => a.date.localeCompare(b.date));
   }
 
+  // Rutina: objeto singleton, gana el más nuevo por updatedAt (el bridge solo pisa si es posterior).
+  let routine = state.routine;
+  if (bridge.routine && bridge.routine.updatedAt) {
+    const cur = state.routine?.updatedAt || '';
+    if (!cur || bridge.routine.updatedAt > cur) routine = bridge.routine;
+  }
+  // Videos por ejercicio: unión de claves del mapa (NUNCA reemplazo total, así devices concurrentes
+  // conservan sus slugs). Por slug, gana el assignedAt más reciente.
+  let exercise_videos = { ...(state.exercise_videos || {}) };
+  if (bridge.exercise_videos && typeof bridge.exercise_videos === 'object') {
+    for (const [slug, v] of Object.entries(bridge.exercise_videos)) {
+      if (!v || !v.youtube_id) continue;
+      const local = exercise_videos[slug];
+      if (!local || (v.assignedAt && (!local.assignedAt || v.assignedAt > local.assignedAt))) {
+        exercise_videos[slug] = v;
+      }
+    }
+  }
+
   const nextState = {
-    ...state, days, weights, energy,
+    ...state, days, weights, energy, routine, exercise_videos,
     bridge: {
       ...(state.bridge || {}),
       lastSyncAt: new Date().toISOString(),
@@ -2251,6 +2414,24 @@ function computeDayTotals(day, snackBank, proteinBank, targets, dessertBank, cus
 
 function normalizeName(name) {
   return (name || '').toLowerCase().trim().replace(/\s+/g, ' ');
+}
+
+// Slug estable de un ejercicio: minúsculas, sin tildes, espacios/símbolos → guiones. Es la
+// clave de unión entre la rutina y el mapa exercise_videos, así un video sobrevive a renovar
+// la rutina (se re-vincula por slug). OJO: distinto de normalizeName (que NO quita tildes y se
+// usa para el dedup de comidas — no tocar ese).
+function slugifyExercise(name) {
+  return (name || '').toLowerCase().normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/(^-|-$)/g, '');
+}
+
+// Extrae el youtube_id (11 chars) de una URL pegada. Cubre watch?v=, youtu.be/, /shorts/ y
+// /embed/. Devuelve null si no parsea (la app nunca auto-asigna: Hugo siempre pega y confirma).
+function extractYoutubeId(url) {
+  const m = String(url || '').match(/(?:youtu\.be\/|watch\?v=|\/shorts\/|\/embed\/)([A-Za-z0-9_-]{11})/);
+  return m ? m[1] : null;
 }
 
 // Cubeta de despliegue de un extra. Las comidas con slot de una sección del plan
@@ -7176,6 +7357,274 @@ Reglas:
 // Pestaña Ejercicios: stats locales (siempre visibles) + evaluación crítica con Claude (a
 // pedido, cacheada). Las capturas se suben con WorkoutCaptureModal y guardan el detalle por
 // ejercicio que alimenta los desbalances/progresión.
+// Subida de .docx para renovar la rutina (control reutilizado en vacío y en cabecera).
+function RoutineUpload({ apiKey, onParsed, label = 'Renovar rutina (.docx)' }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const handleFile = async (e) => {
+    const file = (e.target.files || [])[0];
+    e.target.value = '';
+    if (!file) return;
+    setBusy(true); setError(null);
+    try {
+      const att = await fileToAttachment(file);
+      const { routine, source } = await parseRoutineDocx(att.text || '', apiKey);
+      if (!routine.days.length) throw new Error('No se detectaron días/ejercicios en el documento.');
+      onParsed(routine, source);
+    } catch (err) {
+      setError(err.message || 'No se pudo leer el documento.');
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div>
+      <label className={`inline-flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-medium cursor-pointer ${busy ? 'opacity-60 pointer-events-none' : ''}`}
+        style={{ background: 'var(--bento-ink)', color: 'var(--bento-on-ink)' }}>
+        <input type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onChange={handleFile} className="hidden" disabled={busy} />
+        {busy ? '⏳ Leyendo…' : `📄 ${label}`}
+      </label>
+      {error && <p className="text-xs mt-2" style={{ color: 'var(--bento-warm)' }}>{error}</p>}
+    </div>
+  );
+}
+
+// Modal de video por ejercicio: reproduce el embed si hay video, o muestra pegar-link + buscar.
+function RoutineVideoModal({ exercise, video, onAssign, onRemove, onClose }) {
+  const [url, setUrl] = useState('');
+  const [editing, setEditing] = useState(!video);
+  const [error, setError] = useState(null);
+  const save = () => {
+    const id = extractYoutubeId(url);
+    if (!id) { setError('No reconocí un link de YouTube válido.'); return; }
+    onAssign(id);
+    setError(null); setEditing(false); setUrl('');
+  };
+  const search = () => {
+    window.open('https://www.youtube.com/results?search_query=' + encodeURIComponent(exercise.name + ' form technique'), '_blank', 'noopener');
+  };
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 p-4" onClick={onClose}>
+      <div className="w-full max-w-md bg-white dark:bg-gray-900 rounded-2xl shadow-xl border border-gray-200 dark:border-gray-800 p-5 space-y-4" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between gap-2">
+          <h2 className="text-base font-bold truncate">{exercise.anchor ? '⚓ ' : ''}{exercise.name}</h2>
+          <button onClick={onClose} className="w-8 h-8 rounded-full bg-gray-100 dark:bg-gray-800 text-sm shrink-0">✕</button>
+        </div>
+
+        {video && !editing ? (
+          <div className="space-y-3">
+            <div className="relative w-full rounded-xl overflow-hidden bg-black" style={{ aspectRatio: '16 / 9' }}>
+              <iframe
+                src={`https://www.youtube.com/embed/${video.youtube_id}`}
+                title={exercise.name}
+                className="absolute inset-0 w-full h-full"
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                allowFullScreen
+              />
+            </div>
+            <p className="text-xs text-gray-500 dark:text-gray-400">El video necesita conexión para reproducir.</p>
+            <div className="flex gap-2">
+              <button onClick={() => { setEditing(true); setUrl(''); }} className="flex-1 px-3 py-2 rounded-xl text-sm font-medium border border-gray-300 dark:border-gray-700">Cambiar</button>
+              <button onClick={onRemove} className="flex-1 px-3 py-2 rounded-xl text-sm font-medium" style={{ background: 'var(--bento-warm)', color: '#fff' }}>Quitar</button>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {!video && <p className="text-sm text-gray-500 dark:text-gray-400">Sin video. Pega un link de YouTube o búscalo y luego pégalo.</p>}
+            <input
+              type="url" inputMode="url" placeholder="https://youtube.com/watch?v=…"
+              value={url} onChange={(e) => { setUrl(e.target.value); setError(null); }}
+              className="w-full px-3 py-2 rounded-xl text-sm bg-gray-100 dark:bg-gray-800 border border-transparent focus:border-emerald-500 outline-none"
+            />
+            {error && <p className="text-xs" style={{ color: 'var(--bento-warm)' }}>{error}</p>}
+            <div className="flex gap-2">
+              <button onClick={save} className="flex-1 px-3 py-2 rounded-xl text-sm font-medium" style={{ background: 'var(--bento-ink)', color: 'var(--bento-on-ink)' }}>Guardar</button>
+              <button onClick={search} className="flex-1 px-3 py-2 rounded-xl text-sm font-medium border border-gray-300 dark:border-gray-700">🔎 Buscar</button>
+            </div>
+            {video && <button onClick={() => setEditing(false)} className="w-full text-xs text-gray-500 dark:text-gray-400 underline">Cancelar</button>}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function RoutineView({ state, setState }) {
+  const apiKey = state.settings?.anthropicApiKey;
+  const routine = state.routine;
+  const videos = state.exercise_videos || {};
+  const [activeDayId, setActiveDayId] = useState(routine?.days?.[0]?.id ?? null);
+  const [videoModal, setVideoModal] = useState(null); // { slug, name, anchor } | null
+  const [preview, setPreview] = useState(null);        // { routine, source } | null
+
+  // Si cambia la rutina (renovación) y el día activo ya no existe, vuelve al primero.
+  const activeDay = useMemo(() => {
+    const days = routine?.days || [];
+    return days.find((d) => d.id === activeDayId) || days[0] || null;
+  }, [routine, activeDayId]);
+
+  const assignVideo = (slug, youtube_id) => {
+    setState((prev) => ({
+      ...prev,
+      exercise_videos: { ...(prev.exercise_videos || {}), [slug]: { youtube_id, assignedAt: new Date().toISOString() } },
+    }));
+  };
+  const removeVideo = (slug) => {
+    setState((prev) => {
+      const next = { ...(prev.exercise_videos || {}) };
+      delete next[slug];
+      return { ...prev, exercise_videos: next };
+    });
+  };
+
+  const confirmRenew = () => {
+    if (!preview) return;
+    const saved = { ...preview.routine, updatedAt: new Date().toISOString() };
+    setState((prev) => ({ ...prev, routine: saved })); // exercise_videos intacto → videos persisten por slug
+    setActiveDayId(saved.days[0]?.id ?? null);
+    setPreview(null);
+  };
+
+  // ── Preview de renovación (antes de guardar) ──
+  if (preview) {
+    const allEx = preview.routine.days.flatMap((d) => d.exercises);
+    const sinVideo = allEx.filter((ex) => !videos[ex.slug]);
+    return (
+      <div className="space-y-4 pb-24">
+        <div className="bento-card">
+          <div className="flex items-center justify-between">
+            <h2 className="text-lg font-bold">Revisar rutina</h2>
+            <span className="text-xs px-2 py-1 rounded-full" style={{ background: 'var(--bento-surface)', color: 'var(--bento-faint)' }}>
+              {preview.source === 'ai' ? '🤖 IA' : '📐 Plantilla'}
+            </span>
+          </div>
+          <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+            {preview.routine.days.length} días · {allEx.length} ejercicios
+          </p>
+        </div>
+
+        {preview.routine.days.map((d) => (
+          <div key={d.id} className="bento-card">
+            <div className="font-semibold text-sm">{d.label}{d.durationMin ? ` · ~${d.durationMin} min` : ''}</div>
+            <ul className="mt-2 space-y-1">
+              {d.exercises.map((ex, i) => (
+                <li key={i} className="text-sm text-gray-600 dark:text-gray-300">
+                  {ex.anchor ? '⚓ ' : ''}{ex.name}
+                  {(ex.pesoInicio || ex.seriesReps) ? <span className="text-gray-400"> · {[ex.pesoInicio, ex.seriesReps].filter(Boolean).join(' × ')}</span> : null}
+                </li>
+              ))}
+              {!d.exercises.length && <li className="text-sm text-gray-400">Sin ejercicios detectados</li>}
+            </ul>
+          </div>
+        ))}
+
+        {sinVideo.length > 0 && (
+          <div className="bento-card">
+            <div className="bento-label" style={{ marginBottom: 8 }}>Ejercicios nuevos sin video ({sinVideo.length})</div>
+            <div className="flex flex-wrap gap-1.5">
+              {sinVideo.map((ex, i) => (
+                <span key={i} className="text-xs px-2 py-1 rounded-full" style={{ background: 'var(--bento-surface)', color: 'var(--bento-faint)' }}>{ex.name}</span>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="flex gap-2">
+          <button onClick={confirmRenew} className="flex-1 px-3 py-3 rounded-xl text-sm font-bold" style={{ background: 'var(--bento-ink)', color: 'var(--bento-on-ink)' }}>Guardar rutina</button>
+          <button onClick={() => setPreview(null)} className="flex-1 px-3 py-3 rounded-xl text-sm font-medium border border-gray-300 dark:border-gray-700">Cancelar</button>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Estado vacío ──
+  if (!routine || !routine.days?.length) {
+    return (
+      <div className="space-y-4 pb-24">
+        <div className="bento-card text-center py-10 space-y-3">
+          <div className="text-4xl">📐</div>
+          <h2 className="text-lg font-bold">Sin rutina aún</h2>
+          <p className="text-sm text-gray-500 dark:text-gray-400 max-w-xs mx-auto">Sube el documento de tu rutina (.docx) para verla por día y asignar videos de técnica.</p>
+          <div className="flex justify-center pt-1"><RoutineUpload apiKey={apiKey} onParsed={(r, s) => setPreview({ routine: r, source: s })} label="Subir rutina (.docx)" /></div>
+          {!apiKey && <p className="text-xs text-gray-400">Sin API key se usa el parser de plantilla (formato Speediance).</p>}
+        </div>
+      </div>
+    );
+  }
+
+  // ── Vista principal ──
+  const modalEx = videoModal;
+  return (
+    <div className="space-y-4 pb-24">
+      <div className="bento-card">
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <h2 className="text-lg font-bold truncate">{routine.title || 'Rutina'}</h2>
+            {routine.updatedAt && <p className="text-xs text-gray-400 mt-0.5">Actualizada {shortDate(routine.updatedAt.slice(0, 10))}</p>}
+          </div>
+          <RoutineUpload apiKey={apiKey} onParsed={(r, s) => setPreview({ routine: r, source: s })} />
+        </div>
+      </div>
+
+      {/* Day tabs */}
+      <div className="flex gap-2 overflow-x-auto pb-1" style={{ scrollbarWidth: 'none' }}>
+        {routine.days.map((d) => {
+          const on = d.id === activeDay?.id;
+          return (
+            <button key={d.id} onClick={() => setActiveDayId(d.id)}
+              className="px-3 py-2 rounded-xl text-sm font-medium whitespace-nowrap shrink-0"
+              style={on
+                ? { background: 'var(--bento-ink)', color: 'var(--bento-on-ink)' }
+                : { background: 'var(--bento-surface)', color: 'var(--bento-faint)' }}>
+              {d.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {activeDay && (
+        <div className="space-y-3">
+          {activeDay.durationMin && <div className="bento-label">~{activeDay.durationMin} min</div>}
+          {activeDay.exercises.map((ex, i) => {
+            const hasVideo = !!videos[ex.slug]?.youtube_id;
+            const detail = [ex.pesoInicio, ex.seriesReps].filter(Boolean).join(' × ');
+            return (
+              <div key={i} className="bento-card">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="font-semibold text-sm">{ex.anchor ? '⚓ ' : ''}{ex.name}</div>
+                    {detail && <div className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">{detail}</div>}
+                    {ex.descanso && <div className="text-xs text-gray-400 mt-0.5">Descanso {ex.descanso}</div>}
+                    {ex.notas && <div className="text-xs text-gray-400 mt-1 italic">{ex.notas}</div>}
+                  </div>
+                  <button onClick={() => setVideoModal({ slug: ex.slug, name: ex.name, anchor: ex.anchor })}
+                    className="shrink-0 flex items-center gap-1 px-3 py-2 rounded-xl text-sm font-medium"
+                    style={hasVideo
+                      ? { background: 'var(--bento-ink)', color: 'var(--bento-on-ink)' }
+                      : { background: 'var(--bento-surface)', color: 'var(--bento-faint)' }}>
+                    ▶ {hasVideo ? '🎬' : 'Video'}
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+          {!activeDay.exercises.length && <div className="bento-card text-sm text-gray-400 text-center py-6">Este día no tiene ejercicios.</div>}
+        </div>
+      )}
+
+      {modalEx && (
+        <RoutineVideoModal
+          exercise={modalEx}
+          video={videos[modalEx.slug] || null}
+          onAssign={(id) => assignVideo(modalEx.slug, id)}
+          onRemove={() => { removeVideo(modalEx.slug); setVideoModal(null); }}
+          onClose={() => setVideoModal(null)}
+        />
+      )}
+    </div>
+  );
+}
+
 function ExercisesView({ state, setState, targets }) {
   const apiKey = state.settings?.anthropicApiKey;
   const [capturing, setCapturing] = useState(false);
@@ -11600,6 +12049,7 @@ const BENTO_TABS = [
   { id: 'plan',     label: 'Plan',     short: 'Plan', icon: '📋' },
   { id: 'insights', label: 'Insights', short: 'Stats',icon: '🧠' },
   { id: 'exercise', label: 'Ejercicios', short: 'Gym', icon: '🏋️' },
+  { id: 'routine',  label: 'Rutina',   short: 'Rutina', icon: '📐' },
   { id: 'weight',   label: 'Peso',     short: 'Peso', icon: '⚖️' },
   { id: 'bank',     label: 'Banco',    short: 'Banco',icon: '📚' },
 ];
@@ -12134,6 +12584,41 @@ function App() {
     return () => clearTimeout(id);
   }, [bridgePost, energyBody]);
 
+  // Rutina app→bridge (op:'routine', timestamp-gated del lado servidor). Objeto singleton.
+  const routineBody = useMemo(() => {
+    if (!state.routine || !state.routine.updatedAt) return null;
+    return JSON.stringify({ op: 'routine', routine: state.routine });
+  }, [state.routine]);
+  useEffect(() => {
+    if (!bridgeUrl || !routineBody) return;
+    const id = setTimeout(() => {
+      fetch(bridgePost, {
+        method: 'POST', mode: 'no-cors', keepalive: true,
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: routineBody,
+      }).catch(() => {});
+    }, 2400);
+    return () => clearTimeout(id);
+  }, [bridgePost, routineBody]);
+
+  // Videos por ejercicio app→bridge (op:'exercise_videos', el servidor mergea por clave).
+  const videosBody = useMemo(() => {
+    const v = state.exercise_videos;
+    if (!v || !Object.keys(v).length) return null;
+    return JSON.stringify({ op: 'exercise_videos', exercise_videos: v });
+  }, [state.exercise_videos]);
+  useEffect(() => {
+    if (!bridgeUrl || !videosBody) return;
+    const id = setTimeout(() => {
+      fetch(bridgePost, {
+        method: 'POST', mode: 'no-cors', keepalive: true,
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: videosBody,
+      }).catch(() => {});
+    }, 2600);
+    return () => clearTimeout(id);
+  }, [bridgePost, videosBody]);
+
   // Empuje app→bridge de entradas creadas en la app (extras, ejercicios, pesos) para que el
   // chat y el bridge las vean (bidireccional). El servidor reasigna el id y dedup por contenido,
   // así que reenviar es inocuo. NO se reenvía lo que vino del bridge (id en importedIds) ni lo ya
@@ -12284,6 +12769,7 @@ function App() {
         {tab === 'plan' && <PlanWeekView state={state} setState={setState} targets={targets} />}
         {tab === 'insights' && <InsightsView state={state} setState={setState} targets={targets} />}
         {tab === 'exercise' && <ExercisesView state={state} setState={setState} targets={targets} />}
+        {tab === 'routine' && <RoutineView state={state} setState={setState} />}
         {tab === 'weight' && <WeightView state={state} setState={setState} targets={targets} />}
         {tab === 'bank' && <BankView state={state} setState={setState} />}
       </div>
