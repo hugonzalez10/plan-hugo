@@ -1828,6 +1828,11 @@ function migrateState(parsed) {
     const cleanExtras = Array.isArray(v.extras)
       ? dedupeDayExtras(v.extras).map((x) => ({ carbs: 0, fat: 0, fiber: 0, ...x }))
       : [];
+    // Sesiones escritas directo en localStorage (p.ej. vía Chrome MCP) pueden no traer id; sin id
+    // pushPayload las descarta y nunca sincronizan. Estampar uuid es idempotente (conserva el existente).
+    const cleanExercise = Array.isArray(v.exercise)
+      ? v.exercise.map((e) => (e && e.id == null ? { ...e, id: uuid() } : e))
+      : v.exercise;
     const eaten = { ...(v.eaten || {}) };
     // Migración a 2 colaciones: el snack/colación único histórico pasa a ser la colación 1
     // (la mañana). Idem su "comido" y su "no comí". Idempotente: tras la 1ª pasada snackId1
@@ -1848,6 +1853,7 @@ function migrateState(parsed) {
       ...v,
       water: v.water || { ml: 0 },
       extras: cleanExtras,
+      exercise: cleanExercise,
       eaten,
       snackId1, snackId2,
       nudgesDismissed: Array.isArray(v.nudgesDismissed) ? v.nudgesDismissed : [],
@@ -13064,9 +13070,9 @@ function App() {
     const out = [];
     const days = state.days || {};
     for (const dk of Object.keys(days)) {
-      if (dk < cutoff) continue;
       const d = days[dk] || {};
-      for (const x of (d.extras || [])) {
+      // Comidas: solo ventana de 10 días (crecen rápido y la app no necesita el log viejo).
+      if (dk >= cutoff) for (const x of (d.extras || [])) {
         if (!x || x.id == null || imported.has(x.id) || pushed.has(x.id)) continue;
         out.push({ localId: x.id, section: 'meals', date: dk, entry: {
           name: x.name, kcal: numv(x.kcal), protein: numv(x.protein), carbs: numv(x.carbs),
@@ -13074,6 +13080,8 @@ function App() {
           date: dk, ts: x.ts != null ? x.ts : null, source: 'app',
         } });
       }
+      // Entrenamientos: SIN ventana → backfill del historial completo (el bridge ya no los poda).
+      // pushedIds/importedIds dedupea, así que cada sesión se empuja una sola vez.
       for (const ex of (d.exercise || [])) {
         if (!ex || ex.id == null || imported.has(ex.id) || pushed.has(ex.id)) continue;
         const entry = { name: ex.name, kcal: numv(ex.kcal), date: dk, ts: ex.ts != null ? ex.ts : null, source: 'app' };
@@ -13088,7 +13096,8 @@ function App() {
     for (const wt of (state.weights || [])) {
       if (!wt || wt.id == null) continue;
       const wdate = wt.date || '';
-      if (wdate < cutoff || imported.has(wt.id) || pushed.has(wt.id)) continue;
+      // Peso: SIN ventana → backfill del historial completo (retención del bridge ya es 0 = nunca poda).
+      if (imported.has(wt.id) || pushed.has(wt.id)) continue;
       const entry = { date: wdate, source: 'app', ts: wt.ts != null ? wt.ts : null };
       for (const wf of WEIGHT_FIELDS) if (wt[wf.key] != null) entry[wf.key] = wt[wf.key];
       if (wt.time) entry.time = wt.time;
