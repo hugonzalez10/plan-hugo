@@ -9,15 +9,33 @@ teléfono es inmediato. `index.html` es solo el shell (HTML + estilos + carga de
 ## Editar y compilar
 
 1. Edita `app.jsx`.
-2. Recompila:
+2. Recompila para probar en local:
 
    ```sh
    ./build.sh
    ```
 
-   (descarga esbuild al vuelo vía `npx`, no instala nada). Genera `app.js`.
-3. Recarga la app. Recuerda subir la versión del cache en `sw.js` (`CACHE_NAME`) si publicas,
-   para forzar el refresco del Service Worker.
+   (descarga esbuild al vuelo vía `npx`, no instala nada). Genera `app.js`. Recarga la app.
+
+## Publicar
+
+Un solo comando hace todo y evita el drift clásico (compilar pero olvidar subir
+`CACHE_NAME`, con lo que el Service Worker sigue sirviendo la versión vieja):
+
+```sh
+./deploy.sh "descripcion-corta"            # test → build → bump CACHE_NAME → commit → push (rama actual)
+./deploy.sh "descripcion-corta" --publish  # además mergea a main → GitHub Pages publica
+```
+
+`deploy.sh` en orden: corre `node --test` (si algo falla, **aborta** sin tocar nada),
+compila, **auto-bumpea** `CACHE_NAME` en `sw.js` (incrementa `plan-hugo-v<N>-…`; el sufijo
+sale del argumento o del nombre de la rama), valida que `app.js` no salió vacío y que la
+versión cambió, commitea y empuja. GitHub Pages sirve desde `main`, así que publicar de
+verdad (lo que ves en el iPhone) exige `--publish`.
+
+Avisos que imprime (no bloquean): si cambió `apps-script/bridge-writer.gs` recuerda el
+**redeploy manual** en Apps Script (no hay clasp), y si el `CANONICAL_ID` del `.gs` ya no
+aparece en `skills/food-tracker/SKILL.md` (`FILE_ID`) avisa de la desincronización.
 
 ## Cómo abrirla
 
