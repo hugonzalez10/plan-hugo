@@ -96,20 +96,23 @@ const TARGETS = {
   kcalMax: 2000, proteinMin: 200, carbsTarget: 200,
   fatTarget: 67, fiberTarget: 30, waterTarget: 3675,
 };
-// Proteína de los ítems fijos del almuerzo (arroz 4 + proteína 40 + fruta 1 + yogurt-granola 4).
-const ALMUERZO_FIXED_PROTEIN = 4 + 40 + 1 + 4; // 49
+// FIXED_MEALS ya no trae ítems predeterminados: el commit 6d4fa42 ("quita los ítems
+// predeterminados de Desayuno y Almuerzo") dejó desayuno/almuerzo con items: []. Por eso
+// el almuerzo fijo aporta 0 y todo lo del almuerzo entra como extra del chat.
 const extraAlmuerzo = { id: 'x1', mealSlot: 'almuerzo', source: 'skill-chat', name: 'Almuerzo', kcal: 520, protein: 42, carbs: 62, fat: 10, fiber: 8 };
 const run = (day, snackBank = []) => computeDayTotals(day, snackBank, [], TARGETS, [], []);
 
 test('doble conteo: almuerzo tildado + extra del chat NO suma dos veces', () => {
   const day = { eaten: { almuerzo: true }, extras: [extraAlmuerzo] };
-  // Sin el fix daría 49 (fijo) + 42 (extra) = 91. Con el fix, solo el extra.
+  // Solo el extra (42): el almuerzo fijo no tiene ítems y la supresión por loggedSlots
+  // evita re-sumar la sección. (Con la porción fija de antes habrían sido 49 + 42 = 91.)
   assert.equal(run(day).protein, 42);
 });
 
-test('no-regresión: almuerzo tildado SIN extra cuenta la porción fija', () => {
+test('no-regresión: almuerzo tildado sin ítems fijos ni extra no inventa proteína', () => {
   const day = { eaten: { almuerzo: true }, extras: [] };
-  assert.equal(run(day).protein, ALMUERZO_FIXED_PROTEIN); // 49
+  // Sin ítems fijos (6d4fa42) y sin extra, el almuerzo tildado aporta 0.
+  assert.equal(run(day).protein, 0);
 });
 
 test('colación: snack del banco tildado + extra del chat NO suma dos veces', () => {
