@@ -1620,7 +1620,7 @@ function buildSeed() {
     exercise_videos: {},
     arsenalVersion: 3,
     bridge: { lastSyncAt: null, importedIds: [], pushedIds: [], removedBridgeIds: [] },
-    aiCache: { coach: {}, weekly: {}, patterns: null, lastSubstitution: null },
+    aiCache: { coach: {}, weekly: {}, patterns: null, lastSubstitution: null, health: null },
   };
 }
 
@@ -7662,6 +7662,281 @@ function RoutineView({ state, setState }) {
   );
 }
 
+// Mini-gráfico de tendencia (sparkline) para una métrica de salud. `points` = lista alineada
+// al rango (28 días); y=null deja hueco (se conecta por encima). Sin ejes, compacto.
+function MetricSparkline({ points, color = 'var(--bento-blue)', height = 42 }) {
+  const real = (points || []).filter((p) => p && p.y != null);
+  if (real.length < 2) {
+    return <div style={{ height, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, color: 'var(--bento-faint)' }}>pocos datos</div>;
+  }
+  const ys = real.map((p) => Number(p.y));
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const range = (maxY - minY) || 1;
+  const n = points.length;
+  const W = 100, H = height;
+  const px = (i) => (n > 1 ? (i / (n - 1)) * W : 0);
+  const py = (y) => H - 3 - ((Number(y) - minY) / range) * (H - 8);
+  const coords = points.map((p, i) => (p && p.y != null ? `${px(i).toFixed(1)},${py(p.y).toFixed(1)}` : null)).filter(Boolean);
+  const last = real[real.length - 1];
+  const lastI = points.map((p, i) => (p && p.y != null ? i : -1)).filter((i) => i >= 0).pop();
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ width: '100%', height }}>
+      <polyline points={coords.join(' ')} fill="none" stroke={color} strokeWidth="1.6" vectorEffect="non-scaling-stroke" strokeLinejoin="round" strokeLinecap="round" />
+      {lastI != null && <circle cx={px(lastI)} cy={py(last.y)} r="2" fill={color} vectorEffect="non-scaling-stroke" />}
+    </svg>
+  );
+}
+
+// Pestaña Salud: tendencias de Apple Health (pasos, energía activa, sueño, FC reposo, VO2máx)
+// + banderas automáticas + evaluación crítica de Claude que cruza sueño/actividad/recuperación
+// con la pérdida de peso y la adherencia. SOLO LECTURA: nunca altera kcal ni totales.
+function HealthView({ state, setState, targets }) {
+  const apiKey = state.settings?.anthropicApiKey;
+  const cached = state.aiCache?.health;
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [response, setResponse] = useState(cached?.response || null);
+
+  // Serie de 28 días: salud + peso + adherencia (para que Claude correlacione)
+  const series = useMemo(() => {
+    const today = todayKey();
+    const start = shiftDate(today, -27);
+    const out = [];
+    let cursor = start;
+    while (cursor <= today) {
+      const day = state.days[cursor];
+      const dh = day?.health || null;
+      const totals = day ? computeDayTotals(day, state.snackBank || [], state.proteinBank || [], targets, state.dessertBank || [], state.antojoCustomItems || []) : null;
+      const w = (state.weights || []).find((x) => x.date === cursor && x.weightKg != null);
+      out.push({
+        fecha: cursor,
+        pasos: dh?.steps != null ? Math.round(Number(dh.steps)) : null,
+        energia_activa_kcal: dh?.activeEnergyKcal != null ? Math.round(Number(dh.activeEnergyKcal)) : null,
+        sueno_horas: dh?.sleepHours != null ? +Number(dh.sleepHours).toFixed(1) : null,
+        fc_reposo: dh?.restingHr != null ? Math.round(Number(dh.restingHr)) : null,
+        vo2max: dh?.vo2max != null ? +Number(dh.vo2max).toFixed(1) : null,
+        peso_kg: w?.weightKg ?? null,
+        cumple_meta: totals && totals.eatenAny ? dayMetsTarget(totals, targets) : null,
+        kcal_consumido: totals && totals.eatenAny ? Math.round(totals.kcal) : null,
+      });
+      cursor = shiftDate(cursor, 1);
+    }
+    return out;
+  }, [state.days, state.weights, state.snackBank, state.proteinBank, state.dessertBank, state.antojoCustomItems, targets]);
+
+  const daysWithHealth = series.filter((s) => s.pasos != null || s.sueno_horas != null || s.energia_activa_kcal != null || s.fc_reposo != null).length;
+
+  // Métricas: último valor, promedio 28d, dirección de tendencia (mitad inicial vs final)
+  const METRIC_DEFS = [
+    { key: 'pasos', label: 'Pasos', icon: '👟', color: 'var(--bento-ink)', goodUp: true, fmt: (v) => Math.round(v).toLocaleString('es-CL'), unit: '' },
+    { key: 'energia_activa_kcal', label: 'Energía activa', icon: '🔥', color: 'var(--bento-warm)', goodUp: true, fmt: (v) => Math.round(v), unit: 'kcal' },
+    { key: 'sueno_horas', label: 'Sueño', icon: '😴', color: 'var(--bento-blue)', goodUp: true, fmt: (v) => v.toFixed(1), unit: 'h' },
+    { key: 'fc_reposo', label: 'FC reposo', icon: '❤️', color: 'var(--bento-pos)', goodUp: false, fmt: (v) => Math.round(v), unit: 'lpm' },
+    { key: 'vo2max', label: 'VO₂máx', icon: '🫁', color: 'var(--bento-lilac)', goodUp: true, fmt: (v) => v.toFixed(1), unit: '' },
+  ];
+  const metrics = useMemo(() => METRIC_DEFS.map((d) => {
+    const vals = series.map((s) => s[d.key]).filter((v) => v != null).map(Number);
+    const last = vals.length ? vals[vals.length - 1] : null;
+    const avg = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+    let dir = 'flat';
+    if (vals.length >= 4) {
+      const half = Math.floor(vals.length / 2);
+      const fa = vals.slice(0, half).reduce((a, b) => a + b, 0) / half;
+      const la = vals.slice(half).reduce((a, b) => a + b, 0) / (vals.length - half);
+      if (fa > 0) dir = la > fa * 1.03 ? 'up' : la < fa * 0.97 ? 'down' : 'flat';
+    }
+    return { ...d, vals, last, avg, dir, count: vals.length, spark: series.map((s, i) => ({ x: i, y: s[d.key] })) };
+  }), [series]);
+
+  // Banderas automáticas (sin IA)
+  const flags = useMemo(() => {
+    const out = [];
+    const last7 = series.slice(-7);
+    const sleepLow = last7.filter((s) => s.sueno_horas != null && s.sueno_horas < 6).length;
+    if (sleepLow >= 2) out.push({ tone: 'warm', text: `Dormiste menos de 6h en ${sleepLow} de las últimas 7 noches` });
+    const sed = last7.filter((s) => s.pasos != null && s.pasos < 3000).length;
+    if (sed >= 2) out.push({ tone: 'warm', text: `${sed} días sedentarios esta semana (<3.000 pasos)` });
+    const fc = metrics.find((m) => m.key === 'fc_reposo');
+    if (fc && fc.dir === 'up' && fc.count >= 4) out.push({ tone: 'warm', text: 'Tu FC en reposo viene subiendo — ojo con el estrés o sobrecarga' });
+    const stepsM = metrics.find((m) => m.key === 'pasos');
+    if (stepsM && stepsM.dir === 'down' && stepsM.count >= 6) out.push({ tone: 'warm', text: 'Tu actividad (pasos) viene cayendo' });
+    const sleepM = metrics.find((m) => m.key === 'sueno_horas');
+    if (sleepM && sleepM.avg != null && sleepM.avg >= 7 && sleepLow === 0) out.push({ tone: 'pos', text: `Buen sueño: promedio ${sleepM.avg.toFixed(1)}h` });
+    if (stepsM && stepsM.avg != null && stepsM.avg >= 8000) out.push({ tone: 'pos', text: `Actividad sólida: ${Math.round(stepsM.avg).toLocaleString('es-CL')} pasos/día en promedio` });
+    return out;
+  }, [series, metrics]);
+
+  const aiSeries = useMemo(() => series.filter((s) => s.pasos != null || s.sueno_horas != null || s.energia_activa_kcal != null || s.fc_reposo != null), [series]);
+  const sig = useMemo(() => hashSig(aiSeries), [aiSeries]);
+  const isStale = cached && cached.sig !== sig;
+  const cacheOld = cached ? (Date.now() - new Date(cached.generatedAt).getTime()) > 7 * 86400000 : false;
+  const confColor = response?.confianza === 'alta' ? 'green' : response?.confianza === 'media' ? 'amber' : 'red';
+
+  const streak = useMemo(() => computeStreak(state.days || {}, state.snackBank, state.proteinBank, targets, todayKey(), state.dessertBank, state.antojoCustomItems || []), [state.days, state.snackBank, state.proteinBank, targets, state.dessertBank, state.antojoCustomItems]);
+  const pesoTrend = useMemo(() => {
+    const withW = series.filter((s) => s.peso_kg != null);
+    if (withW.length < 2) return null;
+    const first = withW[0], last = withW[withW.length - 1];
+    return { from: first.peso_kg, to: last.peso_kg, delta: +(last.peso_kg - first.peso_kg).toFixed(1), dias: daysBetween(first.fecha, last.fecha) };
+  }, [series]);
+
+  const generate = async () => {
+    if (!apiKey) { setError('Configura tu API key en ⚙️ Ajustes primero.'); return; }
+    if (daysWithHealth < 7) { setError(`Necesitas al menos 7 días con datos de salud. Tienes ${daysWithHealth}.`); return; }
+    setLoading(true); setError(null);
+    try {
+      const T = targets || DEFAULT_TARGETS;
+      const prompt = `Eres un analista de salud y rendimiento evaluando a Hugo (geriatra chileno de 36 años, en plan de pérdida de peso, entrena fuerza en Speediance + algo de cardio). USA TUTEO CHILENO. NO uses voseo. Sé directo, honesto y crítico — no adules. Usa los números reales del dataset.
+
+META DIARIA: ${T.kcalMin}-${T.kcalMax} kcal · proteína ≥ ${T.proteinMin}g. Racha de adherencia actual: ${streak.current} días (mejor: ${streak.best}).
+${pesoTrend ? `PESO: de ${pesoTrend.from} a ${pesoTrend.to} kg en ${pesoTrend.dias} días (${pesoTrend.delta >= 0 ? '+' : ''}${pesoTrend.delta} kg).` : 'Sin suficientes mediciones de peso en la ventana.'}
+
+DATOS DIARIOS (28 días). Cada fila: pasos, energia_activa_kcal, sueno_horas, fc_reposo (en reposo), vo2max, peso_kg, cumple_meta (si ese día cumplió la meta calórica+proteína), kcal_consumido:
+${JSON.stringify(aiSeries, null, 2)}
+
+IMPORTANTE: "energia_activa_kcal" y "pasos" son CONTEXTO de Apple Health — NO los restes de las kcal ni del déficit; el TDEE adaptativo ya incorpora la actividad. Restarlos sería doble conteo.
+
+Evalúa CRÍTICAMENTE estas 4 dimensiones, cruzando datos entre sí (no las analices aisladas):
+1. SUEÑO/ACTIVIDAD ↔ PESO Y ADHERENCIA: ¿hay relación entre dormir mal y los días que NO cumple la meta (cumple_meta=false)? ¿baja más de peso las semanas que se mueve más? Cita días/semanas concretos.
+2. RECUPERACIÓN/ESTRÉS: cruza fc_reposo + sueno_horas. ¿Señales de sobrecarga o mal descanso? ¿Debería bajar la intensidad del Speediance alguna semana?
+3. ACTIVIDAD/NEAT: ¿es consistente o irregular? ¿días sedentarios? El NEAT importa para el déficit.
+4. FITNESS: tendencia de vo2max y fc_reposo en el tiempo — ¿su condición mejora?
+
+Devuelve SOLO JSON, sin markdown:
+{
+  "resumen": "1-2 frases del estado general de su salud/recuperación y su relación con el objetivo",
+  "peso_y_adherencia": "el cruce sueño/actividad ↔ peso y adherencia, con números/días reales (o 'sin datos suficientes')",
+  "recuperacion": "evaluación de recuperación y estrés (fc_reposo + sueño)",
+  "actividad": "consistencia de actividad/NEAT con números",
+  "fitness": "tendencia de fitness cardiovascular (vo2max/fc_reposo)",
+  "recomendaciones": [ { "que": "qué cambiar", "porque": "por qué importa para SU objetivo", "como": "cómo hacerlo, concreto" } ],
+  "confianza": "alta|media|baja"
+}
+
+Reglas: 2 a 4 recomendaciones, las más importantes y accionables. Si una dimensión no tiene datos suficientes, dilo y baja la confianza. No inventes datos.`;
+      const text = await askClaude(prompt, apiKey, 2800, MODEL_DEFAULT);
+      const parsed = parseJsonLoose(text);
+      if (!parsed?.resumen && !Array.isArray(parsed?.recomendaciones)) { setError('No se pudo parsear la respuesta.'); return; }
+      setResponse(parsed);
+      setState((prev) => ({ ...prev, aiCache: { ...(prev.aiCache || {}), health: { sig, response: parsed, generatedAt: new Date().toISOString() } } }));
+    } catch (err) {
+      setError(err.message || 'Error al consultar Claude');
+    } finally { setLoading(false); }
+  };
+
+  const dirArrow = (m) => {
+    if (m.dir === 'flat' || m.last == null) return { ch: '→', col: 'var(--bento-faint)' };
+    const good = (m.dir === 'up') === m.goodUp;
+    return { ch: m.dir === 'up' ? '↑' : '↓', col: good ? 'var(--bento-pos)' : 'var(--bento-warm)' };
+  };
+
+  return (
+    <div className="px-4 py-4 space-y-4">
+      <div className="px-1">
+        <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2"><span>❤️</span>Salud</h1>
+        <p className="text-sm" style={{ color: 'var(--bento-faint)' }}>Tu actividad, sueño y recuperación — y qué dicen sobre tu objetivo</p>
+      </div>
+
+      {daysWithHealth === 0 ? (
+        <div className="bento-card text-center text-sm" style={{ borderStyle: 'dashed', color: 'var(--bento-muted)' }}>
+          Aún no hay datos de Apple Health. Configura el atajo "Plan Hugo Health" en tu iPhone (lee pasos, energía activa, sueño, FC y VO₂máx y los manda solo) y acá verás tus tendencias y una evaluación crítica.
+        </div>
+      ) : (
+        <>
+          {/* Tiles por métrica */}
+          <div className="bento-grid2 is-a items-stretch">
+            {metrics.filter((m) => m.count > 0).map((m) => {
+              const a = dirArrow(m);
+              return (
+                <div key={m.key} className="bento-card" style={{ padding: '14px 16px' }}>
+                  <div className="flex items-center justify-between">
+                    <div className="bento-label">{m.icon} {m.label}</div>
+                    <span style={{ fontSize: 14, fontWeight: 700, color: a.col }}>{a.ch}</span>
+                  </div>
+                  <div className="bento-num" style={{ fontSize: 26, marginTop: 4 }}>
+                    {m.last != null ? m.fmt(m.last) : '—'}<span style={{ fontSize: 11, fontWeight: 400, color: 'var(--bento-faint)' }}> {m.unit}</span>
+                  </div>
+                  <div style={{ fontSize: 10.5, color: 'var(--bento-faint)', marginTop: 2 }}>prom {m.avg != null ? m.fmt(m.avg) : '—'} · {m.count}d</div>
+                  <div style={{ marginTop: 8 }}><MetricSparkline points={m.spark} color={m.color} /></div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Banderas automáticas */}
+          {flags.length > 0 && (
+            <div className="bento-card space-y-2">
+              <div className="bento-label">Señales</div>
+              <div className="space-y-1.5">
+                {flags.map((f, i) => (
+                  <div key={i} className="flex items-start gap-2 text-xs px-3 py-2 rounded-xl"
+                    style={f.tone === 'pos' ? { background: 'rgba(122,154,120,0.10)', color: 'var(--bento-pos)' } : { background: 'rgba(205,122,85,0.10)', color: 'var(--bento-warm)' }}>
+                    <span>{f.tone === 'pos' ? '✅' : '⚠️'}</span><span style={{ lineHeight: 1.4 }}>{f.text}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </>
+      )}
+
+      {/* Evaluación crítica con Claude */}
+      <div className="bento-label" style={{ marginTop: 8 }}>Evaluación crítica · Claude</div>
+      <div className="bento-card space-y-3">
+        {!apiKey && (
+          <p className="text-xs p-2 rounded-lg" style={{ color: 'var(--bento-warm)', background: 'rgba(205,122,85,0.10)' }}>⚠️ Configura tu API key en ⚙️ Ajustes primero.</p>
+        )}
+        <button onClick={generate} disabled={loading || !apiKey || daysWithHealth < 7}
+          className="w-full py-2.5 rounded-xl font-semibold"
+          style={loading || !apiKey || daysWithHealth < 7
+            ? { background: 'var(--bento-surface)', color: 'var(--bento-faint)' }
+            : { background: 'var(--bento-ink)', color: 'var(--bento-on-ink)' }}>
+          {loading ? 'Analizando tu salud…' : (response ? (isStale || cacheOld ? 'Actualizar evaluación' : 'Regenerar') : 'Evaluar mi salud con Claude ✨')}
+        </button>
+        {daysWithHealth < 7 && (
+          <p style={{ fontSize: 11, color: 'var(--bento-faint)' }}>Necesitas al menos 7 días con datos de salud ({daysWithHealth} hasta ahora).</p>
+        )}
+        {error && <p className="text-xs p-2 rounded-lg" style={{ color: 'var(--bento-warm)', background: 'rgba(205,122,85,0.10)' }}>{error}</p>}
+      </div>
+
+      {response && (
+        <>
+          {response.confianza && (
+            <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full" style={{ background: 'var(--bento-surface)' }}>
+              <span style={{ width: 8, height: 8, borderRadius: 99, background: confColor === 'green' ? 'var(--bento-pos)' : confColor === 'amber' ? 'var(--bento-yellow)' : 'var(--bento-warm)' }} />
+              <span style={{ fontSize: 11, color: 'var(--bento-muted)' }}>Confianza {response.confianza}{isStale && ' · datos cambiaron'}</span>
+            </div>
+          )}
+
+          {response.resumen && (
+            <div className="bento-card"><p className="text-sm">{response.resumen}</p></div>
+          )}
+
+          {[
+            { key: 'peso_y_adherencia', icon: '⚖️', label: 'Peso y adherencia' },
+            { key: 'recuperacion', icon: '🔋', label: 'Recuperación y estrés' },
+            { key: 'actividad', icon: '👟', label: 'Actividad' },
+            { key: 'fitness', icon: '🫁', label: 'Fitness' },
+          ].filter((s) => response[s.key]).map((s) => (
+            <div key={s.key} className="bento-card">
+              <div className="bento-label" style={{ marginBottom: 8 }}>{s.icon} {s.label}</div>
+              <p style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--bento-muted)' }}>{response[s.key]}</p>
+            </div>
+          ))}
+
+          {Array.isArray(response.recomendaciones) && response.recomendaciones.map((m, i) => (
+            <div key={i} className="bento-card space-y-2.5">
+              <div className="bento-label">🔧 {typeof m === 'string' ? m : m.que}</div>
+              {m.porque && <p style={{ fontSize: 12.5, color: 'var(--bento-muted)', lineHeight: 1.5 }}>{m.porque}</p>}
+              {m.como && <p style={{ fontSize: 12.5, lineHeight: 1.5, padding: '10px 12px', background: 'var(--bento-surface)', borderRadius: 8 }}>💡 {m.como}</p>}
+            </div>
+          ))}
+        </>
+      )}
+    </div>
+  );
+}
+
 function ExercisesView({ state, setState, targets }) {
   const apiKey = state.settings?.anthropicApiKey;
   const [capturing, setCapturing] = useState(false);
@@ -9602,12 +9877,6 @@ function SettingsModal({ state, setState, onClose }) {
             </div>
           </div>
         )}
-
-        <div className="pt-2 border-t border-gray-200 dark:border-gray-800">
-          <div className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-2 mt-3">📐 Reglas personales</div>
-          <p className="text-[11px] text-gray-500 dark:text-gray-400 mb-2">La app te alerta cuando vas a romper alguna. Edita el nombre haciendo click.</p>
-          <RulesEditor rules={rulesDraft} onChange={setRulesDraft} />
-        </div>
 
         <div className="pt-2 border-t border-gray-200 dark:border-gray-800">
           <div className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-2 mt-3">☁️ Sync entre dispositivos</div>
@@ -12088,6 +12357,7 @@ const BENTO_TABS = [
   { id: 'exercise', label: 'Ejercicios', short: 'Gym', icon: '🏋️' },
   { id: 'routine',  label: 'Rutina',   short: 'Rutina', icon: '📐' },
   { id: 'weight',   label: 'Peso',     short: 'Peso', icon: '⚖️' },
+  { id: 'health',   label: 'Salud',    short: 'Salud', icon: '❤️' },
   { id: 'bank',     label: 'Banco',    short: 'Banco',icon: '📚' },
 ];
 
@@ -12808,6 +13078,7 @@ function App() {
         {tab === 'exercise' && <ExercisesView state={state} setState={setState} targets={targets} />}
         {tab === 'routine' && <RoutineView state={state} setState={setState} />}
         {tab === 'weight' && <WeightView state={state} setState={setState} targets={targets} />}
+        {tab === 'health' && <HealthView state={state} setState={setState} targets={targets} />}
         {tab === 'bank' && <BankView state={state} setState={setState} />}
       </div>
 
