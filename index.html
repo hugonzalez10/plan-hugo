@@ -11,19 +11,11 @@
   <title>Plan Hugo</title>
   <link rel="manifest" href="manifest.json" />
 
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script>
-    tailwind.config = {
-      darkMode: 'class',
-      theme: {
-        extend: {
-          fontFamily: {
-            sans: ['-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'Roboto', 'sans-serif'],
-          },
-        },
-      },
-    };
-  </script>
+  <!-- Tailwind PREBUILDEADO (build.sh → tailwind.css). Reemplaza el Play CDN (cdn.tailwindcss.com),
+       que pesaba 407 KB y compilaba en el navegador en cada carga; este CSS estático es ~39 KB
+       (7 KB gzip) y trae solo las clases usadas. La config (darkMode 'class' + fuente) vive ahora
+       en tailwind.config.js. Va ANTES del <style> de abajo para que esos overrides ganen. -->
+  <link rel="stylesheet" href="tailwind.css" />
 
   <style>
     /* ────────────────────────────────────────────────────────────
