@@ -816,6 +816,13 @@ function _commitFromUpload(uploadId) {
 // Alternativa: ?delta=<json url-encoded> para mandar el objeto/payload entero.
 function _entryFromParams(p) {
   var entry = { source: p.source || 'skill-chat' };
+  // Alias del agua: el agregador suma `ml` (ver _totals), pero la skill/chat manda a veces
+  // `waterMl` o `water`. Sin esto la entrada se agrega (water es append-only) pero queda sin
+  // `ml` y el total de hidratación da 0. Mapear al campo canónico antes de castear.
+  if (p.ml == null || p.ml === '') {
+    if (p.waterMl != null && p.waterMl !== '') p.ml = p.waterMl;
+    else if (p.water != null && p.water !== '') p.ml = p.water;
+  }
   ['date', 'time', 'name', 'mealSlot', 'meal', 'gi', 'notes'].forEach(function (k) {
     if (p[k] != null && p[k] !== '') entry[k] = p[k];
   });

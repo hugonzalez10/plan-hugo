@@ -118,6 +118,24 @@ test('_totals: suma solo las meals del día pedido', () => {
   assert.equal(r.workoutsKcal, 300);
 });
 
+// ── agua: _entryFromParams mapea waterMl/water al campo canónico `ml` y _totals suma ─
+test('_entryFromParams: waterMl y water son alias de ml; _totals los suma', () => {
+  const { _entryFromParams } = gs;
+  assert.equal(_entryFromParams({ section: 'water', date: '2026-06-15', ml: '500' }).ml, 500);
+  assert.equal(_entryFromParams({ section: 'water', date: '2026-06-15', waterMl: '1500' }).ml, 1500);
+  assert.equal(_entryFromParams({ section: 'water', date: '2026-06-15', water: '250' }).ml, 250);
+  // ml explícito gana sobre los alias
+  assert.equal(_entryFromParams({ section: 'water', ml: '100', waterMl: '999' }).ml, 100);
+
+  const b = emptyBridge();
+  b.water = [
+    _entryFromParams({ section: 'water', date: '2026-06-15', waterMl: '1500' }),
+    _entryFromParams({ section: 'water', date: '2026-06-15', waterMl: '500' }),
+    _entryFromParams({ section: 'water', date: '2026-06-14', waterMl: '999' }), // otro día
+  ];
+  assert.equal(_totals(b, '2026-06-15').waterMl, 2000);
+});
+
 // ── _mergeInto snapshot: guarda en snapshots[date] ───────────────────────────────
 test('_mergeInto snapshot: guarda los totales por fecha', () => {
   const b = emptyBridge();
