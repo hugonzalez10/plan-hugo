@@ -1,16 +1,17 @@
 /* Plan Hugo — Service Worker mínimo
- * Estrategia: network-first para index.html y app.js (queremos la última versión),
- * cache-first para CDN (Tailwind, React) — son immutable por URL.
+ * Estrategia: network-first para los archivos propios (index.html, app.js, tailwind.css —
+ * queremos la última versión), cache-first para CDN (React, jspdf/mammoth on-demand) — immutables por URL.
  * NO interceptamos llamadas a api.anthropic.com.
  */
 
-const CACHE_NAME = 'plan-hugo-v47-lazy-jspdf-mammoth';
+const CACHE_NAME = 'plan-hugo-v48-tailwind-prebuild';
 const CORE_URLS = [
   './index.html',
   './app.js',
+  './tailwind.css',
   './manifest.json',
 ];
-const CDN_HOSTS = ['cdn.tailwindcss.com', 'unpkg.com'];
+const CDN_HOSTS = ['unpkg.com'];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
