@@ -6,7 +6,7 @@
 #
 # Uso:
 #   ./deploy.sh [descripción]              build + commit + push de la rama actual
-#   ./deploy.sh [descripción] --publish    además mergea a main y publica (GitHub Pages)
+#   ./deploy.sh [descripción] --publish    además abre y mergea un PR a main (GitHub Pages)
 #   ./deploy.sh --publish [descripción]    (el orden de los argumentos da igual)
 #
 # La <descripción> es el sufijo del CACHE_NAME (plan-hugo-v<N>-<desc>). Si no se pasa,
@@ -97,21 +97,26 @@ ok "Rama '$BRANCH' empujada"
 
 if [ "$PUBLISH" -eq 1 ]; then
   if [ "$BRANCH" = "main" ]; then
-    ok "Ya estás en main — GitHub Pages publicará este push en ~1-2 min."
+    ok "Ya estás en main — el push de arriba ya publica (GitHub Pages, ~1-2 min)."
   else
-    say "Publicando a main (GitHub Pages)"
-    git checkout main
-    git pull --ff-only origin main
-    git merge --no-ff "$BRANCH" -m "deploy: merge $BRANCH → main ($NEW)"
-    git push origin main
-    git checkout "$BRANCH"
-    ok "main actualizado. GitHub Pages servirá $NEW en ~1-2 min."
+    command -v gh >/dev/null 2>&1 || die "gh (GitHub CLI) no está instalado: no puedo abrir el PR a main. Instálalo o publica a mano."
+    say "Publicando vía PR a main (GitHub Pages)"
+    # Reusa el PR abierto de esta rama si existe; si no, lo crea. Evita duplicados.
+    PR_NUM="$(gh pr list --head "$BRANCH" --base main --state open --json number --jq '.[0].number' 2>/dev/null || true)"
+    if [ -n "$PR_NUM" ]; then
+      ok "Reusando PR #$PR_NUM (ya estaba abierto)"
+    else
+      PR_NUM="$(gh pr create --base main --head "$BRANCH" --title "deploy: $NEW" --body "Publicación automática vía deploy.sh. CACHE_NAME = $NEW." | grep -oE '[0-9]+$')"
+      ok "PR #$PR_NUM creado"
+    fi
+    gh pr merge "$PR_NUM" --merge --delete-branch=false
+    ok "PR #$PR_NUM mergeado a main. GitHub Pages servirá $NEW en ~1-2 min."
   fi
 else
   if [ "$BRANCH" != "main" ]; then
     printf '\n\033[1;36mPara publicar a producción (GitHub Pages sirve desde main):\033[0m\n'
     printf '  ./deploy.sh %s --publish\n' "$DESC"
-    printf '  (o a mano: git checkout main && git merge --no-ff %s && git push origin main && git checkout %s)\n\n' "$BRANCH" "$BRANCH"
+    printf '  (o a mano: gh pr create --base main --head %s --fill && gh pr merge --merge)\n\n' "$BRANCH"
   fi
 fi
 ok "Listo. CACHE_NAME = $NEW"

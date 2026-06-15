@@ -24,14 +24,15 @@ Un solo comando hace todo y evita el drift clásico (compilar pero olvidar subir
 
 ```sh
 ./deploy.sh "descripcion-corta"            # test → build → bump CACHE_NAME → commit → push (rama actual)
-./deploy.sh "descripcion-corta" --publish  # además mergea a main → GitHub Pages publica
+./deploy.sh "descripcion-corta" --publish  # además abre y mergea un PR a main → GitHub Pages publica
 ```
 
 `deploy.sh` en orden: corre `node --test` (si algo falla, **aborta** sin tocar nada),
 compila, **auto-bumpea** `CACHE_NAME` en `sw.js` (incrementa `plan-hugo-v<N>-…`; el sufijo
 sale del argumento o del nombre de la rama), valida que `app.js` no salió vacío y que la
 versión cambió, commitea y empuja. GitHub Pages sirve desde `main`, así que publicar de
-verdad (lo que ves en el iPhone) exige `--publish`.
+verdad (lo que ves en el iPhone) exige `--publish`, que abre (o reusa) un PR de la rama a
+`main` con `gh` y lo mergea — requiere [GitHub CLI](https://cli.github.com/) autenticado.
 
 Avisos que imprime (no bloquean): si cambió `apps-script/bridge-writer.gs` recuerda el
 **redeploy manual** en Apps Script (no hay clasp), y si el `CANONICAL_ID` del `.gs` ya no
