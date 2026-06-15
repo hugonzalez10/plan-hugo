@@ -433,6 +433,10 @@ Devuelve SOLO JSON válido, sin markdown ni backticks, con este esquema exacto:
     {
       "label": "Día N — Título (ej. 'Día 1 — Pierna')",
       "durationMin": número entero o null,
+      "warmup": "texto del calentamiento general del día, o null",
+      "ramp": "el párrafo completo de 'Rampa de aproximación' del día (regla general), o null",
+      "cardioClose": "texto del 'Cardio de cierre' del día, o null",
+      "note": "para días de cardio puro SIN tabla de ejercicios, el cuerpo del día (ej. 'Sin fuerza este día. Remo o bicicleta 50 min…'); si no aplica, null",
       "exercises": [
         {
           "name": "nombre del ejercicio sin el símbolo de ancla",
@@ -440,6 +444,7 @@ Devuelve SOLO JSON válido, sin markdown ni backticks, con este esquema exacto:
           "pesoInicio": "peso inicial tal cual aparece (ej. '70 kg') o null",
           "seriesReps": "series y reps tal cual (ej. '4×8' o '4 series × 8 reps') o null",
           "descanso": "descanso tal cual (ej. '2-3 min') o null",
+          "ramp": "la aproximación específica de ESTE ejercicio si el párrafo de rampa la detalla (ej. 'barra ~20 kg ×8 → 30×5 → 45×3 → 60×2 → trabajo 75 kg'); si dice 'sin rampa' o no se menciona, null",
           "notas": "notas del ejercicio o null"
         }
       ]
@@ -449,8 +454,9 @@ Devuelve SOLO JSON válido, sin markdown ni backticks, con este esquema exacto:
 
 Reglas:
 - Respeta el orden de días y ejercicios del documento.
-- No inventes ejercicios ni pesos: si un campo no aparece, usa null.
-- anchor=true SOLO si hay ⚓ o la palabra 'ancla' junto al ejercicio.`;
+- No inventes ejercicios, pesos ni rampas: copia textual del documento; si un campo no aparece, usa null.
+- anchor=true SOLO si hay ⚓ o la palabra 'ancla' junto al ejercicio.
+- La rampa por ejercicio (campo "ramp" dentro de exercises) sale de descomponer el párrafo "Rampa de aproximación" del día: asígnala al ejercicio que nombra. Los accesorios marcados "sin rampa" → ramp null.`;
 
 // Camino IA: manda el texto a Claude y parsea con parseJsonLoose (tolera fences/truncado).
 async function parseRoutineWithClaude(rawText, apiKey) {
@@ -484,8 +490,15 @@ function _mkExercise(rawName, peso, reps, descanso) {
     pesoInicio: peso ? String(peso).trim() : null,
     seriesReps: reps ? String(reps).trim() : null,
     descanso: descanso ? String(descanso).trim() : null,
+    ramp: null, // la rampa por ejercicio solo la rellena la IA; el template deja el bloque del día
     notas: null,
   };
+}
+
+// Devuelve el valor tras el primer ":" de una línea etiquetada (o la línea completa si no hay).
+function _afterColon(line) {
+  const i = line.indexOf(':');
+  return (i >= 0 ? line.slice(i + 1) : line).trim();
 }
 
 function parseRoutineTemplate(rawText) {
@@ -497,11 +510,17 @@ function parseRoutineTemplate(rawText) {
     if (!line) continue;
     const h = line.match(RX_DAY_HEADER);
     if (h) {
-      cur = { label: `Día ${h[1]} — ${h[2].trim()}`, durationMin: h[3] ? Number(h[3]) : null, exercises: [] };
+      cur = { label: `Día ${h[1]} — ${h[2].trim()}`, durationMin: h[3] ? Number(h[3]) : null, warmup: null, ramp: null, cardioClose: null, note: null, exercises: [] };
       days.push(cur);
       continue;
     }
     if (!cur) continue;
+    // Bloques de prosa del día (primer-valor-gana: las secciones globales del FINAL del doc
+    // —"Rampa de aproximación — regla general", "Cómo progresar"— caen bajo el último día,
+    // que ya tiene sus bloques, así que no los pisan).
+    if (/^Calentamiento/i.test(line)) { if (!cur.warmup) cur.warmup = _afterColon(line); continue; }
+    if (/^Rampa de aproximación/i.test(line)) { if (!cur.ramp) cur.ramp = _afterColon(line); continue; }
+    if (/^Cardio de cierre/i.test(line)) { if (!cur.cardioClose) cur.cardioClose = _afterColon(line); continue; }
     // (a) Fila markdown con pipes.
     if (line.indexOf('|') >= 0) {
       const cells = line.split('|').map((c) => c.trim());
@@ -521,6 +540,14 @@ function parseRoutineTemplate(rawText) {
       const ex = _mkExercise(line, w, r, hasRest ? d : null);
       if (ex) cur.exercises.push(ex);
       i += hasRest ? 3 : 2; // saltar las celdas ya consumidas
+      continue;
+    }
+    // (c) Catch-all `note`: días de cardio puro SIN tabla (ej. Día 3). El guard exercises.length===0
+    // evita capturar la prosa global del final (que cae bajo el último día, ya con ejercicios) y
+    // los encabezados de tabla. No captura ▶ enlaces ni celdas de tabla sueltas.
+    if (cur.exercises.length === 0 && !line.startsWith('▶') &&
+        !/^(Ejercicio|Peso inicio|Series|Descanso)\b/i.test(line) && !RX_WEIGHT.test(line) && !RX_REPS.test(line)) {
+      cur.note = cur.note ? `${cur.note} ${line}` : line;
     }
   }
   return { title: 'Rutina Speediance', days };
@@ -528,20 +555,26 @@ function parseRoutineTemplate(rawText) {
 
 // Converge ambos caminos: estampa updatedAt, id por día y slug por ejercicio.
 function normalizeRoutine(j) {
+  const str = (v) => (v != null && String(v).trim() ? String(v).trim() : null);
   const days = (Array.isArray(j?.days) ? j.days : []).map((d, i) => ({
     id: `dia-${i + 1}`,
     label: String(d?.label || `Día ${i + 1}`).trim(),
     durationMin: d?.durationMin != null && !isNaN(Number(d.durationMin)) ? Number(d.durationMin) : null,
+    warmup: str(d?.warmup),
+    ramp: str(d?.ramp),
+    cardioClose: str(d?.cardioClose),
+    note: str(d?.note),
     exercises: (Array.isArray(d?.exercises) ? d.exercises : []).map((ex) => {
       const name = String(ex?.name || '').trim();
       return {
         slug: slugifyExercise(name),
         name,
         anchor: !!ex?.anchor,
-        pesoInicio: ex?.pesoInicio ? String(ex.pesoInicio).trim() : null,
-        seriesReps: ex?.seriesReps ? String(ex.seriesReps).trim() : null,
-        descanso: ex?.descanso ? String(ex.descanso).trim() : null,
-        notas: ex?.notas ? String(ex.notas).trim() : null,
+        pesoInicio: str(ex?.pesoInicio),
+        seriesReps: str(ex?.seriesReps),
+        descanso: str(ex?.descanso),
+        ramp: str(ex?.ramp),
+        notas: str(ex?.notas),
       };
     }).filter((ex) => ex.name),
   }));
@@ -7486,6 +7519,17 @@ function RoutineVideoModal({ exercise, video, onAssign, onRemove, onClose }) {
   );
 }
 
+// Tarjeta de bloque de prosa del día (calentamiento / rampa / cardio / note).
+function RoutineBlock({ icon, label, text }) {
+  if (!text) return null;
+  return (
+    <div className="bento-card">
+      <div className="bento-label" style={{ marginBottom: 6 }}>{icon} {label}</div>
+      <p className="text-sm text-gray-600 dark:text-gray-300" style={{ whiteSpace: 'pre-wrap' }}>{text}</p>
+    </div>
+  );
+}
+
 function RoutineView({ state, setState }) {
   const apiKey = state.settings?.anthropicApiKey;
   const routine = state.routine;
@@ -7527,7 +7571,7 @@ function RoutineView({ state, setState }) {
     const allEx = preview.routine.days.flatMap((d) => d.exercises);
     const sinVideo = allEx.filter((ex) => !videos[ex.slug]);
     return (
-      <div className="space-y-4 pb-24">
+      <div className="px-4 pt-4 pb-24 space-y-4">
         <div className="bento-card">
           <div className="flex items-center justify-between">
             <h2 className="text-lg font-bold">Revisar rutina</h2>
@@ -7543,15 +7587,20 @@ function RoutineView({ state, setState }) {
         {preview.routine.days.map((d) => (
           <div key={d.id} className="bento-card">
             <div className="font-semibold text-sm">{d.label}{d.durationMin ? ` · ~${d.durationMin} min` : ''}</div>
+            {d.warmup && <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">🔥 {d.warmup}</div>}
+            {d.ramp && <div className="text-xs mt-1" style={{ color: 'var(--bento-blue)' }}>📈 {d.ramp}</div>}
             <ul className="mt-2 space-y-1">
               {d.exercises.map((ex, i) => (
                 <li key={i} className="text-sm text-gray-600 dark:text-gray-300">
                   {ex.anchor ? '⚓ ' : ''}{ex.name}
                   {(ex.pesoInicio || ex.seriesReps) ? <span className="text-gray-400"> · {[ex.pesoInicio, ex.seriesReps].filter(Boolean).join(' × ')}</span> : null}
+                  {ex.ramp && <span className="block text-xs" style={{ color: 'var(--bento-blue)' }}>📈 Rampa: {ex.ramp}</span>}
                 </li>
               ))}
-              {!d.exercises.length && <li className="text-sm text-gray-400">Sin ejercicios detectados</li>}
+              {!d.exercises.length && !d.note && <li className="text-sm text-gray-400">Sin ejercicios detectados</li>}
             </ul>
+            {d.note && <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">🚴 {d.note}</div>}
+            {d.cardioClose && <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">🚴 Cardio de cierre: {d.cardioClose}</div>}
           </div>
         ))}
 
@@ -7577,7 +7626,7 @@ function RoutineView({ state, setState }) {
   // ── Estado vacío ──
   if (!routine || !routine.days?.length) {
     return (
-      <div className="space-y-4 pb-24">
+      <div className="px-4 pt-4 pb-24 space-y-4">
         <div className="bento-card text-center py-10 space-y-3">
           <div className="text-4xl">📐</div>
           <h2 className="text-lg font-bold">Sin rutina aún</h2>
@@ -7591,15 +7640,38 @@ function RoutineView({ state, setState }) {
 
   // ── Vista principal ──
   const modalEx = videoModal;
+  const allExercises = routine.days.flatMap((d) => d.exercises);
+  const totalEx = allExercises.length;
+  const withVideo = allExercises.filter((ex) => videos[ex.slug]?.youtube_id).length;
   return (
-    <div className="space-y-4 pb-24">
-      <div className="bento-card">
-        <div className="flex items-center justify-between gap-3">
-          <div className="min-w-0">
-            <h2 className="text-lg font-bold truncate">{routine.title || 'Rutina'}</h2>
-            {routine.updatedAt && <p className="text-xs text-gray-400 mt-0.5">Actualizada {shortDate(routine.updatedAt.slice(0, 10))}</p>}
-          </div>
-          <RoutineUpload apiKey={apiKey} onParsed={(r, s) => setPreview({ routine: r, source: s })} />
+    <div className="px-4 pt-4 pb-24 space-y-4">
+      {/* Header */}
+      <div className="px-1 flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h1 className="text-2xl font-bold tracking-tight truncate">{routine.title || 'Rutina'}</h1>
+          <p className="text-sm" style={{ color: 'var(--bento-faint)' }}>
+            {routine.updatedAt ? `Actualizada ${shortDate(routine.updatedAt.slice(0, 10))}` : 'Tu rutina vigente'}
+          </p>
+        </div>
+        <div className="shrink-0"><RoutineUpload apiKey={apiKey} onParsed={(r, s) => setPreview({ routine: r, source: s })} /></div>
+      </div>
+
+      {/* Hero · 3 stats */}
+      <div className="grid grid-cols-3 gap-2.5">
+        <div className="bento-card" style={{ padding: '14px' }}>
+          <div className="bento-label">Días</div>
+          <div className="bento-num" style={{ fontSize: 26, marginTop: 4 }}>{routine.days.length}</div>
+          <div style={{ fontSize: 11, color: 'var(--bento-faint)', marginTop: 3 }}>por semana</div>
+        </div>
+        <div className="bento-card" style={{ padding: '14px' }}>
+          <div className="bento-label">Ejercicios</div>
+          <div className="bento-num" style={{ fontSize: 26, marginTop: 4 }}>{totalEx}</div>
+          <div style={{ fontSize: 11, color: 'var(--bento-faint)', marginTop: 3 }}>en total</div>
+        </div>
+        <div className="bento-card" style={{ padding: '14px' }}>
+          <div className="bento-label">Con video</div>
+          <div className="bento-num" style={{ fontSize: 26, marginTop: 4 }}>{withVideo}<span style={{ fontSize: 12, fontWeight: 400, color: 'var(--bento-faint)' }}>/{totalEx}</span></div>
+          <div style={{ fontSize: 11, color: 'var(--bento-faint)', marginTop: 3 }}>{totalEx ? Math.round(withVideo / totalEx * 100) : 0}% técnica</div>
         </div>
       </div>
 
@@ -7620,32 +7692,38 @@ function RoutineView({ state, setState }) {
       </div>
 
       {activeDay && (
-        <div className="space-y-3">
-          {activeDay.durationMin && <div className="bento-label">~{activeDay.durationMin} min</div>}
+        <div className="space-y-2.5">
+          <div className="bento-label px-1">{activeDay.exercises.length} ejercicios{activeDay.durationMin ? ` · ~${activeDay.durationMin} min` : ''}</div>
+          <RoutineBlock icon="🔥" label="Calentamiento" text={activeDay.warmup} />
+          <RoutineBlock icon="📈" label="Rampa de aproximación" text={activeDay.ramp} />
           {activeDay.exercises.map((ex, i) => {
             const hasVideo = !!videos[ex.slug]?.youtube_id;
             const detail = [ex.pesoInicio, ex.seriesReps].filter(Boolean).join(' × ');
             return (
-              <div key={i} className="bento-card">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
+              <div key={i} className="bento-card" style={{ padding: 16 }}>
+                <div className="flex items-start gap-3">
+                  <div className="bento-num shrink-0" style={{ fontSize: 13, color: 'var(--bento-faint)', width: 20, paddingTop: 2 }}>{String(i + 1).padStart(2, '0')}</div>
+                  <div className="min-w-0 flex-1">
                     <div className="font-semibold text-sm">{ex.anchor ? '⚓ ' : ''}{ex.name}</div>
-                    {detail && <div className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">{detail}</div>}
-                    {ex.descanso && <div className="text-xs text-gray-400 mt-0.5">Descanso {ex.descanso}</div>}
-                    {ex.notas && <div className="text-xs text-gray-400 mt-1 italic">{ex.notas}</div>}
+                    {detail && <div className="bento-mono" style={{ fontSize: 12.5, color: 'var(--bento-muted)', marginTop: 2 }}>{detail}</div>}
+                    {ex.descanso && <div style={{ fontSize: 11, color: 'var(--bento-faint)', marginTop: 2 }}>Descanso {ex.descanso}</div>}
+                    {ex.ramp && <div style={{ fontSize: 11, marginTop: 4, color: 'var(--bento-blue)' }}>📈 Rampa: {ex.ramp}</div>}
+                    {ex.notas && <div style={{ fontSize: 11, color: 'var(--bento-faint)', marginTop: 4, fontStyle: 'italic' }}>{ex.notas}</div>}
                   </div>
                   <button onClick={() => setVideoModal({ slug: ex.slug, name: ex.name, anchor: ex.anchor })}
-                    className="shrink-0 flex items-center gap-1 px-3 py-2 rounded-xl text-sm font-medium"
+                    className="shrink-0 flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm font-medium"
                     style={hasVideo
                       ? { background: 'var(--bento-ink)', color: 'var(--bento-on-ink)' }
-                      : { background: 'var(--bento-surface)', color: 'var(--bento-faint)' }}>
-                    ▶ {hasVideo ? '🎬' : 'Video'}
+                      : { background: 'var(--bento-surface)', color: 'var(--bento-muted)' }}>
+                    {hasVideo ? '🎬 Ver' : '▶ Video'}
                   </button>
                 </div>
               </div>
             );
           })}
-          {!activeDay.exercises.length && <div className="bento-card text-sm text-gray-400 text-center py-6">Este día no tiene ejercicios.</div>}
+          <RoutineBlock icon="🚴" label="Cardio" text={activeDay.note} />
+          <RoutineBlock icon="🚴" label="Cardio de cierre" text={activeDay.cardioClose} />
+          {!activeDay.exercises.length && !activeDay.note && <div className="bento-card text-sm text-center py-6" style={{ color: 'var(--bento-faint)' }}>Este día no tiene ejercicios.</div>}
         </div>
       )}
 
