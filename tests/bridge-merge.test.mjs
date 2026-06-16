@@ -36,10 +36,10 @@ const bundle = [
   grab(/const DEDUP_WINDOW_MS = [^;]*;/, 'DEDUP_WINDOW_MS'),
   fn('todayKey'), fn('normalizeName'), fn('chatMealSig'), fn('sameWindow'),
   fn('bridgeDateKey'), fn('healthDateKey'), fn('resolveColacion'), fn('slotByTime'),
-  fn('extraPlanSlot'), fn('mergeBridge'),
-  'return { mergeBridge, todayKey };',
+  fn('extraPlanSlot'), fn('getDeviceId'), fn('mergeBridge'),
+  'return { mergeBridge, todayKey, healthDateKey };',
 ].join('\n');
-const { mergeBridge, todayKey } = new Function(bundle)();
+const { mergeBridge, todayKey, healthDateKey } = new Function(bundle)();
 
 // --- helpers de fixture ---
 const baseState = () => ({ days: {}, weights: [], energy: [], bridge: { importedIds: [], removedBridgeIds: [] } });
@@ -134,6 +134,20 @@ test('agua: suma en day.water.bridgeMl y es idempotente por importedIds (no re-s
   assert.equal(r2.added.water, 0);
 });
 
+test('agua: el eco propio (source app + deviceId propio) NO suma a bridgeMl; chat y otros device SÍ', () => {
+  // En node getDeviceId() → "dev-unknown" (sin localStorage). Una entrada source:'app' con ese
+  // deviceId es eco propio → ya está en water.ml, no se suma a bridgeMl. El agua del chat (sin
+  // deviceId) y la de otro dispositivo (otro deviceId) sí se importan.
+  const bridge = baseBridge({ water: [
+    { id: 'own', date: '2026-06-10', ml: 250, source: 'app', deviceId: 'dev-unknown' }, // eco propio → excluir
+    { id: 'oth', date: '2026-06-10', ml: 300, source: 'app', deviceId: 'otro-iphone' },  // otro device → importar
+    { id: 'chat', date: '2026-06-10', ml: 400 },                                         // chat → importar
+  ] });
+  const r = mergeBridge(baseState(), bridge);
+  assert.equal(r.state.days['2026-06-10'].water.bridgeMl, 700, 'solo otro-device (300) + chat (400)');
+  assert.equal(r.added.water, 3, 'las 3 se marcan importadas (importedIds), aunque una no sume');
+});
+
 test('checks: marca la sección como comida, pero NO si ya hay un extra que la cubre', () => {
   // (a) sin extra → marca eaten.cena
   const ra = mergeBridge(baseState(), baseBridge({ checks: [{ id: 'c1', date: '2026-06-10', meal: 'cena' }] }));
@@ -152,4 +166,22 @@ test('health: overwrite por fecha, idempotente y sin usar importedIds', () => {
   const r2 = mergeBridge(r1.state, baseBridge({ health: [{ date: '2026-06-10', steps: 9000 }] }));
   assert.equal(r2.state.days['2026-06-10'].health.steps, 9000, 'overwrite por fecha');
   assert.equal(r2.state.days['2026-06-10'].health.activeEnergyKcal, 400, 'conserva lo no reenviado');
+});
+
+test('healthDateKey normaliza el dd-MM-yy del atajo iOS (la etiqueta date es la autoridad)', () => {
+  // El atajo manda "16-06-26" (dd-MM-yy); antes caía al fallback de ts. Ahora es la autoridad.
+  assert.equal(healthDateKey({ date: '16-06-26' }), '2026-06-16');
+  assert.equal(healthDateKey({ date: '2026-06-16' }), '2026-06-16'); // YYYY-MM-DD limpio intacto
+  // dd-MM-yy con ts del día siguiente (atajo corrió pasada la medianoche) → manda la fecha, no el ts
+  const tsNextDay = new Date('2026-06-17T00:30:00').getTime();
+  assert.equal(healthDateKey({ date: '16-06-26', ts: tsNextDay }), '2026-06-16');
+  // fecha ilegible → cae al ts
+  assert.equal(healthDateKey({ date: 'basura', ts: new Date('2026-06-16T12:00:00').getTime() }), '2026-06-16');
+  // mes inválido en formato dd-MM-yy → no lo acepta, cae al ts
+  assert.equal(healthDateKey({ date: '16-13-26', ts: new Date('2026-06-16T12:00:00').getTime() }), '2026-06-16');
+});
+
+test('health con date dd-MM-yy del atajo aterriza en el día correcto vía mergeBridge', () => {
+  const r = mergeBridge(baseState(), baseBridge({ health: [{ date: '16-06-26', steps: 9665, activeEnergyKcal: 879 }] }));
+  assert.equal(r.state.days['2026-06-16'].health.steps, 9665);
 });
