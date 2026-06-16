@@ -11099,8 +11099,8 @@ function PlanAdjustmentBanner({ state, setState }) {
     );
   }
 
-  // CASO RÁPIDO (>0.8 %/sem): riesgo de masa magra → subir ~100-150 kcal (bajar déficit).
-  const onApply = () => stampAdjustment(adjustment.suggestedDeficit, todayKey());
+  // CASO RÁPIDO (>0.8 %/sem): riesgo de masa magra. Solo AVISO — la meta calórica es fija,
+  // NO se sugiere subir kcal. La palanca es proteína + fuerza, no comer más.
   return (
     <div className="rounded-2xl border-2 border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20 p-4 space-y-3">
       <div className="flex items-start gap-3">
@@ -11111,33 +11111,18 @@ function PlanAdjustmentBanner({ state, setState }) {
         </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-3 text-center">
-        <div className="rounded-xl bg-white dark:bg-gray-900 border border-amber-200 dark:border-amber-800 p-2.5">
-          <div className="text-[10px] uppercase tracking-wide text-gray-500 dark:text-gray-400 font-semibold">Déficit actual</div>
-          <div className="text-lg font-bold text-gray-700 dark:text-gray-200">{adjustment.currentDeficit} <span className="text-xs font-normal">kcal/día</span></div>
-        </div>
-        <div className="rounded-xl bg-emerald-50 dark:bg-emerald-900/30 border border-emerald-300 dark:border-emerald-700 p-2.5">
-          <div className="text-[10px] uppercase tracking-wide text-emerald-700 dark:text-emerald-300 font-semibold">Sugerencia ↑</div>
-          <div className="text-lg font-bold text-emerald-800 dark:text-emerald-200">{adjustment.suggestedDeficit} <span className="text-xs font-normal">kcal/día</span></div>
-        </div>
-      </div>
-
       <p className="text-[11px] text-amber-700 dark:text-amber-300">
-        Esto se traduce en comer ~{Math.abs(adjustment.delta)} kcal más por día para preservar masa magra. La meta diaria se recalcula automáticamente.
+        Asegura proteína (≥200 g/día) y fuerza para proteger la masa magra. La meta calórica se mantiene fija — no subas kcal.
       </p>
 
-      <div className="grid grid-cols-3 gap-2">
-        <button onClick={onApply}
+      <div className="grid grid-cols-2 gap-2">
+        <button onClick={onDismiss}
           className="py-2.5 rounded-xl bg-emerald-500 text-white text-xs font-semibold hover:bg-emerald-600">
-          ✓ Aplicar
+          ✓ Entendido
         </button>
         <button onClick={onPostpone7}
           className="py-2.5 rounded-xl border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 text-xs font-medium hover:bg-gray-50 dark:hover:bg-gray-800">
           ⏰ 7 días
-        </button>
-        <button onClick={onDismiss}
-          className="py-2.5 rounded-xl text-xs text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800">
-          No ahora
         </button>
       </div>
     </div>
