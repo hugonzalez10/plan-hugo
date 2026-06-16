@@ -1614,6 +1614,18 @@ function uuid() {
   return 'id-' + Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
 
+// Id de dispositivo persistente (clave propia en localStorage, independiente del estado). Viaja en
+// cada entrada de agua de la app (source:'app') para que el dispositivo origen reconozca su propio
+// eco al leer bridge.water[] —sin depender del timing del log local— y no lo doble-cuente. Otros
+// dispositivos tienen otro deviceId → sí lo importan. En node/tests (sin localStorage) → 'dev-unknown'.
+function getDeviceId() {
+  try {
+    let id = localStorage.getItem('plan-hugo-device-id');
+    if (!id) { id = uuid(); localStorage.setItem('plan-hugo-device-id', id); }
+    return id;
+  } catch { return 'dev-unknown'; }
+}
+
 function todayKey(d = new Date()) {
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, '0');
@@ -2287,16 +2299,18 @@ function mergeBridge(state, bridge) {
   // la doble-cuente en ?totals (que ya suma el water[] del servidor). importedIds es
   // freno DURO aquí (a diferencia de meals): el agua es una suma corriente, reimportar
   // un id ausente la inflaría.
-  // ECO PROPIO: ahora la app TAMBIÉN escribe en bridge.water[] (los botones +/−, vía water.log).
-  // El servidor reasigna el id pero CONSERVA el ts, así que reconocemos nuestra propia entrada por
-  // (ml, ts): ya está contada en water.ml, no la sumamos a bridgeMl (si no, doble conteo en el origen).
+  // ECO PROPIO: ahora la app TAMBIÉN escribe en bridge.water[] (los botones +/−, vía water.log,
+  // con source:'app' + deviceId). Reconocemos nuestra propia entrada por deviceId —disponible SIEMPRE
+  // al importar, sin depender del timing del log local— y NO la sumamos a bridgeMl (ya está en
+  // water.ml; si no, doble conteo en el origen). El agua del chat (sin deviceId) y la de OTROS
+  // dispositivos (otro deviceId) sí se importan. Entradas legacy source:'app' sin deviceId también.
   if (Array.isArray(bridge.water)) {
+    const myDevice = getDeviceId();
     for (const wd of bridge.water) {
       if (wd == null || wd.id == null || removedBridgeIds.has(wd.id) || importedIds.has(wd.id)) continue;
       const d = ensureDay(bridgeDateKey(wd));
       const cur = d.water || { ml: 0 };
-      const isOwnEcho = Array.isArray(cur.log) && cur.log.some(
-        (x) => x && Number(x.ml) === (Number(wd.ml) || 0) && Number(x.ts) === Number(wd.ts));
+      const isOwnEcho = wd.source === 'app' && wd.deviceId != null && wd.deviceId === myDevice;
       if (!isOwnEcho) { d.water = { ...cur, bridgeMl: (Number(cur.bridgeMl) || 0) + (Number(wd.ml) || 0) }; }
       importedIds.add(wd.id); added.water++;
     }
@@ -13112,7 +13126,7 @@ function App() {
       if (dk >= cutoff) for (const w of (d.water?.log || [])) {
         if (!w || w.id == null || imported.has(w.id) || pushed.has(w.id)) continue;
         out.push({ localId: w.id, section: 'water', date: dk, entry: {
-          ml: numv(w.ml), date: dk, ts: w.ts != null ? w.ts : null, source: 'app',
+          ml: numv(w.ml), date: dk, ts: w.ts != null ? w.ts : null, source: 'app', deviceId: getDeviceId(),
         } });
       }
       // Entrenamientos: SIN ventana → backfill del historial completo (el bridge ya no los poda).
