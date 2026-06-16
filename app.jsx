@@ -1479,6 +1479,9 @@ const KCAL_PER_KG_FAT = 7700;
 const TDEE_ESTIMADO = 2850;
 // Mínimo de días con registro para mostrar promedio/déficit (menos = muestra no representativa).
 const TREND_MIN_DAYS = 14;
+// Ventana de análisis de tendencia: se promedia ingesta y se regresa el peso sobre estos días
+// (no solo el hueco entre los dos últimos pesajes, que daba "3 días" con un mes de historial).
+const TREND_WINDOW_DAYS = 28;
 // Ritmo de pérdida objetivo (% peso/sem) para el semáforo del Análisis de tendencia (Garthe 2011).
 const LOSS_RATE_GREEN = { min: 0.55, max: 0.75 };
 const MAX_IMAGES = 10;
@@ -3421,16 +3424,23 @@ function computeTrendAnalysis(weights, days, snackBank, proteinBank, targets, de
   if (sorted.length < 2) return null;
 
   const last = sorted[sorted.length - 1];
-  const prev = sorted[sorted.length - 2];
-  const d1 = new Date(prev.date + 'T12:00:00');
+  const lastT = new Date(last.date + 'T12:00:00').getTime();
+
+  // Ventana de análisis = últimos TREND_WINDOW_DAYS, NO el hueco entre los dos últimos pesajes
+  // (eso daba "3 días" e "insuficiente" aunque hubiera un mes de historial). El primer pesaje
+  // dentro de la ventana ancla el cambio de peso y el conteo de días con registro.
+  const windowStartT = lastT - TREND_WINDOW_DAYS * 86400000;
+  const inWindow = sorted.filter((w) => new Date(w.date + 'T12:00:00').getTime() >= windowStartT);
+  const first = inWindow.length >= 2 ? inWindow[0] : sorted[sorted.length - 2];
+  const d1 = new Date(first.date + 'T12:00:00');
   const d2 = new Date(last.date + 'T12:00:00');
   const diasReal = Math.round((d2 - d1) / 86400000);
   if (diasReal < 1) return null;
 
-  const deltaKg = Number((last.weightKg - prev.weightKg).toFixed(2));
+  const deltaKg = Number((last.weightKg - first.weightKg).toFixed(2));
 
   let kcalSum = 0, daysCount = 0;
-  for (let i = 0; i < diasReal; i++) {
+  for (let i = 0; i <= diasReal; i++) {
     const d = new Date(d1); d.setDate(d.getDate() + i);
     const k = todayKey(d);
     const day = days[k];
@@ -3447,10 +3457,9 @@ function computeTrendAnalysis(weights, days, snackBank, proteinBank, targets, de
   const tdeeEstimado = TDEE_ESTIMADO;
   const deficitDiario = (enoughData && promedioKcal != null) ? tdeeEstimado - promedioKcal : null;
 
-  // Ritmo de pérdida semanal por regresión lineal sobre los pesajes de los últimos 28 días
+  // Ritmo de pérdida semanal por regresión lineal sobre los pesajes de la misma ventana
   // (requiere span ≥14 d). Es la métrica operativa, no el déficit calórico estimado.
-  const lastT = new Date(last.date + 'T12:00:00').getTime();
-  const recentPts = weightSeries(sorted).filter((p) => p.x >= lastT - 28 * 86400000);
+  const recentPts = weightSeries(inWindow.length >= 2 ? inWindow : sorted);
   let lossPctPerWeek = null;
   if (recentPts.length >= 2) {
     const spanDays = (recentPts[recentPts.length - 1].x - recentPts[0].x) / 86400000;
@@ -3460,7 +3469,7 @@ function computeTrendAnalysis(weights, days, snackBank, proteinBank, targets, de
     }
   }
 
-  return { last, prev, diasReal, deltaKg, promedioKcal, tdeeEstimado, deficitDiario, daysCount, enoughData, lossPctPerWeek };
+  return { last, first, diasReal, deltaKg, promedioKcal, tdeeEstimado, deficitDiario, daysCount, enoughData, lossPctPerWeek };
 }
 
 // Métricas de composición para el análisis de evolución de largo plazo.
