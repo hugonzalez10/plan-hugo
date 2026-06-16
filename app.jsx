@@ -2115,13 +2115,21 @@ function bridgeDateKey(entry) {
   return todayKey();
 }
 
-// Clave de día para una fila de `health`. El iOS Shortcut puede mandar la fecha con el
-// formato local (p.ej. "14-06-26" dd-MM-yy) según cómo quedó "Aplicar formato a la fecha";
-// eso no calza con las claves YYYY-MM-DD de la app. Si la fecha NO viene en YYYY-MM-DD
-// limpio, la derivamos del `ts` que selló el servidor (hora local del navegador) — inequívoco.
+// Clave de día para una fila de `health`. El iOS Shortcut manda la fecha con el formato local
+// (p.ej. "16-06-26" dd-MM-yy) según cómo quedó "Aplicar formato a la fecha"; eso no calza con
+// las claves YYYY-MM-DD de la app. Lo normalizamos para que la etiqueta `date` sea la autoridad:
+// derivar del `ts` es frágil (si el atajo corre pasada la medianoche, el ts cae al día siguiente
+// y la fila queda mal fechada). El ts queda solo como último recurso si la fecha es ilegible.
 function healthDateKey(h) {
   const d = h && h.date;
-  if (typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
+  if (typeof d === 'string') {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(d)) return d; // YYYY-MM-DD limpio
+    const m = d.match(/^(\d{2})-(\d{2})-(\d{2})$/); // dd-MM-yy del atajo iOS → 20yy-MM-dd
+    if (m) {
+      const dd = +m[1], mm = +m[2];
+      if (mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) return `20${m[3]}-${m[2]}-${m[1]}`;
+    }
+  }
   if (h && h.ts != null) {
     const dt = new Date(Number(h.ts));
     if (!Number.isNaN(dt.getTime())) return todayKey(dt);
@@ -7882,6 +7890,11 @@ function HealthView({ state, setState, targets }) {
   const metrics = useMemo(() => METRIC_DEFS.map((d) => {
     const vals = series.map((s) => s[d.key]).filter((v) => v != null).map(Number);
     const last = vals.length ? vals[vals.length - 1] : null;
+    // Fecha de la última lectura: el filter de arriba descarta los nulos y pierde el día, así que
+    // lo recuperamos recorriendo la serie al revés. Sirve para etiquetar el tile (un valor de
+    // ayer no debe verse como "ahora").
+    let lastDate = null;
+    for (let i = series.length - 1; i >= 0; i--) { if (series[i][d.key] != null) { lastDate = series[i].fecha; break; } }
     const avg = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
     let dir = 'flat';
     if (vals.length >= 4) {
@@ -7890,12 +7903,21 @@ function HealthView({ state, setState, targets }) {
       const la = vals.slice(half).reduce((a, b) => a + b, 0) / (vals.length - half);
       if (fa > 0) dir = la > fa * 1.03 ? 'up' : la < fa * 0.97 ? 'down' : 'flat';
     }
-    return { ...d, vals, last, avg, dir, count: vals.length, spark: series.map((s, i) => ({ x: i, y: s[d.key] })) };
+    return { ...d, vals, last, lastDate, avg, dir, count: vals.length, spark: series.map((s, i) => ({ x: i, y: s[d.key] })) };
   }), [series]);
 
   // Banderas automáticas (sin IA)
   const flags = useMemo(() => {
     const out = [];
+    // Frescura: si la lectura de salud más reciente no es de hoy, dilo explícito. El watch muestra
+    // hoy en vivo; sin esto, un dato de ayer en las tarjetas se vería como si fuera "ahora".
+    const healthDates = series.filter((s) => s.pasos != null || s.sueno_horas != null || s.energia_activa_kcal != null || s.fc_reposo != null || s.vo2max != null).map((s) => s.fecha);
+    const lastHealthDate = healthDates.length ? healthDates[healthDates.length - 1] : null;
+    if (lastHealthDate && lastHealthDate !== todayKey()) {
+      const lbl = formatDateLabel(lastHealthDate, todayKey());
+      const pretty = lbl === 'Ayer' ? 'de ayer' : `del ${lbl.toLowerCase()}`;
+      out.push({ tone: 'warm', text: `Las cifras de salud son ${pretty}, no de hoy — el watch muestra el día en curso en vivo` });
+    }
     const last7 = series.slice(-7);
     const sleepLow = last7.filter((s) => s.sueno_horas != null && s.sueno_horas < 6).length;
     if (sleepLow >= 2) out.push({ tone: 'warm', text: `Dormiste menos de 6h en ${sleepLow} de las últimas 7 noches` });
@@ -8005,6 +8027,9 @@ Reglas: 2 a 4 recomendaciones, las más importantes y accionables. Si una dimens
                   </div>
                   <div className="bento-num" style={{ fontSize: 26, marginTop: 4 }}>
                     {m.last != null ? m.fmt(m.last) : '—'}<span style={{ fontSize: 11, fontWeight: 400, color: 'var(--bento-faint)' }}> {m.unit}</span>
+                    {m.lastDate && m.lastDate !== todayKey() && (
+                      <span style={{ fontSize: 10.5, fontWeight: 600, color: 'var(--bento-warm)', marginLeft: 6 }}>{formatDateLabel(m.lastDate, todayKey())}</span>
+                    )}
                   </div>
                   <div style={{ fontSize: 10.5, color: 'var(--bento-faint)', marginTop: 2 }}>prom {m.avg != null ? m.fmt(m.avg) : '—'} · {m.count}d</div>
                   <div style={{ marginTop: 8 }}><MetricSparkline points={m.spark} color={m.color} /></div>

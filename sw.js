@@ -4,7 +4,7 @@
  * NO interceptamos llamadas a api.anthropic.com.
  */
 
-const CACHE_NAME = 'plan-hugo-v52-agua-sync-deviceid';
+const CACHE_NAME = 'plan-hugo-v53-salud-pasos-fuente-watch';
 const CORE_URLS = [
   './index.html',
   './app.js',
