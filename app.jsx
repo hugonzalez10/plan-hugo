@@ -1474,6 +1474,13 @@ function buildEnergySeries(state, windowDays = 180) {
 }
 
 const KCAL_PER_KG_FAT = 7700;
+// TDEE de referencia fijo: TMB medida 1878 × ~1.5 factor actividad. Constante a propósito —
+// estimarlo sobre ventanas cortas (peso × Δpeso × kcal de pocos días) es ruido, no señal.
+const TDEE_ESTIMADO = 2850;
+// Mínimo de días con registro para mostrar promedio/déficit (menos = muestra no representativa).
+const TREND_MIN_DAYS = 14;
+// Ritmo de pérdida objetivo (% peso/sem) para el semáforo del Análisis de tendencia (Garthe 2011).
+const LOSS_RATE_GREEN = { min: 0.55, max: 0.75 };
 const MAX_IMAGES = 10;
 
 // — Arsenal de Hugo (arsenalVersion 2). Se define aparte para poder mergearlo en
@@ -3433,11 +3440,27 @@ function computeTrendAnalysis(weights, days, snackBank, proteinBank, targets, de
   }
 
   const promedioKcal = daysCount > 0 ? Math.round(kcalSum / daysCount) : null;
-  const balanceDiario = (deltaKg * KCAL_PER_KG_FAT) / diasReal;
-  const tdeeEstimado = promedioKcal != null ? Math.round(promedioKcal - balanceDiario) : null;
-  const deficitDiario = (promedioKcal != null && tdeeEstimado != null) ? tdeeEstimado - promedioKcal : null;
+  // n = días con registro. Bajo TREND_MIN_DAYS el promedio/déficit son ruido → no se muestran.
+  const enoughData = daysCount >= TREND_MIN_DAYS;
+  // TDEE fijo (no dinámico): evita el inflado por ventanas cortas. Déficit = TDEE − ingesta,
+  // solo cuando hay muestra suficiente.
+  const tdeeEstimado = TDEE_ESTIMADO;
+  const deficitDiario = (enoughData && promedioKcal != null) ? tdeeEstimado - promedioKcal : null;
 
-  return { last, prev, diasReal, deltaKg, promedioKcal, balanceDiario, tdeeEstimado, deficitDiario, daysCount };
+  // Ritmo de pérdida semanal por regresión lineal sobre los pesajes de los últimos 28 días
+  // (requiere span ≥14 d). Es la métrica operativa, no el déficit calórico estimado.
+  const lastT = new Date(last.date + 'T12:00:00').getTime();
+  const recentPts = weightSeries(sorted).filter((p) => p.x >= lastT - 28 * 86400000);
+  let lossPctPerWeek = null;
+  if (recentPts.length >= 2) {
+    const spanDays = (recentPts[recentPts.length - 1].x - recentPts[0].x) / 86400000;
+    const slopePerDay = spanDays >= 14 ? linRegSlopePerDay(recentPts) : null; // kg/día (− = bajando)
+    if (slopePerDay != null && last.weightKg > 0) {
+      lossPctPerWeek = -(slopePerDay * 7) / last.weightKg * 100; // + = perdiendo peso
+    }
+  }
+
+  return { last, prev, diasReal, deltaKg, promedioKcal, tdeeEstimado, deficitDiario, daysCount, enoughData, lossPctPerWeek };
 }
 
 // Métricas de composición para el análisis de evolución de largo plazo.
@@ -3516,18 +3539,12 @@ function computeEvolution(weights, goal) {
 function interpretTrend(data, targets) {
   if (!data) return null;
   const T = targets || DEFAULT_TARGETS;
-  const { deltaKg, daysCount, tdeeEstimado } = data;
+  const { deltaKg, daysCount } = data;
   if (daysCount < 3) {
     return { icon: 'ℹ️', tone: 'amber', text: 'Pocos días registrados — el promedio puede no ser representativo.' };
   }
   if (deltaKg > 0.3) {
     return { icon: '⚠️', tone: 'red', text: 'Subiste peso. Revisa si registraste todas las comidas o si necesitas más déficit.' };
-  }
-  if (tdeeEstimado != null && tdeeEstimado < T.kcalMin) {
-    return { icon: '⚠️', tone: 'amber', text: 'Tu déficit estimado es alto — riesgo de catabolismo muscular.' };
-  }
-  if (tdeeEstimado != null && tdeeEstimado > T.kcalMax + 500) {
-    return { icon: 'ℹ️', tone: 'amber', text: 'Podrías subir kcal sin perder déficit.' };
   }
   if (deltaKg <= 0) {
     return { icon: '✅', tone: 'green', text: 'Vas en línea con tu objetivo de bajar grasa.' };
@@ -10865,29 +10882,48 @@ function TrendAnalysis({ state, targets }) {
             {data.deltaKg > 0 ? '+' : ''}{data.deltaKg.toFixed(1)}<span className="text-xs font-normal ml-0.5">kg</span>
           </div>
         </div>
-        {data.promedioKcal != null && (
-          <div>
-            <div className="text-[11px] text-gray-500 dark:text-gray-400">Promedio diario</div>
-            <div className="text-lg font-bold">{data.promedioKcal}<span className="text-xs font-normal ml-0.5">kcal</span></div>
-            <div className="text-[10px] text-gray-500 dark:text-gray-400">{data.daysCount} de {data.diasReal} días</div>
-          </div>
-        )}
+        <div>
+          <div className="text-[11px] text-gray-500 dark:text-gray-400">Promedio diario</div>
+          {data.enoughData ? (
+            <>
+              <div className="text-lg font-bold">{data.promedioKcal}<span className="text-xs font-normal ml-0.5">kcal</span></div>
+              <div className="text-[10px] text-gray-500 dark:text-gray-400">{data.daysCount} de {data.diasReal} días</div>
+            </>
+          ) : (
+            <div className="text-sm font-medium text-gray-500 dark:text-gray-400">Datos insuficientes (n&lt;14)</div>
+          )}
+        </div>
       </div>
 
-      {data.tdeeEstimado != null && (
-        <div className="pt-3 border-t border-gray-100 dark:border-gray-800 grid grid-cols-2 gap-3">
-          <div>
-            <div className="text-[11px] text-gray-500 dark:text-gray-400">TDEE estimado real</div>
-            <div className="text-lg font-bold">~{data.tdeeEstimado}<span className="text-xs font-normal ml-0.5">kcal</span></div>
+      {/* Ritmo de pérdida semanal — métrica operativa (regresión lineal 14-28 días, Garthe 2011) */}
+      <div className="pt-3 border-t border-gray-100 dark:border-gray-800">
+        <div className="text-[11px] text-gray-500 dark:text-gray-400">Ritmo de pérdida · regresión 14-28 días</div>
+        {data.lossPctPerWeek != null ? (
+          <div className={`text-lg font-bold ${data.lossPctPerWeek >= LOSS_RATE_GREEN.min && data.lossPctPerWeek <= LOSS_RATE_GREEN.max ? COLOR_CLASSES.green.text : COLOR_CLASSES.amber.text}`}>
+            {data.lossPctPerWeek < 0 ? '+' : '−'}{Math.abs(data.lossPctPerWeek).toFixed(2)}<span className="text-xs font-normal ml-0.5">%/sem{data.lossPctPerWeek < 0 ? ' (subiendo)' : ''}</span>
           </div>
-          <div>
-            <div className="text-[11px] text-gray-500 dark:text-gray-400">Déficit / superávit</div>
+        ) : (
+          <div className="text-sm font-medium text-gray-500 dark:text-gray-400">Datos insuficientes (n&lt;14)</div>
+        )}
+        <div className="text-[10px] text-gray-500 dark:text-gray-400">objetivo {LOSS_RATE_GREEN.min}-{LOSS_RATE_GREEN.max} %/sem</div>
+      </div>
+
+      <div className="pt-3 border-t border-gray-100 dark:border-gray-800 grid grid-cols-2 gap-3">
+        <div>
+          <div className="text-[11px] text-gray-500 dark:text-gray-400">TDEE estimado</div>
+          <div className="text-lg font-bold">~{data.tdeeEstimado}<span className="text-xs font-normal ml-0.5">kcal</span></div>
+        </div>
+        <div>
+          <div className="text-[11px] text-gray-500 dark:text-gray-400">Déficit</div>
+          {data.enoughData && data.deficitDiario != null ? (
             <div className={`text-lg font-bold ${data.deficitDiario > 0 ? COLOR_CLASSES.green.text : data.deficitDiario < 0 ? COLOR_CLASSES.red.text : ''}`}>
               {data.deficitDiario > 0 ? '−' : data.deficitDiario < 0 ? '+' : ''}{Math.abs(data.deficitDiario)}<span className="text-xs font-normal ml-0.5">kcal/día</span>
             </div>
-          </div>
+          ) : (
+            <div className="text-sm font-medium text-gray-500 dark:text-gray-400">Datos insuficientes (n&lt;14)</div>
+          )}
         </div>
-      )}
+      </div>
 
       {data.promedioKcal == null && (
         <p className="text-xs text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/30 p-2 rounded-lg">
