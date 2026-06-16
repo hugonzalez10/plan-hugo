@@ -1849,9 +1849,20 @@ function migrateState(parsed) {
       const s = extraPlanSlot(x);
       if (s === 'colacion1' || s === 'colacion2' || s === 'cena') eaten[s] = true;
     }
+    // Agua: asegurar `log` (cola de toques empujables a bridge.water[]). Backfill del agua ya
+    // registrada antes de esta feature: si water.ml > 0 y el log no la cubre, sintetizar una
+    // entrada por el residual para que TAMBIÉN se propague a otros dispositivos (si no, queda
+    // solo local). Idempotente: tras el backfill sum(log)===ml, así que no se re-sintetiza.
+    const w0 = v.water && typeof v.water === 'object' ? v.water : { ml: 0 };
+    const wLog = Array.isArray(w0.log) ? w0.log : [];
+    const wMl = Number(w0.ml) || 0;
+    const wLogSum = wLog.reduce((s, e) => s + (Number(e?.ml) || 0), 0);
+    const cleanWater = (wMl > 0 && wLogSum !== wMl)
+      ? { ...w0, log: [...wLog, { id: uuid(), ml: wMl - wLogSum, ts: Date.now() }] }
+      : { ...w0, log: wLog };
     migratedDays[k] = {
       ...v,
-      water: v.water || { ml: 0 },
+      water: cleanWater,
       extras: cleanExtras,
       exercise: cleanExercise,
       eaten,
@@ -2275,13 +2286,18 @@ function mergeBridge(state, bridge) {
   // marca en la app) — para que el snapshot siga empujando solo SU agua y el bridge no
   // la doble-cuente en ?totals (que ya suma el water[] del servidor). importedIds es
   // freno DURO aquí (a diferencia de meals): el agua es una suma corriente, reimportar
-  // un id ausente la inflaría. El bridge solo lo escribe el chat, así que no hay eco propio.
+  // un id ausente la inflaría.
+  // ECO PROPIO: ahora la app TAMBIÉN escribe en bridge.water[] (los botones +/−, vía water.log).
+  // El servidor reasigna el id pero CONSERVA el ts, así que reconocemos nuestra propia entrada por
+  // (ml, ts): ya está contada en water.ml, no la sumamos a bridgeMl (si no, doble conteo en el origen).
   if (Array.isArray(bridge.water)) {
     for (const wd of bridge.water) {
       if (wd == null || wd.id == null || removedBridgeIds.has(wd.id) || importedIds.has(wd.id)) continue;
       const d = ensureDay(bridgeDateKey(wd));
       const cur = d.water || { ml: 0 };
-      d.water = { ...cur, bridgeMl: (Number(cur.bridgeMl) || 0) + (Number(wd.ml) || 0) };
+      const isOwnEcho = Array.isArray(cur.log) && cur.log.some(
+        (x) => x && Number(x.ml) === (Number(wd.ml) || 0) && Number(x.ts) === Number(wd.ts));
+      if (!isOwnEcho) { d.water = { ...cur, bridgeMl: (Number(cur.bridgeMl) || 0) + (Number(wd.ml) || 0) }; }
       importedIds.add(wd.id); added.water++;
     }
   }
@@ -5741,7 +5757,17 @@ function WaterTracker({ day, onUpdate, target }) {
   const bridgeMl = Number(day?.water?.bridgeMl) || 0; // agua registrada por chat (section water[])
   const totalMl = ml + bridgeMl;                      // lo que se MUESTRA y cuenta para la meta
   const targetMl = target || 3000;
-  const adjust = (delta) => onUpdate({ water: { ...(day?.water || {}), ml: Math.max(0, ml + delta) } });
+  // Cada toque actualiza `water.ml` (optimista, display instantáneo) Y anexa el delta REALMENTE
+  // aplicado a `water.log` para que `pushPayload` lo empuje a `bridge.water[]` y cruce a otros
+  // dispositivos. El delta aplicado (no el pedido) mantiene water.ml y el bridge en sync en el −250.
+  const adjust = (delta) => {
+    const nextMl = Math.max(0, ml + delta);
+    const applied = nextMl - ml;
+    const w = day?.water || {};
+    const log = Array.isArray(w.log) ? w.log : [];
+    const nextLog = applied !== 0 ? [...log, { id: uuid(), ml: applied, ts: Date.now() }] : log;
+    onUpdate({ water: { ...w, ml: nextMl, log: nextLog } });
+  };
   const pct = Math.max(0, Math.min(100, Math.round((totalMl / targetMl) * 100)));
   const reached = totalMl >= targetMl;
 
@@ -12933,10 +12959,10 @@ function App() {
       totals: {
         kcalIn: t.planIn, kcalBurned: 0, kcalNet: t.planIn,
         protein: t.planProtein, carbs: t.planCarbs, fat: t.planFat, fiber: t.planFiber,
-        // SOLO el agua propia de la app (water.ml). El agua del chat vive en water[] del
-        // bridge y se suma en ?totals allá; si la empujáramos aquí (t.waterMl la incluye)
-        // se doble-contaría. Ver computeDayTotals y mergeBridge (water.bridgeMl).
-        waterMl: Number((state.days || {})[snapDayKey]?.water?.ml) || 0,
+        // 0: el agua de la app ahora viaja por bridge.water[] (water.log → pushPayload), que el
+        // ?totals YA suma (bridgeWater). Empujarla también aquí la doble-contaría en el chat
+        // (_reconcile: tt.waterMl + bridgeWater). Ver WaterTracker.adjust y mergeBridge (eco propio).
+        waterMl: 0,
       },
       targets: {
         kcalMax: targets.kcalMax, proteinMin: targets.proteinMin, carbsTarget: targets.carbsTarget,
@@ -13078,6 +13104,15 @@ function App() {
           name: x.name, kcal: numv(x.kcal), protein: numv(x.protein), carbs: numv(x.carbs),
           fat: numv(x.fat), fiber: numv(x.fiber), mealSlot: x.mealSlot || 'extra',
           date: dk, ts: x.ts != null ? x.ts : null, source: 'app',
+        } });
+      }
+      // Agua de los botones de la app: cada toque (water.log) se empuja a bridge.water[] —el mismo
+      // canal que el chat— para que cruce a otros dispositivos. Ventana de 10 días: el agua solo
+      // importa cerca de hoy. El servidor conserva el `ts`, así que mergeBridge excluye el eco propio.
+      if (dk >= cutoff) for (const w of (d.water?.log || [])) {
+        if (!w || w.id == null || imported.has(w.id) || pushed.has(w.id)) continue;
+        out.push({ localId: w.id, section: 'water', date: dk, entry: {
+          ml: numv(w.ml), date: dk, ts: w.ts != null ? w.ts : null, source: 'app',
         } });
       }
       // Entrenamientos: SIN ventana → backfill del historial completo (el bridge ya no los poda).
