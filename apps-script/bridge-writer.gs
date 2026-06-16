@@ -154,8 +154,12 @@ var UPLOAD_TITLE = 'plan-hugo-bridge.upload.json';
 //   · weights → 0: el historial de peso/composición es la serie de tendencia (lo que da
 //     las pendientes de pérdida); es livianísimo (~1 fila/día, ~30 números) y perderlo nos
 //     obligó a reconstruir a mano. Nunca se poda.
-//   · meals/workouts/checks/water → 30: crecen rápido (varias entradas/día) y la app no
+//   · meals/checks/water → 30: crecen rápido (varias entradas/día) y la app no
 //     necesita el log viejo; 30 días cubre cualquier "cómo voy" + colchón.
+//   · workouts → 0: el historial de entrenamientos es la serie que da frecuencia, totales y
+//     volumen por grupo muscular en la pestaña Ejercicios. Es liviano (~4 sesiones/semana) y
+//     podarlo a 30 días hacía que cada dispositivo viera solo lo suyo (Mac 60 vs iPhone 36).
+//     Nunca se poda; mergea por nombre+fecha (ventana ±5 min, no duplica).
 //   · energy → 0: serie compacta {date, kcalIn, trendWeightKg} (~3 números/día) que el TDEE
 //     adaptativo de la app necesita para reconstruir el gasto. Como meals se poda a 30 días,
 //     sin esto el historial de ingesta para estimar gasto se perdería entre dispositivos.
@@ -164,7 +168,7 @@ var UPLOAD_TITLE = 'plan-hugo-bridge.upload.json';
 //     restingHr, vo2max} que la app muestra como CONTEXTO (nunca resta de las kcal: el TDEE
 //     adaptativo ya captura el gasto vía tendencia de peso). Compacta; nunca se poda; mergea
 //     por fecha (latest gana, no duplica). La postea un iOS Shortcut.
-var RETENTION    = { weights: 0, meals: 30, workouts: 30, checks: 30, water: 30, energy: 0, health: 0 };
+var RETENTION    = { weights: 0, meals: 30, workouts: 0, checks: 30, water: 30, energy: 0, health: 0 };
 var SNAPSHOT_RETENTION_DAYS = 30; // los snapshots por fecha siguen la misma ventana que meals
 var SECTIONS     = ['meals', 'weights', 'workouts', 'checks', 'water', 'energy', 'health'];
 // Campos de la sección `energy` que se mergean por fecha (latest gana). Mantener en sync con
