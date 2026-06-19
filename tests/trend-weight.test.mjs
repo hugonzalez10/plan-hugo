@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { todayKey, daysBetween, getRuleWeekKeys } from '../src/dates.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSrc = readFileSync(join(here, '..', 'app.jsx'), 'utf8');
@@ -23,14 +24,18 @@ const weeklyLossM = appSrc.match(/const WEEKLY_LOSS = \{[^}]*\};/);
 assert.ok(weeklyLossM, 'no se encontró WEEKLY_LOSS');
 
 const NAMES = [
-  'todayKey', 'daysBetween', 'getRuleWeekKeys', 'smaAt', 'weightSeries',
+  'smaAt', 'weightSeries',
   'trendWeightAt', 'linRegSlopePerDay', 'weekAvgWeight',
   'computeWeeklyLossRate', 'computePlanAdjustment',
 ];
 const body = weeklyLossM[0] + '\n' + NAMES.map(extractFn).join('\n');
-const exported = new Function(`${body}\n return { ${NAMES.join(', ')} };`)();
+// Las fechas (todayKey/daysBetween/getRuleWeekKeys) llegan de src/dates.mjs y se inyectan al cierre.
+const exported = new Function(
+  'todayKey', 'daysBetween', 'getRuleWeekKeys',
+  `${body}\n return { ${NAMES.join(', ')} };`
+)(todayKey, daysBetween, getRuleWeekKeys);
 const {
-  todayKey, linRegSlopePerDay, trendWeightAt, computeWeeklyLossRate, computePlanAdjustment,
+  linRegSlopePerDay, trendWeightAt, computeWeeklyLossRate, computePlanAdjustment,
 } = exported;
 
 // Genera nDays de pesos diarios terminando en endDateKey, con tendencia lineal slopePerDay
