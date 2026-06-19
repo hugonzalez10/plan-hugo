@@ -10,26 +10,8 @@
 //   node --test
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
 import { gs } from './load-gs.mjs';
-
-const here = dirname(fileURLToPath(import.meta.url));
-const appSrc = readFileSync(join(here, '..', 'app.jsx'), 'utf8');
-
-// Extrae slotByTime + PLAN_SLOTS + SLOT_NAME_RE + extraPlanSlot de app.jsx (JS puro).
-function fn(name) {
-  const m = appSrc.match(new RegExp('function ' + name + '\\s*\\([^)]*\\)\\s*\\{[\\s\\S]*?\\n\\}'));
-  assert.ok(m, 'no se encontró ' + name + ' en app.jsx');
-  return m[0];
-}
-const planM = appSrc.match(/const PLAN_SLOTS = new Set\(\[[^\]]*\]\);/);
-const reM = appSrc.match(/const SLOT_NAME_RE = \{[\s\S]*?\n\};/);
-assert.ok(planM && reM, 'no se encontró PLAN_SLOTS/SLOT_NAME_RE en app.jsx');
-const { slotByTime, extraPlanSlot } = new Function(
-  `${planM[0]}; ${reM[0]}; ${fn('resolveColacion')}; ${fn('slotByTime')}; ${fn('extraPlanSlot')}; return { slotByTime, extraPlanSlot };`
-)();
+import { slotByTime, extraPlanSlot } from '../src/meals.mjs';
 
 // Una fecha local con hora HH:MM (sin tocar el huso: el test corre en local, como la app).
 const at = (h, m) => new Date(2026, 5, 10, h, m, 0);

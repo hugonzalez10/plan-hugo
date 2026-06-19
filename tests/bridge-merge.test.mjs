@@ -12,6 +12,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { todayKey } from '../src/dates.mjs';
+import { extraPlanSlot, resolveColacion, computeDayTotals } from '../src/meals.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSrc = readFileSync(join(here, '..', 'app.jsx'), 'utf8');
@@ -32,16 +33,16 @@ const bundle = [
   grab(/const SEGMENT_FIELDS = \[[\s\S]*?\n\];/, 'SEGMENT_FIELDS'),
   grab(/const BODY_TYPE_OPTIONS = \[[\s\S]*?\];/, 'BODY_TYPE_OPTIONS'),
   grab(/const STRING_FIELDS = \[[\s\S]*?\n\];/, 'STRING_FIELDS'),
-  grab(/const PLAN_SLOTS = new Set\(\[[\s\S]*?\]\);/, 'PLAN_SLOTS'),
-  grab(/const SLOT_NAME_RE = \{[\s\S]*?\n\};/, 'SLOT_NAME_RE'),
   grab(/const DEDUP_WINDOW_MS = [^;]*;/, 'DEDUP_WINDOW_MS'),
   fn('normalizeName'), fn('chatMealSig'), fn('sameWindow'),
-  fn('bridgeDateKey'), fn('healthDateKey'), fn('resolveColacion'), fn('slotByTime'),
-  fn('extraPlanSlot'), fn('getDeviceId'), fn('mergeBridge'),
+  fn('bridgeDateKey'), fn('healthDateKey'), fn('getDeviceId'), fn('mergeBridge'),
   'return { mergeBridge, healthDateKey };',
 ].join('\n');
-// todayKey llega como módulo (src/dates.mjs) y se inyecta al cierre: bridgeDateKey/mergeBridge lo usan.
-const { mergeBridge, healthDateKey } = new Function('todayKey', bundle)(todayKey);
+// todayKey (dates.mjs) + extraPlanSlot/resolveColacion/computeDayTotals (meals.mjs) se inyectan al
+// cierre: mergeBridge los llama. normalizeName sigue bundleado por regex (se queda en app.jsx).
+const { mergeBridge, healthDateKey } = new Function(
+  'todayKey', 'extraPlanSlot', 'resolveColacion', 'computeDayTotals', bundle
+)(todayKey, extraPlanSlot, resolveColacion, computeDayTotals);
 
 // --- helpers de fixture ---
 const baseState = () => ({ days: {}, weights: [], energy: [], bridge: { importedIds: [], removedBridgeIds: [] } });

@@ -8,23 +8,8 @@
 // real en computeDayTotals (integración con FIXED_MEALS + banco).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
 import { gs } from './load-gs.mjs';
-
-const here = dirname(fileURLToPath(import.meta.url));
-const appSrc = readFileSync(join(here, '..', 'app.jsx'), 'utf8');
-
-// Extrae PLAN_SLOTS + SLOT_NAME_RE + extraPlanSlot de app.jsx (todo JS puro, sin JSX).
-const planM = appSrc.match(/const PLAN_SLOTS = new Set\(\[[^\]]*\]\);/);
-const reM = appSrc.match(/const SLOT_NAME_RE = \{[\s\S]*?\n\};/);
-const rcM = appSrc.match(/function resolveColacion\s*\([^)]*\)\s*\{[\s\S]*?\n\}/);
-const fnM = appSrc.match(/function extraPlanSlot\s*\([^)]*\)\s*\{[\s\S]*?\n\}/);
-assert.ok(planM && reM && rcM && fnM, 'no se encontró extraPlanSlot/PLAN_SLOTS/SLOT_NAME_RE/resolveColacion en app.jsx');
-const extraPlanSlot = new Function(
-  `${planM[0]}; ${reM[0]}; ${rcM[0]}; ${fnM[0]}; return extraPlanSlot;`
-)();
+import { extraPlanSlot, computeDayTotals } from '../src/meals.mjs';
 
 const CASES = [
   { in: { mealSlot: 'cena', name: 'Lentejas' },                    out: 'cena' },          // mealSlot manda
@@ -70,28 +55,7 @@ test('_contentUnion SÍ agrega el check si no hay comida de esa sección (comió
 });
 
 // ── Integración real en computeDayTotals: la supresión NO doble-cuenta ────────────────
-// Extrae computeDayTotals + sus deps puras de app.jsx (sin JSX) y verifica la supresión,
-// la no-regresión (sin extra cuenta normal) y la cobertura de colación del banco.
-function fn(name) {
-  const m = appSrc.match(new RegExp('function ' + name + '\\s*\\([^)]*\\)\\s*\\{[\\s\\S]*?\\n\\}'));
-  assert.ok(m, 'no se encontró ' + name + ' en app.jsx');
-  return m[0];
-}
-function constLit(decl, end) {
-  const m = appSrc.match(new RegExp(decl + '[\\s\\S]*?\\n' + end));
-  assert.ok(m, 'no se encontró ' + decl);
-  return m[0];
-}
-
-const FIXED_MEALS = constLit('const FIXED_MEALS = \\[', '\\];');
-const bundle = [
-  FIXED_MEALS, planM[0], reM[0],
-  fn('mealItemsFor'), fn('sumField'), fn('getMealItemTicks'),
-  fn('resolveColacion'), fn('slotByTime'), fn('extraPlanSlot'), fn('computeDayTotals'),
-  'return { computeDayTotals };',
-].join('\n');
-const { computeDayTotals } = new Function(bundle)();
-
+// computeDayTotals y sus deps (FIXED_MEALS, slots, sumField…) viven en src/meals.mjs.
 const TARGETS = {
   kcalMax: 2000, proteinMin: 200, carbsTarget: 200,
   fatTarget: 67, fiberTarget: 30, waterTarget: 3675,
