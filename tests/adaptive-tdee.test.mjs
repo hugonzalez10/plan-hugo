@@ -9,7 +9,8 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { todayKey, daysBetween } from '../src/dates.mjs';
-import { smaAt, weightSeries, trendWeightAt, linRegSlopePerDay } from '../src/energy.mjs';
+import { weightSeries, linRegSlopePerDay } from '../src/energy.mjs';
+import { calcTargets, KCAL_PER_KG_FAT } from '../src/nutrition.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSrc = readFileSync(join(here, '..', 'app.jsx'), 'utf8');
@@ -19,27 +20,16 @@ function extractFn(name) {
   assert.ok(m, `no se encontró ${name}`);
   return m[0];
 }
-function extractConst(name) {
-  // Hasta el primer `;`: cubre números y objetos literales multilínea (sin `;` internos).
-  const m = appSrc.match(new RegExp(`const ${name} = [\\s\\S]*?;`));
-  assert.ok(m, `no se encontró const ${name}`);
-  return m[0];
-}
 
-// La math de peso (smaAt/weightSeries/trendWeightAt/linRegSlopePerDay) vive en src/energy.mjs;
-// calcMifflinStJeor/calcTargets/computeAdaptiveTDEE siguen en app.jsx y se extraen por regex.
-const FNS = ['calcMifflinStJeor', 'calcTargets', 'computeAdaptiveTDEE'];
-const CONSTS = ['DEFAULT_TARGETS', 'PROTEIN_FLOOR_LOSE', 'ACTIVITY_FACTORS', 'KCAL_PER_KG_FAT'];
-
-// Stub: kcalIn = suma de kcal de los extras del día. Lo demás en 0 (no lo usa el balance).
-const stub = `function computeDayTotals(day){ const e=(day&&day.extras)||[]; return { kcalIn: e.reduce((s,x)=>s+(Number(x.kcal)||0),0), protein:0,carbs:0,fat:0,fiber:0,waterMl:0 }; }`;
-const body = CONSTS.map(extractConst).join('\n') + '\n' + stub + '\n' + FNS.map(extractFn).join('\n');
-// fechas (dates.mjs) + math de peso (energy.mjs) se inyectan al cierre del new Function.
-const X = new Function(
-  'todayKey', 'daysBetween', 'smaAt', 'weightSeries', 'trendWeightAt', 'linRegSlopePerDay',
-  `${body}\n return { ${FNS.join(', ')} };`
-)(todayKey, daysBetween, smaAt, weightSeries, trendWeightAt, linRegSlopePerDay);
-const { calcTargets, computeAdaptiveTDEE } = X;
+// La fórmula (calcMifflinStJeor/calcTargets + constantes) vive en src/nutrition.mjs y la math de
+// peso en src/energy.mjs. Solo computeAdaptiveTDEE sigue en app.jsx: se extrae por regex y se le
+// inyecta su cierre. Stub de computeDayTotals: kcalIn = suma de kcal de los extras (lo único que
+// usa el balance), el resto en 0.
+const computeDayTotalsStub = (day) => { const e = (day && day.extras) || []; return { kcalIn: e.reduce((s, x) => s + (Number(x.kcal) || 0), 0), protein: 0, carbs: 0, fat: 0, fiber: 0, waterMl: 0 }; };
+const computeAdaptiveTDEE = new Function(
+  'todayKey', 'daysBetween', 'weightSeries', 'linRegSlopePerDay', 'calcTargets', 'KCAL_PER_KG_FAT', 'computeDayTotals',
+  `${extractFn('computeAdaptiveTDEE')}\n return computeAdaptiveTDEE;`
+)(todayKey, daysBetween, weightSeries, linRegSlopePerDay, calcTargets, KCAL_PER_KG_FAT, computeDayTotalsStub);
 
 const PROFILE = { sex: 'M', age: 36, heightCm: 178, weightKg: 90, activityLevel: 'moderate', goal: 'lose', kcalDeficit: 400 };
 
