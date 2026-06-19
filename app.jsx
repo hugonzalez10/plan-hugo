@@ -1356,7 +1356,9 @@ function calcTargets(profile, opts = {}) {
   let proteinTarget = profile.proteinTarget != null
     ? profile.proteinTarget
     : Math.round((profile.weightKg || 80) * proteinPerKg);
-  if (profile.goal === 'lose') proteinTarget = Math.max(proteinTarget, PROTEIN_FLOOR_LOSE);
+  // El piso de "bajar" solo pisa el valor AUTO-derivado. Si Hugo fija la proteína a mano
+  // (override explícito), manda su número tal cual — manual significa manual.
+  if (profile.goal === 'lose' && profile.proteinTarget == null) proteinTarget = Math.max(proteinTarget, PROTEIN_FLOOR_LOSE);
   const carbsTarget = profile.carbsTarget != null
     ? profile.carbsTarget
     : Math.round((kcalTarget * 0.40) / 4);
@@ -9714,11 +9716,26 @@ function SettingsModal({ state, setState, onClose }) {
     const v = state.userProfile?.kcalDeficit;
     return Number.isFinite(v) ? v : 400;
   });
+  // Overrides manuales de los objetivos que mueven la racha. null = automático (deriva del TDEE).
+  const [kcalTargetDraft, setKcalTargetDraft] = useState(() => {
+    const v = state.userProfile?.kcalTarget;
+    return Number.isFinite(v) ? v : null;
+  });
+  const [proteinTargetDraft, setProteinTargetDraft] = useState(() => {
+    const v = state.userProfile?.proteinTarget;
+    return Number.isFinite(v) ? v : null;
+  });
+  // Valores AUTO (sin override): para mostrar en gris cuando un objetivo está en modo automático.
+  const previewAuto = useMemo(() => {
+    if (!state.userProfile) return null;
+    return calcTargets({ ...state.userProfile, kcalDeficit: kcalDeficitDraft, kcalTarget: null, proteinTarget: null });
+  }, [state.userProfile, kcalDeficitDraft]);
+  // Targets efectivos con los drafts actuales: alimentan el preview de la racha.
   const previewTargets = useMemo(() => {
     if (!state.userProfile) return null;
-    const draftProfile = { ...state.userProfile, kcalDeficit: kcalDeficitDraft, kcalTarget: null };
+    const draftProfile = { ...state.userProfile, kcalDeficit: kcalDeficitDraft, kcalTarget: kcalTargetDraft, proteinTarget: proteinTargetDraft };
     return calcTargets(draftProfile);
-  }, [state.userProfile, kcalDeficitDraft]);
+  }, [state.userProfile, kcalDeficitDraft, kcalTargetDraft, proteinTargetDraft]);
 
   const existing = state.settings?.anthropicApiKey;
   const profile = state.userProfile;
@@ -9759,7 +9776,12 @@ function SettingsModal({ state, setState, onClose }) {
   };
 
   const save = () => {
-    const profileChanged = state.userProfile && state.userProfile.kcalDeficit !== kcalDeficitDraft;
+    const p = state.userProfile;
+    const profileChanged = p && (
+      p.kcalDeficit !== kcalDeficitDraft ||
+      (p.kcalTarget ?? null) !== kcalTargetDraft ||
+      (p.proteinTarget ?? null) !== proteinTargetDraft
+    );
     setState((prev) => ({
       ...prev,
       settings: {
@@ -9770,7 +9792,7 @@ function SettingsModal({ state, setState, onClose }) {
       },
       rules: rulesDraft,
       userProfile: prev.userProfile
-        ? { ...prev.userProfile, kcalDeficit: kcalDeficitDraft, ...(profileChanged ? { updatedAt: new Date().toISOString() } : {}) }
+        ? { ...prev.userProfile, kcalDeficit: kcalDeficitDraft, kcalTarget: kcalTargetDraft, proteinTarget: proteinTargetDraft, ...(profileChanged ? { updatedAt: new Date().toISOString() } : {}) }
         : prev.userProfile,
     }));
     onClose();
@@ -10067,6 +10089,109 @@ function SettingsModal({ state, setState, onClose }) {
           )}
         </div>
 
+        <div className="pt-2 border-t border-gray-200 dark:border-gray-800">
+          <div className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-2 mt-3">🎯 Objetivos de la racha</div>
+          {!profile ? (
+            <div className="rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/40 p-3 flex items-center justify-between gap-3">
+              <p className="text-[11px] text-gray-500 dark:text-gray-400">Configura tu perfil para poder fijar tus objetivos a mano.</p>
+              <button type="button" onClick={() => setEditProfile(true)}
+                className="shrink-0 px-3 py-1.5 rounded-lg bg-emerald-500 text-white text-xs font-semibold hover:bg-emerald-600">Configurar</button>
+            </div>
+          ) : (
+            <>
+              <p className="text-[11px] text-gray-500 dark:text-gray-400 mb-3">Fija la meta de kcal y proteína que decide si un día cuenta para la racha. En automático salen de tu TDEE.</p>
+              <div className="rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/40 p-3 space-y-4">
+                {/* kcal */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold text-gray-700 dark:text-gray-300">🔥 Calorías</span>
+                    <div className="grid grid-cols-2 gap-1 text-[10px]">
+                      <button type="button"
+                        onClick={() => setKcalTargetDraft(null)}
+                        className={`px-2 py-1 rounded-lg font-semibold ${kcalTargetDraft == null ? 'bg-emerald-500 text-white' : 'bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400'}`}>Auto</button>
+                      <button type="button"
+                        onClick={() => setKcalTargetDraft((v) => (v == null ? (previewAuto?.kcalMax || 2300) : v))}
+                        className={`px-2 py-1 rounded-lg font-semibold ${kcalTargetDraft != null ? 'bg-emerald-500 text-white' : 'bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400'}`}>Manual</button>
+                    </div>
+                  </div>
+                  {kcalTargetDraft == null ? (
+                    <div className="text-center text-[11px] text-gray-500 dark:text-gray-400">Automático: <span className="font-semibold text-gray-700 dark:text-gray-300">{previewAuto?.kcalMax ?? '—'}</span> kcal/día</div>
+                  ) : (
+                    <>
+                      <div className="flex items-center justify-center gap-3">
+                        <button type="button"
+                          onClick={() => setKcalTargetDraft((v) => Math.max(1000, (v || 0) - 50))}
+                          className="w-10 h-10 rounded-full bg-white dark:bg-gray-900 border border-gray-300 dark:border-gray-700 font-bold text-lg hover:bg-gray-100 dark:hover:bg-gray-800">−</button>
+                        <div className="text-center">
+                          <input type="number" inputMode="numeric" step="50" min="1000" max="5000"
+                            value={kcalTargetDraft}
+                            onChange={(e) => setKcalTargetDraft(Math.max(1000, Math.min(5000, Number(e.target.value) || 0)))}
+                            className="w-24 text-center text-2xl font-bold bg-transparent border-0 focus:outline-none" />
+                          <div className="text-[10px] text-gray-500 dark:text-gray-400 uppercase tracking-wide">kcal/día</div>
+                        </div>
+                        <button type="button"
+                          onClick={() => setKcalTargetDraft((v) => Math.min(5000, (v || 0) + 50))}
+                          className="w-10 h-10 rounded-full bg-white dark:bg-gray-900 border border-gray-300 dark:border-gray-700 font-bold text-lg hover:bg-gray-100 dark:hover:bg-gray-800">+</button>
+                      </div>
+                      <div className="grid grid-cols-4 gap-1 text-[10px]">
+                        {[2200, 2300, 2400, 2500].map((v) => (
+                          <button type="button" key={v}
+                            onClick={() => setKcalTargetDraft(v)}
+                            className={`py-1 rounded-lg font-semibold ${kcalTargetDraft === v ? 'bg-emerald-500 text-white' : 'bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400'}`}>{v}</button>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </div>
+                {/* proteína */}
+                <div className="space-y-2 pt-3 border-t border-gray-200 dark:border-gray-700">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold text-gray-700 dark:text-gray-300">🥩 Proteína</span>
+                    <div className="grid grid-cols-2 gap-1 text-[10px]">
+                      <button type="button"
+                        onClick={() => setProteinTargetDraft(null)}
+                        className={`px-2 py-1 rounded-lg font-semibold ${proteinTargetDraft == null ? 'bg-emerald-500 text-white' : 'bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400'}`}>Auto</button>
+                      <button type="button"
+                        onClick={() => setProteinTargetDraft((v) => (v == null ? (previewAuto?.proteinMin || 180) : v))}
+                        className={`px-2 py-1 rounded-lg font-semibold ${proteinTargetDraft != null ? 'bg-emerald-500 text-white' : 'bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400'}`}>Manual</button>
+                    </div>
+                  </div>
+                  {proteinTargetDraft == null ? (
+                    <div className="text-center text-[11px] text-gray-500 dark:text-gray-400">Automático: <span className="font-semibold text-gray-700 dark:text-gray-300">{previewAuto?.proteinMin ?? '—'}</span> g/día</div>
+                  ) : (
+                    <>
+                      <div className="flex items-center justify-center gap-3">
+                        <button type="button"
+                          onClick={() => setProteinTargetDraft((v) => Math.max(50, (v || 0) - 5))}
+                          className="w-10 h-10 rounded-full bg-white dark:bg-gray-900 border border-gray-300 dark:border-gray-700 font-bold text-lg hover:bg-gray-100 dark:hover:bg-gray-800">−</button>
+                        <div className="text-center">
+                          <input type="number" inputMode="numeric" step="5" min="50" max="400"
+                            value={proteinTargetDraft}
+                            onChange={(e) => setProteinTargetDraft(Math.max(50, Math.min(400, Number(e.target.value) || 0)))}
+                            className="w-24 text-center text-2xl font-bold bg-transparent border-0 focus:outline-none" />
+                          <div className="text-[10px] text-gray-500 dark:text-gray-400 uppercase tracking-wide">g/día</div>
+                        </div>
+                        <button type="button"
+                          onClick={() => setProteinTargetDraft((v) => Math.min(400, (v || 0) + 5))}
+                          className="w-10 h-10 rounded-full bg-white dark:bg-gray-900 border border-gray-300 dark:border-gray-700 font-bold text-lg hover:bg-gray-100 dark:hover:bg-gray-800">+</button>
+                      </div>
+                      {profile.goal === 'lose' && proteinTargetDraft < PROTEIN_FLOOR_LOSE && (
+                        <div className="text-center text-[10px] text-amber-600 dark:text-amber-400">Recomendado ≥ {PROTEIN_FLOOR_LOSE} g en déficit para preservar músculo.</div>
+                      )}
+                    </>
+                  )}
+                </div>
+                {/* preview racha */}
+                {previewTargets && (
+                  <div className="text-center text-[11px] text-gray-600 dark:text-gray-400 pt-3 border-t border-gray-200 dark:border-gray-700">
+                    Un día cuenta si: kcal entre <span className="font-semibold text-emerald-600 dark:text-emerald-400">{previewTargets.kcalMin}–{previewTargets.kcalRed}</span> y proteína ≥ <span className="font-semibold text-emerald-600 dark:text-emerald-400">{previewTargets.proteinYellow} g</span>
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+
         {profile && profile.goal === 'lose' && (
           <div className="pt-2 border-t border-gray-200 dark:border-gray-800">
             <div className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-2 mt-3">📉 Déficit calórico diario</div>
@@ -10091,9 +10216,14 @@ function SettingsModal({ state, setState, onClose }) {
                   +
                 </button>
               </div>
-              {previewTargets && previewTargets.tdee != null && (
+              {previewAuto && previewAuto.tdee != null && (
                 <div className="text-center text-[11px] text-gray-600 dark:text-gray-400">
-                  TDEE: <span className="font-semibold">{previewTargets.tdee}</span> kcal · Meta diaria: <span className="font-semibold text-emerald-600 dark:text-emerald-400">{previewTargets.kcalMax}</span> kcal
+                  TDEE: <span className="font-semibold">{previewAuto.tdee}</span> kcal · Meta diaria: <span className="font-semibold text-emerald-600 dark:text-emerald-400">{previewAuto.kcalMax}</span> kcal
+                </div>
+              )}
+              {kcalTargetDraft != null && (
+                <div className="text-center text-[11px] text-amber-600 dark:text-amber-400">
+                  Meta de kcal en modo manual ({kcalTargetDraft}) — el déficit no la afecta.
                 </div>
               )}
               <div className="grid grid-cols-5 gap-1 text-[10px]">
