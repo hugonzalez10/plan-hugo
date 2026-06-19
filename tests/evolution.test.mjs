@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { evalMetric } from '../src/metrics.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSrc = readFileSync(join(here, '..', 'app.jsx'), 'utf8');
@@ -18,12 +19,7 @@ const fnM = appSrc.match(/function computeEvolution\s*\([^)]*\)\s*\{[\s\S]*?\n\}
 assert.ok(fnM, 'no se encontró computeEvolution en app.jsx');
 const computeEvolution = new Function(`${constM[0]}\n${fnM[0]}\nreturn computeEvolution;`)();
 
-// evalMetric + REFERENCE_RANGES (semáforo por rangos de referencia).
-const rangesM = appSrc.match(/const REFERENCE_RANGES = \{[\s\S]*?\n\};/);
-assert.ok(rangesM, 'no se encontró REFERENCE_RANGES en app.jsx');
-const evalM = appSrc.match(/function evalMetric\s*\([^)]*\)\s*\{[\s\S]*?\n\}/);
-assert.ok(evalM, 'no se encontró evalMetric en app.jsx');
-const evalMetric = new Function(`${rangesM[0]}\n${evalM[0]}\nreturn evalMetric;`)();
+// evalMetric + REFERENCE_RANGES (semáforo por rangos de referencia) viven en src/metrics.mjs.
 
 // Datos reales de la captura (27/5 → 4/6).
 const SAMPLE = [
