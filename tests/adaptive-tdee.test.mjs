@@ -1,40 +1,14 @@
 // Fase 2: TDEE adaptativo. Reconstruye el gasto real desde el balance energético
 //   gasto ≈ ingesta_media + (peso_tendencia_inicio − peso_tendencia_fin) × 7700 / días
-// y reemplaza a Mifflin como base de la meta cuando hay datos. Aquí inyectamos un stub de
-// computeDayTotals (que solo suma kcal de extras) para probar la MATEMÁTICA del balance de
-// forma aislada, sin arrastrar toda la maquinaria de totales del día.
+// y reemplaza a Mifflin como base de la meta cuando hay datos. computeAdaptiveTDEE vive ahora
+// en src/analytics.mjs (usa el computeDayTotals real de meals.mjs); con el state sintético de
+// abajo —cada día es un solo extra de `intake` kcal— el total real coincide con la suma de kcal,
+// así que la matemática del balance queda probada igual que con el stub anterior.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
-import { todayKey, daysBetween } from '../src/dates.mjs';
-
-const here = dirname(fileURLToPath(import.meta.url));
-const appSrc = readFileSync(join(here, '..', 'app.jsx'), 'utf8');
-
-function extractFn(name) {
-  const m = appSrc.match(new RegExp(`function ${name}\\s*\\([\\s\\S]*?\\n\\}`));
-  assert.ok(m, `no se encontró ${name}`);
-  return m[0];
-}
-function extractConst(name) {
-  // Hasta el primer `;`: cubre números y objetos literales multilínea (sin `;` internos).
-  const m = appSrc.match(new RegExp(`const ${name} = [\\s\\S]*?;`));
-  assert.ok(m, `no se encontró const ${name}`);
-  return m[0];
-}
-
-const FNS = ['smaAt', 'weightSeries', 'trendWeightAt',
-  'linRegSlopePerDay', 'calcMifflinStJeor', 'calcTargets', 'computeAdaptiveTDEE'];
-const CONSTS = ['DEFAULT_TARGETS', 'PROTEIN_FLOOR_LOSE', 'ACTIVITY_FACTORS', 'KCAL_PER_KG_FAT'];
-
-// Stub: kcalIn = suma de kcal de los extras del día. Lo demás en 0 (no lo usa el balance).
-const stub = `function computeDayTotals(day){ const e=(day&&day.extras)||[]; return { kcalIn: e.reduce((s,x)=>s+(Number(x.kcal)||0),0), protein:0,carbs:0,fat:0,fiber:0,waterMl:0 }; }`;
-const body = CONSTS.map(extractConst).join('\n') + '\n' + stub + '\n' + FNS.map(extractFn).join('\n');
-// todayKey/daysBetween llegan de src/dates.mjs y se inyectan al cierre (los usan las fns extraídas).
-const X = new Function('todayKey', 'daysBetween', `${body}\n return { ${FNS.join(', ')} };`)(todayKey, daysBetween);
-const { calcTargets, computeAdaptiveTDEE } = X;
+import { todayKey } from '../src/dates.mjs';
+import { calcTargets } from '../src/nutrition.mjs';
+import { computeAdaptiveTDEE } from '../src/analytics.mjs';
 
 const PROFILE = { sex: 'M', age: 36, heightCm: 178, weightKg: 90, activityLevel: 'moderate', goal: 'lose', kcalDeficit: 400 };
 

@@ -2,41 +2,13 @@
 // SMA temporal), no sobre lecturas crudas. El agua corporal mueve ±1.5 kg de un día a otro
 // y eso disparaba falsos "bajas muy rápido". Aquí construimos series con tendencia real
 // conocida + ruido y verificamos que el clasificador no se deja engañar por el ruido.
-// Funciones puras sin JSX: se extraen de app.jsx con regex (mismo patrón que los demás tests).
+// La math de tendencia vive en src/energy.mjs y computePlanAdjustment en src/analytics.mjs;
+// el test los importa directo.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
-import { todayKey, daysBetween, getRuleWeekKeys } from '../src/dates.mjs';
-
-const here = dirname(fileURLToPath(import.meta.url));
-const appSrc = readFileSync(join(here, '..', 'app.jsx'), 'utf8');
-
-function extractFn(name) {
-  // No anclamos en `)` ni `{` de la firma: defaults como `new Date()` u `options = {}` los
-  // romperían. Tomamos desde `function NAME(` hasta el primer `}` a inicio de línea (= cierre).
-  const m = appSrc.match(new RegExp(`function ${name}\\s*\\([\\s\\S]*?\\n\\}`));
-  assert.ok(m, `no se encontró ${name} en app.jsx`);
-  return m[0];
-}
-const weeklyLossM = appSrc.match(/const WEEKLY_LOSS = \{[^}]*\};/);
-assert.ok(weeklyLossM, 'no se encontró WEEKLY_LOSS');
-
-const NAMES = [
-  'smaAt', 'weightSeries',
-  'trendWeightAt', 'linRegSlopePerDay', 'weekAvgWeight',
-  'computeWeeklyLossRate', 'computePlanAdjustment',
-];
-const body = weeklyLossM[0] + '\n' + NAMES.map(extractFn).join('\n');
-// Las fechas (todayKey/daysBetween/getRuleWeekKeys) llegan de src/dates.mjs y se inyectan al cierre.
-const exported = new Function(
-  'todayKey', 'daysBetween', 'getRuleWeekKeys',
-  `${body}\n return { ${NAMES.join(', ')} };`
-)(todayKey, daysBetween, getRuleWeekKeys);
-const {
-  linRegSlopePerDay, trendWeightAt, computeWeeklyLossRate, computePlanAdjustment,
-} = exported;
+import { todayKey } from '../src/dates.mjs';
+import { trendWeightAt, linRegSlopePerDay, computeWeeklyLossRate } from '../src/energy.mjs';
+import { computePlanAdjustment } from '../src/analytics.mjs';
 
 // Genera nDays de pesos diarios terminando en endDateKey, con tendencia lineal slopePerDay
 // (kg/día) sobre startWeight + ruido determinista de noiseArr. Opcional override del último día.

@@ -7,14 +7,15 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
+import { DEFAULT_TARGETS, colorForKcal, colorForProtein } from '../src/nutrition.mjs';
+
 const here = dirname(fileURLToPath(import.meta.url));
 const src = readFileSync(join(here, '..', 'app.jsx'), 'utf8');
 
 const grab = (re, label) => { const m = src.match(re); assert.ok(m, `no se encontró ${label}`); return m[0]; };
+// DEFAULT_TARGETS/colorForKcal/colorForProtein viven en src/nutrition.mjs y se inyectan al cierre;
+// el resto (PLAN_TOMAS, analyzePlannedDay, buildDayICS…) sigue en app.jsx y se extrae por regex.
 const pieces = [
-  grab(/const DEFAULT_TARGETS = \{[\s\S]*?\};/, 'DEFAULT_TARGETS'),
-  grab(/function colorForKcal\([^{]*\)\s*\{[\s\S]*?\n\}/, 'colorForKcal'),
-  grab(/function colorForProtein\([^{]*\)\s*\{[\s\S]*?\n\}/, 'colorForProtein'),
   grab(/const PLAN_TOMAS = \[[\s\S]*?\];/, 'PLAN_TOMAS'),
   grab(/const MIN_PROTEIN_TOMA = \d+;/, 'MIN_PROTEIN_TOMA'),
   grab(/const MAX_GAP_HOURS = \d+;/, 'MAX_GAP_HOURS'),
@@ -24,7 +25,10 @@ const pieces = [
   grab(/function icsEscape\([^{]*\)\s*\{[\s\S]*?\n\}/, 'icsEscape'),
   grab(/function buildDayICS\([^{]*\)\s*\{[\s\S]*?\n\}/, 'buildDayICS'),
 ];
-const { buildDayICS } = new Function(`${pieces.join('\n')}; return { buildDayICS };`)();
+const { buildDayICS } = new Function(
+  'DEFAULT_TARGETS', 'colorForKcal', 'colorForProtein',
+  `${pieces.join('\n')}; return { buildDayICS };`
+)(DEFAULT_TARGETS, colorForKcal, colorForProtein);
 
 const planned = [
   { id: 'x1', name: 'Salmón 150g', kcal: 280, protein: 35, carbs: 0, fat: 16, fiber: 0, planSlot: 'desayuno' },

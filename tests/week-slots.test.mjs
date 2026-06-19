@@ -6,32 +6,7 @@
 //   node --test
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
-
-const here = dirname(fileURLToPath(import.meta.url));
-const appSrc = readFileSync(join(here, '..', 'app.jsx'), 'utf8');
-
-function fn(name) {
-  const m = appSrc.match(new RegExp('function ' + name + '\\s*\\([^)]*\\)\\s*\\{[\\s\\S]*?\\n\\}'));
-  assert.ok(m, 'no se encontró ' + name + ' en app.jsx');
-  return m[0];
-}
-function constLit(decl, end) {
-  const m = appSrc.match(new RegExp(decl + '[\\s\\S]*?\\n' + end));
-  assert.ok(m, 'no se encontró ' + decl);
-  return m[0];
-}
-const planM = appSrc.match(/const PLAN_SLOTS = new Set\(\[[^\]]*\]\);/);
-const reM = appSrc.match(/const SLOT_NAME_RE = \{[\s\S]*?\n\};/);
-const FIXED_MEALS = constLit('const FIXED_MEALS = \\[', '\\];');
-const { computeDayTotals } = new Function([
-  FIXED_MEALS, planM[0], reM[0],
-  fn('mealItemsFor'), fn('sumField'), fn('getMealItemTicks'),
-  fn('resolveColacion'), fn('slotByTime'), fn('extraPlanSlot'), fn('computeDayTotals'),
-  'return { computeDayTotals };',
-].join('\n'))();
+import { computeDayTotals } from '../src/meals.mjs';
 
 const TARGETS = { kcalMax: 2000, proteinMin: 200, carbsTarget: 200, fatTarget: 67, fiberTarget: 30, waterTarget: 3675 };
 const run = (day, snackBank = [], proteinBank = []) => computeDayTotals(day, snackBank, proteinBank, TARGETS, [], []);

@@ -6,18 +6,8 @@
 // _norm del .gs sobre una batería de strings.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
 import { gs } from './load-gs.mjs';
-
-const here = dirname(fileURLToPath(import.meta.url));
-const appSrc = readFileSync(join(here, '..', 'app.jsx'), 'utf8');
-
-// Extrae el cuerpo de `function normalizeName(...) { ... }` (no contiene JSX).
-const m = appSrc.match(/function normalizeName\s*\([^)]*\)\s*\{[\s\S]*?\n\}/);
-assert.ok(m, 'no se encontró normalizeName en app.jsx');
-const normalizeName = new Function(`${m[0]}; return normalizeName;`)();
+import { normalizeName } from '../src/util.mjs';
 
 const SAMPLES = [
   '  Empanada   de   Pino ',

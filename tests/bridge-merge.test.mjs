@@ -1,47 +1,10 @@
-// Test directo de mergeBridge — el corazón de la reconciliación app↔bridge (app.jsx).
-// Hasta ahora solo se probaba el lado .gs y helpers sueltos; mergeBridge no tenía test propio
-// pese a concentrar los bugs históricos (doble-conteo, divergencia, fechas, dedup).
-//
-// app.jsx es un IIFE sin exports, así que —igual que double-count.test.mjs— extraemos la
-// función y su cierre de dependencias por regex y las instanciamos con `new Function`. Las
-// declaraciones de función se hoistean; los `const` se ponen antes (BODY_TYPE_OPTIONS antes
-// de STRING_FIELDS, que lo referencia).
+// Test directo de mergeBridge — el corazón de la reconciliación app↔bridge. Concentra los bugs
+// históricos (doble-conteo, divergencia, fechas, dedup). Ahora vive en src/sync.mjs y se importa
+// directo (antes se extraía con regex + se le inyectaba todo el cierre con new Function).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
 import { todayKey } from '../src/dates.mjs';
-
-const here = dirname(fileURLToPath(import.meta.url));
-const appSrc = readFileSync(join(here, '..', 'app.jsx'), 'utf8');
-
-function grab(re, label) {
-  const m = appSrc.match(re);
-  assert.ok(m, `no se extrajo ${label} de app.jsx (¿cambió la forma?)`);
-  return m[0];
-}
-function fn(name) {
-  // [^{]* en los params (no [^)]*) para tolerar defaults con paréntesis, p.ej. todayKey(d = new Date()).
-  return grab(new RegExp('function ' + name + '\\s*\\([^{]*\\)\\s*\\{[\\s\\S]*?\\n\\}'), `function ${name}`);
-}
-
-const bundle = [
-  grab(/const WORKOUT_EXTRA_FIELDS = \[[\s\S]*?\];/, 'WORKOUT_EXTRA_FIELDS'),
-  grab(/const WEIGHT_FIELDS = \[[\s\S]*?\n\];/, 'WEIGHT_FIELDS'),
-  grab(/const SEGMENT_FIELDS = \[[\s\S]*?\n\];/, 'SEGMENT_FIELDS'),
-  grab(/const BODY_TYPE_OPTIONS = \[[\s\S]*?\];/, 'BODY_TYPE_OPTIONS'),
-  grab(/const STRING_FIELDS = \[[\s\S]*?\n\];/, 'STRING_FIELDS'),
-  grab(/const PLAN_SLOTS = new Set\(\[[\s\S]*?\]\);/, 'PLAN_SLOTS'),
-  grab(/const SLOT_NAME_RE = \{[\s\S]*?\n\};/, 'SLOT_NAME_RE'),
-  grab(/const DEDUP_WINDOW_MS = [^;]*;/, 'DEDUP_WINDOW_MS'),
-  fn('normalizeName'), fn('chatMealSig'), fn('sameWindow'),
-  fn('bridgeDateKey'), fn('healthDateKey'), fn('resolveColacion'), fn('slotByTime'),
-  fn('extraPlanSlot'), fn('getDeviceId'), fn('mergeBridge'),
-  'return { mergeBridge, healthDateKey };',
-].join('\n');
-// todayKey llega como módulo (src/dates.mjs) y se inyecta al cierre: bridgeDateKey/mergeBridge lo usan.
-const { mergeBridge, healthDateKey } = new Function('todayKey', bundle)(todayKey);
+import { mergeBridge, healthDateKey } from '../src/sync.mjs';
 
 // --- helpers de fixture ---
 const baseState = () => ({ days: {}, weights: [], energy: [], bridge: { importedIds: [], removedBridgeIds: [] } });
