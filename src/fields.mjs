@@ -1,0 +1,97 @@
+// Definiciones de campos de composición corporal y entrenamiento (metadatos: key/label/unit/
+// color, opciones, etiquetas). Datos puros, sin deps. Extraído de app.jsx en la modularización.
+// Los comparten la UI de Peso/Salud y mergeBridge (round-trip de los campos por el bridge).
+
+// Campos escalares de un entrenamiento que deben sobrevivir el round-trip por el bridge
+// (igual que WEIGHT_FIELDS para composición). El array `exercises` se trata aparte por ser array.
+export const WORKOUT_EXTRA_FIELDS = ['type', 'activity', 'minutes', 'volumeKg', 'distanceM', 'avgPowerW', 'avgCadenceRpm', 'avgHr'];
+
+export const WEIGHT_FIELDS = [
+  // Principales
+  { key: 'weightKg',           label: 'Peso',              unit: 'kg',   step: '0.1', cat: 'main' },
+  { key: 'bodyFatPct',         label: '% grasa corporal',  unit: '%',    step: '0.1', cat: 'main' },
+  { key: 'score',              label: 'Puntuación general',unit: '',     step: '1',   cat: 'main' },
+  // Masa (kg)
+  { key: 'fatKg',              label: 'Grasa',             unit: 'kg',   step: '0.1', cat: 'mass' },
+  { key: 'muscleKg',           label: 'Masa muscular',     unit: 'kg',   step: '0.1', cat: 'mass' },
+  { key: 'skeletalMuscleKg',   label: 'Músculo esquelético',unit: 'kg',  step: '0.1', cat: 'mass' },
+  { key: 'fatFreeMassKg',      label: 'Masa libre de grasa',unit: 'kg',  step: '0.1', cat: 'mass' },
+  { key: 'subcutaneousFatKg',  label: 'Grasa subcutánea',  unit: 'kg',   step: '0.1', cat: 'mass' },
+  { key: 'waterKg',            label: 'Agua corporal',     unit: 'kg',   step: '0.1', cat: 'mass' },
+  { key: 'proteinKg',          label: 'Masa proteica',     unit: 'kg',   step: '0.1', cat: 'mass' },
+  { key: 'boneKg',             label: 'Masa ósea',         unit: 'kg',   step: '0.1', cat: 'mass' },
+  // Porcentajes
+  { key: 'musclePct',          label: '% músculo',         unit: '%',    step: '0.1', cat: 'pct' },
+  { key: 'waterPct',           label: '% agua',            unit: '%',    step: '0.1', cat: 'pct' },
+  { key: 'proteinPct',         label: '% proteína',        unit: '%',    step: '0.1', cat: 'pct' },
+  // Índices
+  { key: 'bmi',                label: 'BMI / IMC',         unit: '',     step: '0.1', cat: 'idx' },
+  { key: 'ffmi',               label: 'FFMI',              unit: '',     step: '0.1', cat: 'idx' },
+  { key: 'metabolicAge',       label: 'Edad metabólica',   unit: 'años', step: '1',   cat: 'idx' },
+  { key: 'visceralFat',        label: 'Grasa visceral',    unit: '',     step: '0.1', cat: 'idx' },
+  { key: 'basalMetabolismKcal',label: 'Metabolismo basal', unit: 'kcal', step: '1',   cat: 'idx' },
+  { key: 'waistHipRatio',      label: 'Relación cintura-cadera', unit: '', step: '0.01', cat: 'idx' },
+  { key: 'referenceWeightKg',  label: 'Peso de referencia',unit: 'kg',   step: '0.1', cat: 'idx' },
+  // Estática
+  { key: 'heightCm',           label: 'Altura',            unit: 'cm',   step: '0.1', cat: 'static' },
+  // Circunferencias
+  { key: 'neckCm',             label: 'Cuello',            unit: 'cm',   step: '0.1', cat: 'circ' },
+  { key: 'chestCm',            label: 'Pecho',             unit: 'cm',   step: '0.1', cat: 'circ' },
+  { key: 'waistCm',            label: 'Cintura',           unit: 'cm',   step: '0.1', cat: 'circ' },
+  { key: 'hipCm',              label: 'Cadera',            unit: 'cm',   step: '0.1', cat: 'circ' },
+  { key: 'bicepCm',            label: 'Bíceps',            unit: 'cm',   step: '0.1', cat: 'circ' },
+  { key: 'armCm',              label: 'Brazo superior',    unit: 'cm',   step: '0.1', cat: 'circ' },
+  { key: 'forearmCm',          label: 'Antebrazo',         unit: 'cm',   step: '0.1', cat: 'circ' },
+  { key: 'thighCm',            label: 'Muslo',             unit: 'cm',   step: '0.1', cat: 'circ' },
+  { key: 'calfCm',             label: 'Pantorrilla',       unit: 'cm',   step: '0.1', cat: 'circ' },
+];
+
+// Campos string (no numéricos): tipo de cuerpo + análisis segmental categórico
+export const BODY_TYPE_OPTIONS = ['Bajo peso', 'Normal', 'Sobrepeso', 'Obesidad'];
+export const SEGMENT_OPTIONS = ['Bajo', 'Bien', 'Alto', 'Muy alto'];
+export const SEGMENT_FIELDS = [
+  // Grasa segmental
+  { key: 'fatSegUpperL', label: 'Brazo sup. izq.', group: 'fat' },
+  { key: 'fatSegUpperR', label: 'Brazo sup. der.', group: 'fat' },
+  { key: 'fatSegTorso',  label: 'Torso',           group: 'fat' },
+  { key: 'fatSegLowerL', label: 'Pierna inf. izq.',group: 'fat' },
+  { key: 'fatSegLowerR', label: 'Pierna inf. der.',group: 'fat' },
+  // Músculo segmental
+  { key: 'muscleSegUpperL', label: 'Brazo sup. izq.', group: 'muscle' },
+  { key: 'muscleSegUpperR', label: 'Brazo sup. der.', group: 'muscle' },
+  { key: 'muscleSegTorso',  label: 'Torso',           group: 'muscle' },
+  { key: 'muscleSegLowerL', label: 'Pierna inf. izq.',group: 'muscle' },
+  { key: 'muscleSegLowerR', label: 'Pierna inf. der.',group: 'muscle' },
+];
+export const STRING_FIELDS = [
+  { key: 'bodyType', label: 'Tipo de cuerpo', options: BODY_TYPE_OPTIONS, cat: 'idx' },
+];
+
+export const WEIGHT_CAT_LABELS = {
+  main: 'Composición', mass: 'Masa (kg)', pct: 'Porcentajes', idx: 'Índices', static: 'Estática', circ: 'Circunferencias',
+};
+
+export const CHART_METRICS = [
+  { key: 'weightKg',           label: 'Peso',           unit: 'kg', color: '#10b981' },
+  { key: 'bodyFatPct',         label: '% Grasa',        unit: '%',  color: '#f43f5e' },
+  { key: 'fatKg',              label: 'Grasa',          unit: 'kg', color: '#ef4444' },
+  { key: 'muscleKg',           label: 'Músculo',        unit: 'kg', color: '#3b82f6' },
+  { key: 'skeletalMuscleKg',   label: 'M. esquelético', unit: 'kg', color: '#06b6d4' },
+  { key: 'fatFreeMassKg',      label: 'Masa libre',     unit: 'kg', color: '#22c55e' },
+  { key: 'subcutaneousFatKg',  label: 'G. subcutánea',  unit: 'kg', color: '#fb923c' },
+  { key: 'waterKg',            label: 'Agua',           unit: 'kg', color: '#0ea5e9' },
+  { key: 'proteinKg',          label: 'Proteína',       unit: 'kg', color: '#84cc16' },
+  { key: 'boneKg',             label: 'Hueso',          unit: 'kg', color: '#a3a3a3' },
+  { key: 'waistCm',            label: 'Cintura',        unit: 'cm', color: '#8b5cf6' },
+  { key: 'hipCm',              label: 'Cadera',         unit: 'cm', color: '#c084fc' },
+  { key: 'chestCm',            label: 'Pecho',          unit: 'cm', color: '#e879f9' },
+  { key: 'neckCm',             label: 'Cuello',         unit: 'cm', color: '#f472b6' },
+  { key: 'bicepCm',            label: 'Bíceps',         unit: 'cm', color: '#ec4899' },
+  { key: 'thighCm',            label: 'Muslo',          unit: 'cm', color: '#d946ef' },
+  { key: 'bmi',                label: 'IMC',            unit: '',   color: '#a855f7' },
+  { key: 'ffmi',               label: 'FFMI',           unit: '',   color: '#7c3aed' },
+  { key: 'visceralFat',        label: 'G. visceral',    unit: '',   color: '#dc2626' },
+  { key: 'waistHipRatio',      label: 'Cintura/Cadera', unit: '',   color: '#9333ea' },
+  { key: 'basalMetabolismKcal',label: 'TMB',            unit: 'kcal', color: '#f59e0b' },
+  { key: 'score',              label: 'Score',          unit: '',   color: '#eab308' },
+];

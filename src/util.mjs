@@ -13,3 +13,14 @@ export function uuid() {
 export function normalizeName(name) {
   return (name || '').toLowerCase().trim().replace(/\s+/g, ' ');
 }
+
+// Id de dispositivo persistente (clave propia en localStorage). Viaja en cada entrada de agua
+// de la app (source:'app') para que el dispositivo origen reconozca su propio eco al leer
+// bridge.water[] y no lo doble-cuente. En node/tests (sin localStorage) → 'dev-unknown'.
+export function getDeviceId() {
+  try {
+    let id = localStorage.getItem('plan-hugo-device-id');
+    if (!id) { id = uuid(); localStorage.setItem('plan-hugo-device-id', id); }
+    return id;
+  } catch { return 'dev-unknown'; }
+}
