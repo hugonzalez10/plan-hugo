@@ -1,3 +1,8 @@
+import {
+  todayKey, shiftDate, formatDateLabel, getWeekKeys, getRuleWeekKeys,
+  daysBetween, fmtSleepHours, getISOWeekKey, fmtDelta, shortDate,
+} from './src/dates.mjs';
+
 const { useState, useEffect, useMemo, useCallback } = React;
 
 const STORAGE_KEY = 'plan-hugo-v3';
@@ -1638,41 +1643,6 @@ function getDeviceId() {
   } catch { return 'dev-unknown'; }
 }
 
-function todayKey(d = new Date()) {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
-}
-
-function shiftDate(key, days) {
-  const d = new Date(key + 'T12:00:00');
-  d.setDate(d.getDate() + days);
-  return todayKey(d);
-}
-
-function formatDateLabel(key, todayK) {
-  if (key === todayK) return 'Hoy';
-  if (key === shiftDate(todayK, -1)) return 'Ayer';
-  const d = new Date(key + 'T12:00:00');
-  return d.toLocaleDateString('es-CL', { weekday: 'short', day: 'numeric', month: 'short' }).replace('.', '');
-}
-
-function getWeekKeys(reference = new Date()) {
-  const d = new Date(reference);
-  const dow = d.getDay();
-  const offsetToMonday = dow === 0 ? -6 : 1 - dow;
-  const monday = new Date(d);
-  monday.setDate(d.getDate() + offsetToMonday);
-  const keys = [];
-  for (let i = 0; i < 6; i++) {
-    const x = new Date(monday);
-    x.setDate(monday.getDate() + i);
-    keys.push(todayKey(x));
-  }
-  return keys;
-}
-
 function buildSeed() {
   return {
     version: 3,
@@ -2650,22 +2620,6 @@ function extraPlanSlot(x) {
 
 // ---------- Reglas personales ----------
 
-// Devuelve [ISO_date_keys] de la semana (lunes a domingo) que contiene refDate
-function getRuleWeekKeys(refDate = new Date()) {
-  const d = (typeof refDate === 'string') ? new Date(refDate + 'T12:00:00') : new Date(refDate);
-  const dow = d.getDay();
-  const offsetToMonday = dow === 0 ? -6 : 1 - dow;
-  const monday = new Date(d);
-  monday.setDate(d.getDate() + offsetToMonday);
-  const keys = [];
-  for (let i = 0; i < 7; i++) {
-    const x = new Date(monday);
-    x.setDate(monday.getDate() + i);
-    keys.push(todayKey(x));
-  }
-  return keys;
-}
-
 // Núcleo del SMA por ventana temporal: promedia las `y` de los puntos cuyo `x` (ms) cae en
 // (evalT - windowMs, evalT]. Asume `points` ordenado ascendente por x. null si la ventana
 // queda vacía. Lo comparten trendWeightAt (peso-tendencia) y computeSMA (gráfico).
@@ -3010,13 +2964,6 @@ function generateShoppingList(state, options = {}) {
 }
 
 // ---------- Ajuste automático del plan ----------
-
-// Diferencia en días enteros entre dos date keys YYYY-MM-DD
-function daysBetween(aKey, bKey) {
-  const a = new Date(aKey + 'T12:00:00');
-  const b = new Date(bKey + 'T12:00:00');
-  return Math.round((b - a) / 86400000);
-}
 
 // Computa sugerencia de ajuste según la TASA DE PÉRDIDA SEMANAL (% del peso corporal/sem),
 // NO según un déficit fijo esperado (Garthe 2011). Objetivo 0.5-0.7 %/sem.
@@ -5761,13 +5708,6 @@ function DailyNotesCard({ day, onUpdate }) {
 // Tarjeta de Actividad: pasos / energía activa / sueño de Apple Health (vía iOS Shortcut →
 // bridge → day.health). SOLO CONTEXTO: nunca toca las kcal (el TDEE adaptativo ya capta el
 // gasto). Estado vacío si no hay datos del día.
-function fmtSleepHours(hrs) {
-  if (hrs == null) return '—';
-  const h = Math.floor(hrs);
-  const m = Math.round((hrs - h) * 60);
-  return m > 0 ? `${h}h ${m}m` : `${h}h`;
-}
-
 function ActivityCard({ day }) {
   const h = day?.health;
   const has = h && (h.steps != null || h.activeEnergyKcal != null || h.sleepHours != null || h.restingHr != null || h.vo2max != null);
@@ -7234,14 +7174,6 @@ Tono: conversado, cercano, sin culpa. Máximo ~250 palabras totales. No uses lis
   );
 }
 
-function getISOWeekKey(date = new Date()) {
-  const d = new Date(date);
-  d.setHours(0, 0, 0, 0);
-  d.setDate(d.getDate() + 4 - (d.getDay() || 7));
-  const yearStart = new Date(d.getFullYear(), 0, 1);
-  const week = Math.ceil(((d - yearStart) / 86400000 + 1) / 7);
-  return `${d.getFullYear()}-W${String(week).padStart(2, '0')}`;
-}
 
 function WeekView({ state, setState, onSelectDay, targets }) {
   const weekKeys = useMemo(() => getWeekKeys(), []);
@@ -10935,20 +10867,6 @@ function WeightEntryModal({ state, setState, editing, initialMode, onClose }) {
       )}
     </div>
   );
-}
-
-// "+1.2", "−0.4", "0.0" — usa el signo menos tipográfico como en TrendAnalysis.
-function fmtDelta(v, decimals = 1) {
-  const s = Math.abs(v).toFixed(decimals);
-  if (v > 0) return `+${s}`;
-  if (v < 0) return `−${s}`;
-  return s;
-}
-
-function shortDate(key) {
-  // "2026-05-27" → "27/5"
-  const [, mm, dd] = (key || '').split('-');
-  return dd && mm ? `${Number(dd)}/${Number(mm)}` : key;
 }
 
 function EvolutionAnalysis({ state }) {

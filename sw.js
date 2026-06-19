@@ -4,7 +4,7 @@
  * NO interceptamos llamadas a api.anthropic.com.
  */
 
-const CACHE_NAME = 'plan-hugo-v58-peso-grafico-tendencia';
+const CACHE_NAME = 'plan-hugo-v59-objetivos-racha-manual';
 const CORE_URLS = [
   './index.html',
   './app.js',

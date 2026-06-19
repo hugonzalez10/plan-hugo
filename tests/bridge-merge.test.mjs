@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { todayKey } from '../src/dates.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSrc = readFileSync(join(here, '..', 'app.jsx'), 'utf8');
@@ -34,12 +35,13 @@ const bundle = [
   grab(/const PLAN_SLOTS = new Set\(\[[\s\S]*?\]\);/, 'PLAN_SLOTS'),
   grab(/const SLOT_NAME_RE = \{[\s\S]*?\n\};/, 'SLOT_NAME_RE'),
   grab(/const DEDUP_WINDOW_MS = [^;]*;/, 'DEDUP_WINDOW_MS'),
-  fn('todayKey'), fn('normalizeName'), fn('chatMealSig'), fn('sameWindow'),
+  fn('normalizeName'), fn('chatMealSig'), fn('sameWindow'),
   fn('bridgeDateKey'), fn('healthDateKey'), fn('resolveColacion'), fn('slotByTime'),
   fn('extraPlanSlot'), fn('getDeviceId'), fn('mergeBridge'),
-  'return { mergeBridge, todayKey, healthDateKey };',
+  'return { mergeBridge, healthDateKey };',
 ].join('\n');
-const { mergeBridge, todayKey, healthDateKey } = new Function(bundle)();
+// todayKey llega como módulo (src/dates.mjs) y se inyecta al cierre: bridgeDateKey/mergeBridge lo usan.
+const { mergeBridge, healthDateKey } = new Function('todayKey', bundle)(todayKey);
 
 // --- helpers de fixture ---
 const baseState = () => ({ days: {}, weights: [], energy: [], bridge: { importedIds: [], removedBridgeIds: [] } });

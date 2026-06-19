@@ -86,7 +86,7 @@ fi
 
 # ---- 5. commit (en la rama actual) ----
 say "Commit en rama '$BRANCH'"
-git add app.jsx app.js tailwind.css sw.js index.html manifest.json
+git add app.jsx src/ app.js tailwind.css sw.js index.html manifest.json
 git commit -m "deploy: $NEW" -m "Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ok "Commit creado"
 

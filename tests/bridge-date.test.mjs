@@ -7,18 +7,18 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { todayKey } from '../src/dates.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSrc = readFileSync(join(here, '..', 'app.jsx'), 'utf8');
 
-const todayM = appSrc.match(/function todayKey\s*\([^{]*\)\s*\{[\s\S]*?\n\}/);
-assert.ok(todayM, 'no se encontró todayKey en app.jsx');
 const dateKeyM = appSrc.match(/function bridgeDateKey\s*\([^{]*\)\s*\{[\s\S]*?\n\}/);
 assert.ok(dateKeyM, 'no se encontró bridgeDateKey en app.jsx');
 
-const { todayKey, bridgeDateKey } = new Function(
-  `${todayM[0]}; ${dateKeyM[0]}; return { todayKey, bridgeDateKey };`
-)();
+// bridgeDateKey usa todayKey internamente → se inyecta desde src/dates.mjs.
+const { bridgeDateKey } = new Function(
+  'todayKey', `${dateKeyM[0]}; return { bridgeDateKey };`
+)(todayKey);
 
 test('date explícita manda sobre ts', () => {
   assert.equal(bridgeDateKey({ date: '2026-06-06', ts: 1781018941384 }), '2026-06-06');
