@@ -5,6 +5,7 @@
 // bundle; los tests del dominio (double-count, week-slots, slot-by-time, bridge-merge) lo importan.
 import { getRuleWeekKeys } from './dates.mjs';
 import { DEFAULT_TARGETS } from './nutrition.mjs';
+import { normalizeName } from './util.mjs';
 
 // Desayuno y almuerzo ya no traen ítems predeterminados: Hugo registra la comida real por
 // chat (extras con su mealSlot), que se muestra dentro de cada sección. Se conservan como
@@ -264,4 +265,44 @@ export function currentDayKcalIn(state, dateKey, targets) {
   const day = state?.days?.[dateKey] || {};
   const t = computeDayTotals(day, state?.snackBank || [], state?.proteinBank || [], targets, state?.dessertBank || [], state?.antojoCustomItems || []);
   return t.kcalIn;
+}
+
+// Firma de contenido de una comida: slot|nombre|kcal. El servidor del bridge asigna el id y
+// dedup por contenido, así que el mismo plato desde la app y desde el chat trae ids distintos
+// que un dedup por id no cacharía. Esta firma colapsa esos duplicados dentro de la ventana.
+export function chatMealSig(slot, name, kcal) {
+  return `${slot || 'extra'}|${normalizeName(name)}|${Math.round(Number(kcal) || 0)}`;
+}
+
+// Ventana de dedup por contenido (debe coincidir con WINDOW_MS del Apps Script). Dos entradas
+// con la misma firma se consideran la MISMA si caen dentro de la ventana; más allá, repeticiones
+// legítimas (p.ej. dos cafés en el día). Si a alguna le falta ts (datos legacy) se cae al match
+// por mismo día (conservador: colapsa, como antes).
+export const DEDUP_WINDOW_MS = 5 * 60 * 1000;
+export function sameWindow(tsA, tsB) {
+  if (tsA == null || tsB == null) return true;
+  return Math.abs(Number(tsA) - Number(tsB)) <= DEDUP_WINDOW_MS;
+}
+
+// Colapsa extras duplicados dentro de un mismo día. Por id, y por contenido+ventana SOLO para
+// comidas del chat (source 'skill-chat'): el chat puede re-registrar el mismo plato. Los extras
+// de la app se dedupean solo por id, para no subcontar repeticiones legítimas que el usuario
+// ingresó a mano.
+export function dedupeDayExtras(extras) {
+  const seen = new Set();
+  const sigSeen = [];
+  const out = [];
+  for (const x of extras) {
+    if (x && x.id != null) {
+      if (seen.has(x.id)) continue;
+      seen.add(x.id);
+    }
+    if (x && x.source === 'skill-chat') {
+      const sig = chatMealSig(x.mealSlot, x.name, x.kcal);
+      if (sigSeen.some((s) => s.sig === sig && sameWindow(s.ts, x.ts))) continue;
+      sigSeen.push({ sig, ts: x.ts });
+    }
+    out.push(x);
+  }
+  return out;
 }
