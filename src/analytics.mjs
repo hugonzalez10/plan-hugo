@@ -8,6 +8,7 @@ import { todayKey, daysBetween, shiftDate } from './dates.mjs';
 import { weightSeries, trendWeightAt, linRegSlopePerDay, WEEKLY_LOSS } from './energy.mjs';
 import { calcTargets, KCAL_PER_KG_FAT, DEFAULT_TARGETS } from './nutrition.mjs';
 import { computeDayTotals } from './meals.mjs';
+import { normalizeName } from './util.mjs';
 
 // TDEE de referencia fijo: TMB medida 1878 × ~1.5 factor actividad. Constante a propósito —
 // estimarlo sobre ventanas cortas (peso × Δpeso × kcal de pocos días) es ruido, no señal.
@@ -585,4 +586,52 @@ export function computeComparison(state, dateKey, targets) {
         : null,
     } : null,
   };
+}
+
+// Comidas recientes (extras) ponderadas por recencia, para el registro rápido de un toque.
+export function computeRecents(days, limit = 10, windowDays = 21) {
+  const now = Date.now();
+  const cutoff = now - windowDays * 86400000;
+  const buckets = new Map();
+  for (const [dateKey, day] of Object.entries(days || {})) {
+    if (!day?.extras?.length) continue;
+    const ts = new Date(dateKey + 'T12:00:00').getTime();
+    if (Number.isNaN(ts) || ts < cutoff) continue;
+    const ageDays = Math.max(0, (now - ts) / 86400000);
+    const recencyWeight = Math.exp(-ageDays / 10);
+    for (const item of day.extras) {
+      const norm = normalizeName(item.name);
+      if (!norm) continue;
+      const existing = buckets.get(norm);
+      if (existing) {
+        existing.count += 1;
+        existing.score += recencyWeight;
+        if (ts > existing.lastTs) {
+          existing.lastTs = ts;
+          existing.sample = item;
+        }
+      } else {
+        buckets.set(norm, { norm, count: 1, score: recencyWeight, lastTs: ts, sample: item });
+      }
+    }
+  }
+  return Array.from(buckets.values())
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map((b) => ({
+      name: b.sample.name,
+      kcal: Number(b.sample.kcal) || 0,
+      protein: Number(b.sample.protein) || 0,
+      carbs: Number(b.sample.carbs) || 0,
+      fat: Number(b.sample.fat) || 0,
+      fiber: Number(b.sample.fiber) || 0,
+      count: b.count,
+      // Fidelidad para re-loguear de un toque (todos opcionales, backward-compatible):
+      key: b.norm,
+      barcode: b.sample.barcode || undefined,
+      per100: b.sample.per100 || undefined,
+      portion: b.sample.portion || undefined,
+      source: b.sample.source || undefined,
+      tags: Array.isArray(b.sample.tags) ? b.sample.tags : undefined,
+    }));
 }

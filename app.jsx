@@ -26,7 +26,7 @@ import { evaluateRule, getRulesStatus, evaluateAllRules } from './src/rules.mjs'
 import {
   computeAdaptiveTDEE, buildEnergySeries, computePlanAdjustment, dayMetsTarget,
   computeTrendAnalysis, computeEvolution, interpretTrend, TREND_MIN_DAYS, TREND_WINDOW_DAYS,
-  computeExerciseStats, computeStreak, computeComparison,
+  computeExerciseStats, computeStreak, computeComparison, computeRecents,
 } from './src/analytics.mjs';
 import { uuid, normalizeName } from './src/util.mjs';
 import {
@@ -1733,53 +1733,6 @@ function formatShoppingListText(list, refDate = todayKey()) {
     lines.push('Sin items registrados en el período. Marca tus comidas durante la semana y vuelve a generar.');
   }
   return lines.join('\n');
-}
-
-function computeRecents(days, limit = 10, windowDays = 21) {
-  const now = Date.now();
-  const cutoff = now - windowDays * 86400000;
-  const buckets = new Map();
-  for (const [dateKey, day] of Object.entries(days || {})) {
-    if (!day?.extras?.length) continue;
-    const ts = new Date(dateKey + 'T12:00:00').getTime();
-    if (Number.isNaN(ts) || ts < cutoff) continue;
-    const ageDays = Math.max(0, (now - ts) / 86400000);
-    const recencyWeight = Math.exp(-ageDays / 10);
-    for (const item of day.extras) {
-      const norm = normalizeName(item.name);
-      if (!norm) continue;
-      const existing = buckets.get(norm);
-      if (existing) {
-        existing.count += 1;
-        existing.score += recencyWeight;
-        if (ts > existing.lastTs) {
-          existing.lastTs = ts;
-          existing.sample = item;
-        }
-      } else {
-        buckets.set(norm, { norm, count: 1, score: recencyWeight, lastTs: ts, sample: item });
-      }
-    }
-  }
-  return Array.from(buckets.values())
-    .sort((a, b) => b.score - a.score)
-    .slice(0, limit)
-    .map((b) => ({
-      name: b.sample.name,
-      kcal: Number(b.sample.kcal) || 0,
-      protein: Number(b.sample.protein) || 0,
-      carbs: Number(b.sample.carbs) || 0,
-      fat: Number(b.sample.fat) || 0,
-      fiber: Number(b.sample.fiber) || 0,
-      count: b.count,
-      // Fidelidad para re-loguear de un toque (todos opcionales, backward-compatible):
-      key: b.norm,
-      barcode: b.sample.barcode || undefined,
-      per100: b.sample.per100 || undefined,
-      portion: b.sample.portion || undefined,
-      source: b.sample.source || undefined,
-      tags: Array.isArray(b.sample.tags) ? b.sample.tags : undefined,
-    }));
 }
 
 
