@@ -4,7 +4,7 @@
  * NO interceptamos llamadas a api.anthropic.com.
  */
 
-const CACHE_NAME = 'plan-hugo-v57-salud-banner-rapida-aviso';
+const CACHE_NAME = 'plan-hugo-v58-peso-grafico-tendencia';
 const CORE_URLS = [
   './index.html',
   './app.js',
