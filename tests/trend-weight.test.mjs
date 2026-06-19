@@ -8,7 +8,10 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { todayKey, daysBetween, getRuleWeekKeys } from '../src/dates.mjs';
+import { todayKey, daysBetween } from '../src/dates.mjs';
+import {
+  WEEKLY_LOSS, weightSeries, trendWeightAt, linRegSlopePerDay, computeWeeklyLossRate,
+} from '../src/energy.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSrc = readFileSync(join(here, '..', 'app.jsx'), 'utf8');
@@ -20,23 +23,13 @@ function extractFn(name) {
   assert.ok(m, `no se encontró ${name} en app.jsx`);
   return m[0];
 }
-const weeklyLossM = appSrc.match(/const WEEKLY_LOSS = \{[^}]*\};/);
-assert.ok(weeklyLossM, 'no se encontró WEEKLY_LOSS');
-
-const NAMES = [
-  'smaAt', 'weightSeries',
-  'trendWeightAt', 'linRegSlopePerDay', 'weekAvgWeight',
-  'computeWeeklyLossRate', 'computePlanAdjustment',
-];
-const body = weeklyLossM[0] + '\n' + NAMES.map(extractFn).join('\n');
-// Las fechas (todayKey/daysBetween/getRuleWeekKeys) llegan de src/dates.mjs y se inyectan al cierre.
-const exported = new Function(
-  'todayKey', 'daysBetween', 'getRuleWeekKeys',
-  `${body}\n return { ${NAMES.join(', ')} };`
-)(todayKey, daysBetween, getRuleWeekKeys);
-const {
-  linRegSlopePerDay, trendWeightAt, computeWeeklyLossRate, computePlanAdjustment,
-} = exported;
+// La math de tendencia (smaAt/weightSeries/trendWeightAt/linRegSlopePerDay/weekAvgWeight/
+// computeWeeklyLossRate) y WEEKLY_LOSS viven en src/energy.mjs. Solo computePlanAdjustment
+// sigue en app.jsx: se extrae por regex y se le inyecta su cierre (fechas + math de energía).
+const computePlanAdjustment = new Function(
+  'todayKey', 'daysBetween', 'WEEKLY_LOSS', 'weightSeries', 'trendWeightAt', 'linRegSlopePerDay',
+  `${extractFn('computePlanAdjustment')}\n return computePlanAdjustment;`
+)(todayKey, daysBetween, WEEKLY_LOSS, weightSeries, trendWeightAt, linRegSlopePerDay);
 
 // Genera nDays de pesos diarios terminando en endDateKey, con tendencia lineal slopePerDay
 // (kg/día) sobre startWeight + ruido determinista de noiseArr. Opcional override del último día.
