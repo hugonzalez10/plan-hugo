@@ -1,25 +1,11 @@
-// Tests de computeEvolution (app.jsx): la trayectoria completa primer→último pesaje
-// por métrica de composición. Función pura sin JSX; se extrae de app.jsx con regex,
-// igual que coupling.test.mjs.
+// Tests de computeEvolution: la trayectoria completa primer→último pesaje por métrica de
+// composición. computeEvolution + EVOLUTION_METRICS viven en src/analytics.mjs y evalMetric +
+// REFERENCE_RANGES en src/metrics.mjs; el test los importa directo.
 //   node --test
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
 import { evalMetric } from '../src/metrics.mjs';
-
-const here = dirname(fileURLToPath(import.meta.url));
-const appSrc = readFileSync(join(here, '..', 'app.jsx'), 'utf8');
-
-// Extrae el const EVOLUTION_METRICS y la función computeEvolution (ninguno tiene JSX).
-const constM = appSrc.match(/const EVOLUTION_METRICS = \[[\s\S]*?\n\];/);
-assert.ok(constM, 'no se encontró EVOLUTION_METRICS en app.jsx');
-const fnM = appSrc.match(/function computeEvolution\s*\([^)]*\)\s*\{[\s\S]*?\n\}/);
-assert.ok(fnM, 'no se encontró computeEvolution en app.jsx');
-const computeEvolution = new Function(`${constM[0]}\n${fnM[0]}\nreturn computeEvolution;`)();
-
-// evalMetric + REFERENCE_RANGES (semáforo por rangos de referencia) viven en src/metrics.mjs.
+import { computeEvolution } from '../src/analytics.mjs';
 
 // Datos reales de la captura (27/5 → 4/6).
 const SAMPLE = [
