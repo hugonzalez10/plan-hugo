@@ -4024,6 +4024,7 @@ function OnboardingModal({ state, setState, onClose, editing = false }) {
   const [weightKg, setWeightKg] = useState(
     seed.weightKg != null ? String(seed.weightKg) : (lastWeight?.weightKg != null ? String(lastWeight.weightKg) : '')
   );
+  const [goalWeightKg, setGoalWeightKg] = useState(seed.goalWeightKg != null ? String(seed.goalWeightKg) : '');
   const [activityLevel, setActivityLevel] = useState(seed.activityLevel || 'moderate');
   const [goal, setGoal] = useState(seed.goal || 'lose');
   const [override, setOverride] = useState(false);
@@ -4035,13 +4036,14 @@ function OnboardingModal({ state, setState, onClose, editing = false }) {
     sex,
     heightCm: Number(heightCm) || null,
     weightKg: Number(weightKg) || null,
+    goalWeightKg: Number(goalWeightKg) || null,
     activityLevel,
     goal,
     kcalTarget: override && kcalManual !== '' ? Number(kcalManual) : null,
     proteinTarget: override && proteinManual !== '' ? Number(proteinManual) : null,
     kcalDeficit: Number.isFinite(seed.kcalDeficit) ? seed.kcalDeficit : 400,
     lastAdjustmentDate: seed.lastAdjustmentDate || null,
-  }), [age, sex, heightCm, weightKg, activityLevel, goal, override, kcalManual, proteinManual, seed.kcalDeficit, seed.lastAdjustmentDate]);
+  }), [age, sex, heightCm, weightKg, goalWeightKg, activityLevel, goal, override, kcalManual, proteinManual, seed.kcalDeficit, seed.lastAdjustmentDate]);
 
   const targets = useMemo(() => calcTargets(profileDraft), [profileDraft]);
 
@@ -4103,6 +4105,12 @@ function OnboardingModal({ state, setState, onClose, editing = false }) {
             <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Peso actual (kg)</span>
             <input type="number" inputMode="decimal" step="0.1" value={weightKg}
               onChange={(e) => setWeightKg(e.target.value)}
+              className="mt-1 w-full px-3 py-2.5 rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-emerald-500" />
+          </label>
+          <label className="block">
+            <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Peso meta (kg)</span>
+            <input type="number" inputMode="decimal" step="0.1" value={goalWeightKg} placeholder="opcional"
+              onChange={(e) => setGoalWeightKg(e.target.value)}
               className="mt-1 w-full px-3 py-2.5 rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-emerald-500" />
           </label>
         </div>
@@ -10182,7 +10190,7 @@ const SMA_METRICS = new Set([
   'bmi', 'ffmi', 'waistHipRatio',
 ]);
 
-function WeightChart({ weights, metric }) {
+function WeightChart({ weights, metric, rangeDays, goalWeightKg }) {
   const m = CHART_METRICS.find((x) => x.key === metric) || CHART_METRICS[0];
   // Mide el ancho real del contenedor para que el viewBox sea 1:1 con los píxeles:
   // sin esto (preserveAspectRatio none) el SVG se estira y deforma puntos y trazos.
@@ -10199,10 +10207,15 @@ function WeightChart({ weights, metric }) {
     return () => ro.disconnect();
   }, []);
 
-  const points = weights
+  const allPoints = weights
     .filter((w) => w[m.key] != null)
     .map((w) => ({ x: new Date(w.date + 'T' + (w.time || '12:00')).getTime(), y: Number(w[m.key]) }))
     .sort((a, b) => a.x - b.x);
+  // Recorte a la ventana visible (7/28/90d). Si quedaran <2 puntos, cae a todo el historial
+  // para no dejar el gráfico vacío con ventanas cortas y poca data.
+  const winMs = Number.isFinite(rangeDays) ? rangeDays * 86400000 : Infinity;
+  let points = winMs === Infinity ? allPoints : allPoints.filter((p) => p.x >= Date.now() - winMs);
+  if (points.length < 2) points = allPoints;
 
   if (points.length === 0) {
     return (
@@ -10215,10 +10228,39 @@ function WeightChart({ weights, metric }) {
   const useSMA = SMA_METRICS.has(m.key) && points.length >= 3;
   const sma = useSMA ? computeSMA(points, 7) : [];
 
+  // Tendencia lineal (regresión) sobre los puntos visibles + proyección a futuro.
+  // Guard: ≥3 puntos y span ≥14 días (mismo criterio que computeTrendAnalysis), si no la
+  // pendiente es ruido. La proyección visual se limita a 28 días (o hasta cruzar la meta antes).
+  const dataMaxX = points[points.length - 1].x;
+  const spanDaysVis = (dataMaxX - points[0].x) / 86400000;
+  const showTrend = points.length >= 3 && spanDaysVis >= 14;
+  let trendYAt = null, projEndX = null;
+  if (showTrend) {
+    const slopePerDay = linRegSlopePerDay(points); // unidades/día (− = bajando)
+    if (slopePerDay != null) {
+      const tx0 = points[0].x;
+      let n = 0, sxd = 0, sy = 0;
+      for (const p of points) { const xd = (p.x - tx0) / 86400000; n++; sxd += xd; sy += p.y; }
+      const mxd = sxd / n, my = sy / n;
+      trendYAt = (x) => my + slopePerDay * ((x - tx0) / 86400000 - mxd);
+      let projDays = 28;
+      if (m.key === 'weightKg' && goalWeightKg && slopePerDay < 0) {
+        const yNow = trendYAt(dataMaxX);
+        projDays = yNow > goalWeightKg ? Math.min(28, (goalWeightKg - yNow) / slopePerDay) : 0;
+      }
+      projEndX = dataMaxX + Math.max(0, projDays) * 86400000;
+    }
+  }
+
   const H = 224, padL = 38, padR = 16, padT = 22, padB = 26;
   const xs = points.map((p) => p.x);
-  const allY = useSMA ? [...points.map((p) => p.y), ...sma.map((p) => p.y)] : points.map((p) => p.y);
-  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const allY = useSMA ? [...points.map((p) => p.y), ...sma.map((p) => p.y)] : [...points.map((p) => p.y)];
+  if (trendYAt) {
+    allY.push(trendYAt(points[0].x), trendYAt(dataMaxX));
+    if (projEndX != null) allY.push(trendYAt(projEndX));
+  }
+  const minX = Math.min(...xs);
+  const maxX = projEndX != null ? Math.max(dataMaxX, projEndX) : Math.max(...xs);
   let minY = Math.min(...allY), maxY = Math.max(...allY);
   const spanY = maxY - minY || 1;
   minY -= spanY * 0.12; maxY += spanY * 0.12;
@@ -10267,10 +10309,9 @@ function WeightChart({ weights, metric }) {
 
         {yTickVals.map((v, i) => (
           <g key={i}>
-            <line x1={padL} y1={sy(v)} x2={W - padR} y2={sy(v)} stroke="currentColor"
-              className="text-gray-200/70 dark:text-gray-700/50" strokeWidth="1"
-              strokeDasharray={i === 0 ? '0' : '3 5'} strokeLinecap="round" />
-            <text x={padL - 8} y={sy(v) + 3.5} textAnchor="end" className="fill-gray-400 dark:fill-gray-500" fontSize="10.5">
+            <line x1={padL} y1={sy(v)} x2={W - padR} y2={sy(v)} stroke="var(--bento-hairline)"
+              strokeWidth="1" strokeDasharray={i === 0 ? '0' : '3 5'} strokeLinecap="round" />
+            <text x={padL - 8} y={sy(v) + 3.5} textAnchor="end" fill="var(--bento-faint)" fontSize="10.5">
               {v.toFixed(dec)}
             </text>
           </g>
@@ -10286,13 +10327,25 @@ function WeightChart({ weights, metric }) {
         {/* Línea principal */}
         <path d={linePath} fill="none" stroke={m.color} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
 
+        {/* Tendencia lineal (sólida) + proyección a futuro (punteada) */}
+        {trendYAt && (
+          <>
+            <path d={`M ${sx(points[0].x).toFixed(1)} ${sy(trendYAt(points[0].x)).toFixed(1)} L ${sx(dataMaxX).toFixed(1)} ${sy(trendYAt(dataMaxX)).toFixed(1)}`}
+              fill="none" stroke="var(--bento-ink)" strokeOpacity="0.5" strokeWidth="2" strokeLinecap="round" />
+            {projEndX != null && projEndX > dataMaxX && (
+              <path d={`M ${sx(dataMaxX).toFixed(1)} ${sy(trendYAt(dataMaxX)).toFixed(1)} L ${sx(projEndX).toFixed(1)} ${sy(trendYAt(projEndX)).toFixed(1)}`}
+                fill="none" stroke="var(--bento-ink)" strokeOpacity="0.5" strokeWidth="2" strokeDasharray="4 4" strokeLinecap="round" />
+            )}
+          </>
+        )}
+
         {points.map((p, i) => {
           const skipLabel = points.length > 6 && i % Math.ceil(points.length / 6) !== 0 && i !== points.length - 1;
           const anchor = spansMultipleYears
             ? (i === 0 ? 'start' : (i === points.length - 1 ? 'end' : 'middle'))
             : 'middle';
           return !skipLabel && (
-            <text key={`x${i}`} x={sx(p.x)} y={H - 7} textAnchor={anchor} className="fill-gray-400 dark:fill-gray-500" fontSize="10.5">
+            <text key={`x${i}`} x={sx(p.x)} y={H - 7} textAnchor={anchor} fill="var(--bento-faint)" fontSize="10.5">
               {fmtDate(p.x, spansMultipleYears)}
             </text>
           );
@@ -10305,31 +10358,49 @@ function WeightChart({ weights, metric }) {
           </circle>
         ))}
         {!useSMA && points.map((p, i) => (
-          <circle key={`pt${i}`} cx={sx(p.x)} cy={sy(p.y)} r="3.5" fill="currentColor"
-            className="text-white dark:text-gray-900" stroke={m.color} strokeWidth="2.5">
+          <circle key={`pt${i}`} cx={sx(p.x)} cy={sy(p.y)} r="3.5" fill="var(--bento-card)"
+            stroke={m.color} strokeWidth="2.5">
             <title>{`${fmtDate(p.x, true)}: ${p.y.toFixed(1)}${m.unit ? ' ' + m.unit : ''}`}</title>
           </circle>
         ))}
 
         {/* Último punto destacado + valor actual */}
         <circle cx={lastX} cy={lastY} r="9" fill={m.color} fillOpacity="0.16" />
-        <circle cx={lastX} cy={lastY} r="4.5" fill={m.color} stroke="currentColor" className="text-white dark:text-gray-900" strokeWidth="2" />
+        <circle cx={lastX} cy={lastY} r="4.5" fill={m.color} stroke="var(--bento-card)" strokeWidth="2" />
         <text x={lastX} y={labelY} textAnchor={labelAnchor} fontSize="12.5" fontWeight="700" fill={m.color}>
           {lastLabel}
           <title>{`${fmtDate(last.x, true)}: ${lastLabel}`}</title>
         </text>
       </svg>
 
-      {useSMA && (
-        <div className="flex items-center gap-3 text-[11px] text-gray-500 dark:text-gray-400 px-1 mt-1.5">
-          <span className="flex items-center gap-1">
-            <span className="inline-block w-3 h-0.5 rounded-full" style={{ background: m.color, opacity: 0.3 }}></span>
-            valores crudos
-          </span>
-          <span className="flex items-center gap-1">
-            <span className="inline-block w-3.5 h-1 rounded-full" style={{ background: m.color }}></span>
-            media móvil 7d
-          </span>
+      {(useSMA || trendYAt) && (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] px-1 mt-1.5" style={{ color: 'var(--bento-faint)' }}>
+          {useSMA && (
+            <>
+              <span className="flex items-center gap-1">
+                <span className="inline-block w-3 h-0.5 rounded-full" style={{ background: m.color, opacity: 0.3 }}></span>
+                valores crudos
+              </span>
+              <span className="flex items-center gap-1">
+                <span className="inline-block w-3.5 h-1 rounded-full" style={{ background: m.color }}></span>
+                media móvil 7d
+              </span>
+            </>
+          )}
+          {trendYAt && (
+            <>
+              <span className="flex items-center gap-1">
+                <span className="inline-block w-3.5 h-1 rounded-full" style={{ background: 'var(--bento-ink)', opacity: 0.5 }}></span>
+                tendencia
+              </span>
+              {projEndX != null && projEndX > dataMaxX && (
+                <span className="flex items-center gap-1">
+                  <span className="inline-block w-3.5 h-0 border-t-2 border-dashed" style={{ borderColor: 'var(--bento-ink)', opacity: 0.5 }}></span>
+                  proyección
+                </span>
+              )}
+            </>
+          )}
         </div>
       )}
     </div>
@@ -11553,6 +11624,8 @@ function WeightView({ state, setState, targets }) {
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState(null);
   const [metric, setMetric] = useState('weightKg');
+  const [rangeDays, setRangeDays] = useState(90);
+  const goalWeightKg = state.userProfile?.goalWeightKg ?? 90;
   const weights = (state.weights || []).slice().sort((a, b) => {
     const ka = (a.date || '') + 'T' + (a.time || '00:00');
     const kb = (b.date || '') + 'T' + (b.time || '00:00');
@@ -11575,6 +11648,23 @@ function WeightView({ state, setState, targets }) {
   };
 
   const metricDots = ['var(--bento-warm)', 'var(--bento-blue)', 'var(--bento-lilac)', 'var(--bento-yellow)', 'var(--bento-pos)', 'var(--bento-ink)'];
+
+  // Titular de ritmo %/sem + ETA a la meta (misma fuente que la tarjeta TrendAnalysis de abajo).
+  const trendHead = useMemo(() => {
+    const d = computeTrendAnalysis(state.weights || [], state.days || {}, state.snackBank || [], state.proteinBank || [], targets, state.dessertBank || [], state.antojoCustomItems || []);
+    if (!d || d.lossPctPerWeek == null) return null;
+    const pct = d.lossPctPerWeek; // + = perdiendo peso
+    const inGreen = pct >= LOSS_RATE_GREEN.min && pct <= LOSS_RATE_GREEN.max;
+    const lastW = d.last?.weightKg;
+    let etaWeeks = null;
+    if (lastW != null && pct > 0.05 && lastW > goalWeightKg) {
+      const kgPerWeek = (pct / 100) * lastW;
+      etaWeeks = Math.round((lastW - goalWeightKg) / kgPerWeek);
+    }
+    return { pct, inGreen, etaWeeks };
+  }, [state.weights, state.days, state.snackBank, state.proteinBank, state.dessertBank, state.antojoCustomItems, targets, goalWeightKg]);
+
+  const RANGE_OPTIONS = [{ d: 7, label: '7d' }, { d: 28, label: '28d' }, { d: 90, label: '90d' }, { d: Infinity, label: 'Todo' }];
 
   return (
     <div className="px-4 py-4 space-y-4">
@@ -11622,7 +11712,7 @@ function WeightView({ state, setState, targets }) {
       )}
 
       <div className="bento-card">
-        <div className="flex items-center gap-1.5 mb-3 overflow-x-auto -mx-1 px-1">
+        <div className="flex items-center gap-1.5 mb-2.5 overflow-x-auto -mx-1 px-1">
           {CHART_METRICS.map((m) => (
             <button key={m.key} onClick={() => setMetric(m.key)}
               className="shrink-0 px-3 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap"
@@ -11631,7 +11721,33 @@ function WeightView({ state, setState, targets }) {
             </button>
           ))}
         </div>
-        <WeightChart weights={weights} metric={metric} />
+        <div className="flex items-center gap-1.5 mb-3">
+          {RANGE_OPTIONS.map((r) => (
+            <button key={r.label} onClick={() => setRangeDays(r.d)}
+              className="shrink-0 px-2.5 py-1 rounded-full text-[11px] font-semibold"
+              style={rangeDays === r.d ? { background: 'var(--bento-ink)', color: 'var(--bento-on-ink)' } : { background: 'var(--bento-surface)', color: 'var(--bento-faint)' }}>
+              {r.label}
+            </button>
+          ))}
+        </div>
+        {metric === 'weightKg' && trendHead && (
+          <div className="flex items-end justify-between mb-3 px-0.5">
+            <div>
+              <div className="bento-label">Ritmo · regresión</div>
+              <div className="bento-num" style={{ fontSize: 22, lineHeight: 1.1, color: trendHead.inGreen ? 'var(--bento-pos)' : 'var(--bento-warm)' }}>
+                {trendHead.pct < 0 ? '+' : '−'}{Math.abs(trendHead.pct).toFixed(2)}<span style={{ fontSize: 11, fontWeight: 400, color: 'var(--bento-faint)' }}> %/sem{trendHead.pct < 0 ? ' (subiendo)' : ''}</span>
+              </div>
+              <div className="bento-label" style={{ marginTop: 2 }}>objetivo {LOSS_RATE_GREEN.min}–{LOSS_RATE_GREEN.max} %/sem</div>
+            </div>
+            <div className="text-right">
+              <div className="bento-label">Proyección</div>
+              <div className="bento-num" style={{ fontSize: 18, lineHeight: 1.1 }}>
+                {trendHead.etaWeeks != null ? <>{goalWeightKg}<span style={{ fontSize: 11, fontWeight: 400, color: 'var(--bento-faint)' }}> kg ≈ {trendHead.etaWeeks} sem</span></> : <span style={{ fontSize: 13, fontWeight: 400, color: 'var(--bento-faint)' }}>sin proyección</span>}
+              </div>
+            </div>
+          </div>
+        )}
+        <WeightChart weights={weights} metric={metric} rangeDays={rangeDays} goalWeightKg={goalWeightKg} />
       </div>
 
       <EvolutionAnalysis state={state} />
