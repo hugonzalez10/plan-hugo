@@ -133,7 +133,9 @@ function buildWidget(data, stale, family) {
   // Línea kcal + agua
   const sub = w.addStack();
   sub.centerAlignContent();
-  const kcal = sub.addText(`${Math.round(t.kcal || 0)} / ${Math.round(tg.kcalMax)} kcal`);
+  // kcalIn = consumidas (brutas, como la app); cae a kcal si no viniera.
+  const kcalEaten = (t.kcalIn != null) ? t.kcalIn : (t.kcal || 0);
+  const kcal = sub.addText(`${Math.round(kcalEaten)} / ${Math.round(tg.kcalMax)} kcal`);
   kcal.font = Font.mediumSystemFont(13);
   kcal.textColor = COLORS.text;
   sub.addSpacer();
