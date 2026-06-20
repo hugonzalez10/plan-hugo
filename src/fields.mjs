@@ -3,8 +3,32 @@
 // Los comparten la UI de Peso/Salud y mergeBridge (round-trip de los campos por el bridge).
 
 // Campos escalares de un entrenamiento que deben sobrevivir el round-trip por el bridge
-// (igual que WEIGHT_FIELDS para composición). El array `exercises` se trata aparte por ser array.
-export const WORKOUT_EXTRA_FIELDS = ['type', 'activity', 'minutes', 'volumeKg', 'distanceM', 'avgPowerW', 'avgCadenceRpm', 'avgHr'];
+// (igual que WEIGHT_FIELDS para composición). El array `exercises` y el objeto `hrZones` se
+// tratan aparte (no escalares). rpe/trainingLoad/calsPerHour los aporta HeartWatch.
+export const WORKOUT_EXTRA_FIELDS = ['type', 'activity', 'minutes', 'volumeKg', 'distanceM', 'avgPowerW', 'avgCadenceRpm', 'avgHr', 'rpe', 'trainingLoad', 'calsPerHour'];
+
+// Métricas diarias de salud (Apple Health vía Shortcut + recuperación de HeartWatch vía importador
+// CSV). Una fila por día en day.health. SOLO CONTEXTO: nunca restan de las kcal (el TDEE adaptativo
+// ya captura el gasto). Mantener key/orden en sync con HEALTH_MERGE_FIELDS del bridge .gs y con el
+// loop de mergeBridge. `source` marca de dónde viene cada métrica (Health o HeartWatch).
+//   goodUp: si subir es bueno (para flechas de tendencia). hr=frecuencia cardíaca (bajar es mejor).
+export const HEALTH_FIELDS = [
+  { key: 'steps',            label: 'Pasos',           unit: '',    icon: '👟', goodUp: true,  source: 'health' },
+  { key: 'activeEnergyKcal', label: 'Energía activa',  unit: 'kcal',icon: '🔥', goodUp: true,  source: 'health' },
+  { key: 'sleepHours',       label: 'Sueño',           unit: 'h',   icon: '😴', goodUp: true,  source: 'health' },
+  { key: 'restingHr',        label: 'FC reposo',       unit: 'lpm', icon: '❤️', goodUp: false, source: 'health' },
+  { key: 'vo2max',           label: 'VO₂máx',          unit: '',    icon: '🫁', goodUp: true,  source: 'health' },
+  { key: 'hrvSleep',         label: 'HRV (sueño)',     unit: 'ms',  icon: '🫀', goodUp: true,  source: 'heartwatch' },
+  { key: 'hrvWake',          label: 'HRV (vigilia)',   unit: 'ms',  icon: '🫀', goodUp: true,  source: 'heartwatch' },
+  { key: 'sleepingHr',       label: 'FC durmiendo',    unit: 'lpm', icon: '🌙', goodUp: false, source: 'heartwatch' },
+  { key: 'sedentaryHr',      label: 'FC sedentaria',   unit: 'lpm', icon: '🪑', goodUp: false, source: 'heartwatch' },
+  { key: 'spo2Daily',        label: 'SpO₂',            unit: '%',   icon: '🩸', goodUp: true,  source: 'heartwatch' },
+  { key: 'spo2Sleep',        label: 'SpO₂ durmiendo',  unit: '%',   icon: '🩸', goodUp: true,  source: 'heartwatch' },
+  { key: 'recovery2min',     label: 'Recuperación 2′', unit: 'lpm', icon: '📉', goodUp: true,  source: 'heartwatch' },
+];
+
+// Solo las claves numéricas que se round-trippean por el bridge (sin healthTs, que es metadato).
+export const HEALTH_MERGE_FIELDS = HEALTH_FIELDS.map((f) => f.key);
 
 export const WEIGHT_FIELDS = [
   // Principales

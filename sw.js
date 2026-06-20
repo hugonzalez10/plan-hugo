@@ -4,7 +4,7 @@
  * NO interceptamos llamadas a api.anthropic.com.
  */
 
-const CACHE_NAME = 'plan-hugo-v61-peso-portada-ventana';
+const CACHE_NAME = 'plan-hugo-v62-heartwatch-import';
 const CORE_URLS = [
   './index.html',
   './app.js',

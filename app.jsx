@@ -14,6 +14,7 @@ import {
 import {
   parseJsonLoose, parseRoutineTemplate, normalizeRoutine,
   slugifyExercise, extractYoutubeId,
+  parseHeartWatchDaily, parseHeartWatchWorkouts,
 } from './src/parsing.mjs';
 import { evalMetric } from './src/metrics.mjs';
 import {
@@ -31,7 +32,7 @@ import {
 import { uuid, normalizeName, getDeviceId } from './src/util.mjs';
 import {
   WEIGHT_FIELDS, SEGMENT_FIELDS, SEGMENT_OPTIONS, STRING_FIELDS,
-  WEIGHT_CAT_LABELS, CHART_METRICS, WORKOUT_EXTRA_FIELDS,
+  WEIGHT_CAT_LABELS, CHART_METRICS, WORKOUT_EXTRA_FIELDS, HEALTH_FIELDS,
 } from './src/fields.mjs';
 import {
   gistCreate, gistPush, gistPull, sanitizeStateForUpload, syncSig, applyRemoteState, hashSig,
@@ -2741,7 +2742,7 @@ function DailyNotesCard({ day, onUpdate }) {
 // gasto). Estado vacío si no hay datos del día.
 function ActivityCard({ day }) {
   const h = day?.health;
-  const has = h && (h.steps != null || h.activeEnergyKcal != null || h.sleepHours != null || h.restingHr != null || h.vo2max != null);
+  const has = h && (h.steps != null || h.activeEnergyKcal != null || h.sleepHours != null || h.restingHr != null || h.vo2max != null || h.hrvSleep != null || h.spo2Daily != null || h.sleepingHr != null);
   return (
     <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 overflow-hidden">
       <div className="px-4 pt-3.5 pb-2 flex items-center gap-2">
@@ -2761,9 +2762,16 @@ function ActivityCard({ day }) {
             <ActivityMetric label="Sueño" value={fmtSleepHours(h.sleepHours)} />
           </div>
           {(h.restingHr != null || h.vo2max != null) && (
-            <div className="px-4 pb-3 text-[11px] text-gray-500 dark:text-gray-400 flex gap-3">
+            <div className="px-4 pb-1.5 text-[11px] text-gray-500 dark:text-gray-400 flex gap-3 flex-wrap">
               {h.restingHr != null && <span>❤️ FC reposo {Math.round(h.restingHr)} lpm</span>}
               {h.vo2max != null && <span>🫁 VO₂máx {Number(h.vo2max).toFixed(1)}</span>}
+            </div>
+          )}
+          {(h.hrvSleep != null || h.sleepingHr != null || h.spo2Daily != null) && (
+            <div className="px-4 pb-3 text-[11px] text-gray-500 dark:text-gray-400 flex gap-3 flex-wrap">
+              {h.hrvSleep != null && <span>🫀 HRV {Math.round(h.hrvSleep)} ms</span>}
+              {h.sleepingHr != null && <span>🌙 FC durmiendo {Math.round(h.sleepingHr)} lpm</span>}
+              {h.spo2Daily != null && <span>🩸 SpO₂ {Number(h.spo2Daily).toFixed(0)}%</span>}
             </div>
           )}
         </>
@@ -4838,9 +4846,190 @@ function MetricSparkline({ points, color = 'var(--bento-blue)', height = 42 }) {
   );
 }
 
-// Pestaña Salud: tendencias de Apple Health (pasos, energía activa, sueño, FC reposo, VO2máx)
-// + banderas automáticas + evaluación crítica de Claude que cruza sueño/actividad/recuperación
-// con la pérdida de peso y la adherencia. SOLO LECTURA: nunca altera kcal ni totales.
+// Planifica (sin mutar) el merge de un import de HeartWatch contra el estado actual: cuántos días
+// de salud entran (nuevos vs actualizaciones) y qué sesiones de entreno calzan con un entrenamiento
+// local existente. El match de entrenos es por fecha + hora de inicio más cercana (±30 min); cada
+// entrada local se reclama UNA vez (las sesiones más largas primero, para que la principal reclame
+// el entrenamiento de Speediance). Las sesiones sin match NO se agregan en v1: el watch registra
+// varias entradas solapadas por sesión real (ej. Remo + 2× pesas concurrentes) → duplicaría.
+function planHeartWatchMerge(state, daily, workouts) {
+  const healthDays = daily?.days || [];
+  const sessions = workouts?.sessions || [];
+  const stateDays = state.days || {};
+  let healthNew = 0, healthUpd = 0;
+  for (const h of healthDays) {
+    const cur = stateDays[h.date]?.health;
+    if (cur && (cur.hrvSleep != null || cur.spo2Daily != null)) healthUpd++; else healthNew++;
+  }
+  const WINDOW = 30 * 60 * 1000;
+  const claimed = new Set();
+  const matches = [];
+  let unmatched = 0;
+  const ordered = [...sessions].sort((a, b) => (b.minutes || 0) - (a.minutes || 0));
+  for (const s of ordered) {
+    const cands = (stateDays[s.date]?.exercise || []).filter((e) => e && e.id != null && !claimed.has(e.id));
+    let best = null, bestDt = Infinity;
+    for (const e of cands) {
+      const dt = (e.ts != null && s.ts != null) ? Math.abs(e.ts - s.ts) : Infinity;
+      if (dt < bestDt) { bestDt = dt; best = e; }
+    }
+    if (best && bestDt <= WINDOW) { claimed.add(best.id); matches.push({ session: s, dayKey: s.date, exId: best.id }); }
+    else unmatched++;
+  }
+  return { healthDays, healthNew, healthUpd, matches, matched: matches.length, unmatched, totalSessions: sessions.length };
+}
+
+const HW_ENRICH_FIELDS = ['avgHr', 'rpe', 'trainingLoad', 'calsPerHour'];
+
+// Modal: importar export CSV de HeartWatch (resumen diario + entrenamientos). Parsea client-side
+// (sin IA), muestra un preview de lo que se mergeará y, al confirmar, mergea en el estado local
+// (aditivo: nunca pisa datos del Shortcut/Speediance) y empuja al bridge (idempotente: salud por
+// fecha, entrenos por nombre+ts) para que cruce a otros dispositivos.
+function HeartWatchImportModal({ state, setState, onClose }) {
+  const [daily, setDaily] = useState(null);
+  const [workouts, setWorkouts] = useState(null);
+  const [err, setErr] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(null);
+
+  const bridgePost = useMemo(() => {
+    const url = state.settings?.bridgeUrl;
+    return url ? withBridgeToken(url, state.settings?.bridgeToken) : null;
+  }, [state.settings]);
+
+  const handleFiles = async (e) => {
+    const files = Array.from(e.target.files || []);
+    setErr(null);
+    for (const f of files) {
+      let text;
+      try { text = await f.text(); } catch { setErr('No se pudo leer ' + f.name); continue; }
+      const d = parseHeartWatchDaily(text);
+      if (d.ok && d.days.length) { setDaily({ name: f.name, ...d }); continue; }
+      const w = parseHeartWatchWorkouts(text);
+      if (w.ok && w.sessions.length) { setWorkouts({ name: f.name, ...w }); continue; }
+      setErr(`«${f.name}» no es un CSV de HeartWatch reconocido (resumen diario o entrenamientos).`);
+    }
+    if (e.target) e.target.value = '';
+  };
+
+  const plan = useMemo(() => planHeartWatchMerge(state, daily, workouts), [state.days, daily, workouts]);
+  const hasData = (daily?.days?.length || 0) + (workouts?.sessions?.length || 0) > 0;
+
+  const apply = async () => {
+    setBusy(true);
+    const healthDays = daily?.days || [];
+    const matches = plan.matches;
+    setState((prev) => {
+      const days = { ...(prev.days || {}) };
+      for (const h of healthDays) {
+        const d = days[h.date] ? { ...days[h.date] } : { date: h.date, meals: [], extras: [], exercise: [] };
+        const cur = { ...(d.health || {}) };
+        for (const k of Object.keys(h)) {
+          if (k === 'date') continue;
+          if (k === 'sleepHours') { if (cur.sleepHours == null) cur.sleepHours = h.sleepHours; continue; }
+          if (h[k] != null) cur[k] = h[k];
+        }
+        cur.healthTs = Date.now();
+        d.health = cur;
+        days[h.date] = d;
+      }
+      for (const m of matches) {
+        const d = days[m.dayKey]; if (!d) continue;
+        const exArr = (d.exercise || []).map((e) => {
+          if (e.id !== m.exId) return e;
+          const ne = { ...e };
+          for (const f of HW_ENRICH_FIELDS) if (ne[f] == null && m.session[f] != null) ne[f] = m.session[f];
+          if ((!ne.hrZones || !Object.keys(ne.hrZones).length) && m.session.hrZones) ne.hrZones = m.session.hrZones;
+          return ne;
+        });
+        days[m.dayKey] = { ...d, exercise: exArr };
+      }
+      return { ...prev, days };
+    });
+    if (bridgePost) {
+      const post = (section, today, entry) => fetch(bridgePost, {
+        method: 'POST', mode: 'no-cors', keepalive: true,
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({ op: 'add', section, today, entries: [{ ...entry, ts: entry.ts != null ? entry.ts : Date.now() }] }),
+      }).catch(() => {});
+      for (const h of healthDays) {
+        const entry = { ...h };
+        // sleepHours solo si el día no tiene ya uno (el del Shortcut manda); evita pisarlo en el server.
+        if (state.days?.[h.date]?.health?.sleepHours != null) delete entry.sleepHours;
+        await post('health', h.date, entry);
+      }
+      for (const m of matches) {
+        const ex = (state.days?.[m.dayKey]?.exercise || []).find((e) => e.id === m.exId);
+        if (!ex) continue;
+        const entry = { name: ex.name, date: m.dayKey, ts: ex.ts, source: 'app' };
+        for (const f of HW_ENRICH_FIELDS) if (m.session[f] != null) entry[f] = m.session[f];
+        if (m.session.hrZones) entry.hrZones = m.session.hrZones;
+        await post('workouts', m.dayKey, entry);
+      }
+    }
+    setBusy(false);
+    setDone({ health: healthDays.length, matched: plan.matched, unmatched: plan.unmatched });
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 p-0 sm:p-4" onClick={onClose}>
+      <div className="bg-white dark:bg-gray-900 w-full sm:max-w-lg sm:rounded-2xl rounded-t-2xl max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+        <div className="px-5 pt-5 pb-3 flex items-center justify-between border-b border-gray-100 dark:border-gray-800">
+          <h2 className="text-lg font-bold flex items-center gap-2"><span>⌚</span> Importar HeartWatch</h2>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-2xl leading-none">×</button>
+        </div>
+        <div className="px-5 py-4 space-y-4">
+          {!done ? (
+            <>
+              <p className="text-sm" style={{ color: 'var(--bento-faint)' }}>
+                Arrastra o elige los CSV de HeartWatch: el <b>resumen diario</b> (HRV, SpO₂, FC durmiendo,
+                recuperación) y/o el de <b>entrenamientos</b> (zonas de FC, carga, RPE). Es aditivo: no pisa
+                lo que ya viene del atajo de Apple Health ni de Speediance.
+              </p>
+              <label className="block">
+                <input type="file" accept=".csv,text/csv" multiple onChange={handleFiles} className="hidden" />
+                <span className="block text-center px-4 py-3 rounded-xl border-2 border-dashed border-gray-300 dark:border-gray-700 text-sm font-medium cursor-pointer hover:border-gray-400">
+                  Elegir CSV…
+                </span>
+              </label>
+              {err && <div className="text-sm text-red-600 dark:text-red-400">{err}</div>}
+              {(daily || workouts) && (
+                <div className="rounded-xl bg-gray-50 dark:bg-gray-800/50 p-3 text-sm space-y-1.5">
+                  {daily && <div>📄 <b>{daily.name}</b> · resumen diario</div>}
+                  {workouts && <div>📄 <b>{workouts.name}</b> · entrenamientos</div>}
+                  <div className="pt-1.5 mt-1.5 border-t border-gray-200 dark:border-gray-700 space-y-1" style={{ color: 'var(--bento-faint)' }}>
+                    {daily && <div>❤️ <b>{plan.healthDays.length}</b> días de recuperación ({plan.healthNew} nuevos, {plan.healthUpd} se actualizan)</div>}
+                    {workouts && <div>🏋️ <b>{plan.matched}</b> de {plan.totalSessions} sesiones calzan con un entreno tuyo{plan.unmatched ? ` · ${plan.unmatched} sin match (no se agregan)` : ''}</div>}
+                  </div>
+                </div>
+              )}
+              <div className="flex gap-2 pt-1">
+                <button onClick={onClose} className="flex-1 px-4 py-2.5 rounded-xl bg-gray-100 dark:bg-gray-800 text-sm font-medium">Cancelar</button>
+                <button onClick={apply} disabled={!hasData || busy} className="flex-1 px-4 py-2.5 rounded-xl bg-gray-900 dark:bg-white text-white dark:text-gray-900 text-sm font-semibold disabled:opacity-40">
+                  {busy ? 'Importando…' : 'Importar'}
+                </button>
+              </div>
+            </>
+          ) : (
+            <div className="space-y-3 text-sm">
+              <div className="text-base font-semibold flex items-center gap-2"><span>✅</span> Listo</div>
+              <ul className="space-y-1" style={{ color: 'var(--bento-faint)' }}>
+                <li>❤️ {done.health} días de recuperación importados</li>
+                <li>🏋️ {done.matched} entrenamientos enriquecidos{done.unmatched ? ` · ${done.unmatched} sesiones del watch sin match` : ''}</li>
+              </ul>
+              <button onClick={onClose} className="w-full px-4 py-2.5 rounded-xl bg-gray-900 dark:bg-white text-white dark:text-gray-900 text-sm font-semibold">Cerrar</button>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Pestaña Salud: tendencias de Apple Health (pasos, energía activa, sueño, FC reposo, VO2máx) +
+// recuperación de HeartWatch (HRV, SpO₂, FC durmiendo) + banderas automáticas + evaluación crítica
+// de Claude que cruza sueño/actividad/recuperación con la pérdida de peso y la adherencia. SOLO
+// LECTURA: nunca altera kcal ni totales.
 function HealthView({ state, setState, targets }) {
   const apiKey = state.settings?.anthropicApiKey;
   const cached = state.aiCache?.health;
@@ -4848,6 +5037,7 @@ function HealthView({ state, setState, targets }) {
   const [error, setError] = useState(null);
   const [response, setResponse] = useState(cached?.response || null);
   const [detail, setDetail] = useState(null); // métrica abierta en el detalle día por día
+  const [showImport, setShowImport] = useState(false); // modal de import de HeartWatch
 
   // Serie de 28 días: salud + peso + adherencia (para que Claude correlacione)
   const series = useMemo(() => {
@@ -4867,6 +5057,14 @@ function HealthView({ state, setState, targets }) {
         sueno_horas: dh?.sleepHours != null ? +Number(dh.sleepHours).toFixed(1) : null,
         fc_reposo: dh?.restingHr != null ? Math.round(Number(dh.restingHr)) : null,
         vo2max: dh?.vo2max != null ? +Number(dh.vo2max).toFixed(1) : null,
+        // Recuperación de HeartWatch (importador CSV). null si no hay ese día.
+        hrv_sueno: dh?.hrvSleep != null ? Math.round(Number(dh.hrvSleep)) : null,
+        hrv_vigilia: dh?.hrvWake != null ? Math.round(Number(dh.hrvWake)) : null,
+        fc_durmiendo: dh?.sleepingHr != null ? Math.round(Number(dh.sleepingHr)) : null,
+        fc_sedentaria: dh?.sedentaryHr != null ? Math.round(Number(dh.sedentaryHr)) : null,
+        spo2: dh?.spo2Daily != null ? +Number(dh.spo2Daily).toFixed(1) : null,
+        spo2_durmiendo: dh?.spo2Sleep != null ? +Number(dh.spo2Sleep).toFixed(1) : null,
+        recuperacion_2min: dh?.recovery2min != null ? Math.round(Number(dh.recovery2min)) : null,
         peso_kg: w?.weightKg ?? null,
         cumple_meta: totals && totals.eatenAny ? dayMetsTarget(totals, targets) : null,
         kcal_consumido: totals && totals.eatenAny ? Math.round(totals.kcal) : null,
@@ -4876,7 +5074,7 @@ function HealthView({ state, setState, targets }) {
     return out;
   }, [state.days, state.weights, state.snackBank, state.proteinBank, state.dessertBank, state.antojoCustomItems, targets]);
 
-  const daysWithHealth = series.filter((s) => s.pasos != null || s.sueno_horas != null || s.energia_activa_kcal != null || s.fc_reposo != null).length;
+  const daysWithHealth = series.filter((s) => s.pasos != null || s.sueno_horas != null || s.energia_activa_kcal != null || s.fc_reposo != null || s.hrv_sueno != null || s.spo2 != null || s.fc_durmiendo != null).length;
 
   // Métricas: último valor, promedio 28d, dirección de tendencia (mitad inicial vs final)
   const METRIC_DEFS = [
@@ -4885,6 +5083,11 @@ function HealthView({ state, setState, targets }) {
     { key: 'sueno_horas', label: 'Sueño', icon: '😴', color: 'var(--bento-blue)', goodUp: true, fmt: (v) => v.toFixed(1), unit: 'h' },
     { key: 'fc_reposo', label: 'FC reposo', icon: '❤️', color: 'var(--bento-pos)', goodUp: false, fmt: (v) => Math.round(v), unit: 'lpm' },
     { key: 'vo2max', label: 'VO₂máx', icon: '🫁', color: 'var(--bento-lilac)', goodUp: true, fmt: (v) => v.toFixed(1), unit: '' },
+    // Recuperación de HeartWatch (importador CSV). Solo aparecen cuando hay datos (count>0 más abajo).
+    { key: 'hrv_sueno', label: 'HRV (sueño)', icon: '🫀', color: 'var(--bento-lilac)', goodUp: true, fmt: (v) => Math.round(v), unit: 'ms' },
+    { key: 'fc_durmiendo', label: 'FC durmiendo', icon: '🌙', color: 'var(--bento-blue)', goodUp: false, fmt: (v) => Math.round(v), unit: 'lpm' },
+    { key: 'spo2', label: 'SpO₂', icon: '🩸', color: 'var(--bento-pos)', goodUp: true, fmt: (v) => v.toFixed(0), unit: '%' },
+    { key: 'recuperacion_2min', label: 'Recuperación 2′', icon: '📉', color: 'var(--bento-warm)', goodUp: true, fmt: (v) => Math.round(v), unit: 'lpm' },
   ];
   const metrics = useMemo(() => METRIC_DEFS.map((d) => {
     const vals = series.map((s) => s[d.key]).filter((v) => v != null).map(Number);
@@ -4910,7 +5113,7 @@ function HealthView({ state, setState, targets }) {
     const out = [];
     // Frescura: si la lectura de salud más reciente no es de hoy, dilo explícito. El watch muestra
     // hoy en vivo; sin esto, un dato de ayer en las tarjetas se vería como si fuera "ahora".
-    const healthDates = series.filter((s) => s.pasos != null || s.sueno_horas != null || s.energia_activa_kcal != null || s.fc_reposo != null || s.vo2max != null).map((s) => s.fecha);
+    const healthDates = series.filter((s) => s.pasos != null || s.sueno_horas != null || s.energia_activa_kcal != null || s.fc_reposo != null || s.vo2max != null || s.hrv_sueno != null || s.spo2 != null || s.fc_durmiendo != null).map((s) => s.fecha);
     const lastHealthDate = healthDates.length ? healthDates[healthDates.length - 1] : null;
     if (lastHealthDate && lastHealthDate !== todayKey()) {
       const lbl = formatDateLabel(lastHealthDate, todayKey());
@@ -4924,6 +5127,12 @@ function HealthView({ state, setState, targets }) {
     if (sed >= 2) out.push({ tone: 'warm', text: `${sed} días sedentarios esta semana (<3.000 pasos)` });
     const fc = metrics.find((m) => m.key === 'fc_reposo');
     if (fc && fc.dir === 'up' && fc.count >= 4) out.push({ tone: 'warm', text: 'Tu FC en reposo viene subiendo — ojo con el estrés o sobrecarga' });
+    // Recuperación (HeartWatch): HRV cayendo y/o FC durmiendo subiendo = baja recuperación.
+    const hrv = metrics.find((m) => m.key === 'hrv_sueno');
+    const fcSleep = metrics.find((m) => m.key === 'fc_durmiendo');
+    if (hrv && hrv.dir === 'down' && hrv.count >= 4) out.push({ tone: 'warm', text: 'Tu HRV (variabilidad cardíaca) viene cayendo — señal de recuperación incompleta o estrés acumulado' });
+    if (hrv && hrv.avg != null && hrv.dir !== 'down' && hrv.count >= 6) out.push({ tone: 'pos', text: `HRV estable/al alza (prom ${Math.round(hrv.avg)} ms) — buena recuperación` });
+    if (fcSleep && fcSleep.dir === 'up' && fcSleep.count >= 4) out.push({ tone: 'warm', text: 'Tu FC durmiendo viene subiendo — descanso menos reparador (alcohol, comer tarde, carga o estrés)' });
     const stepsM = metrics.find((m) => m.key === 'pasos');
     if (stepsM && stepsM.dir === 'down' && stepsM.count >= 6) out.push({ tone: 'warm', text: 'Tu actividad (pasos) viene cayendo' });
     const sleepM = metrics.find((m) => m.key === 'sueno_horas');
@@ -4932,7 +5141,7 @@ function HealthView({ state, setState, targets }) {
     return out;
   }, [series, metrics]);
 
-  const aiSeries = useMemo(() => series.filter((s) => s.pasos != null || s.sueno_horas != null || s.energia_activa_kcal != null || s.fc_reposo != null), [series]);
+  const aiSeries = useMemo(() => series.filter((s) => s.pasos != null || s.sueno_horas != null || s.energia_activa_kcal != null || s.fc_reposo != null || s.hrv_sueno != null || s.spo2 != null || s.fc_durmiendo != null), [series]);
   const sig = useMemo(() => hashSig(aiSeries), [aiSeries]);
   const isStale = cached && cached.sig !== sig;
   const cacheOld = cached ? (Date.now() - new Date(cached.generatedAt).getTime()) > 7 * 86400000 : false;
@@ -4957,24 +5166,24 @@ function HealthView({ state, setState, targets }) {
 META DIARIA: ${T.kcalMin}-${T.kcalMax} kcal · proteína ≥ ${T.proteinMin}g. Racha de adherencia actual: ${streak.current} días (mejor: ${streak.best}).
 ${pesoTrend ? `PESO: de ${pesoTrend.from} a ${pesoTrend.to} kg en ${pesoTrend.dias} días (${pesoTrend.delta >= 0 ? '+' : ''}${pesoTrend.delta} kg).` : 'Sin suficientes mediciones de peso en la ventana.'}
 
-DATOS DIARIOS (28 días). Cada fila: pasos, energia_activa_kcal, sueno_horas, fc_reposo (en reposo), vo2max, peso_kg, cumple_meta (si ese día cumplió la meta calórica+proteína), kcal_consumido:
+DATOS DIARIOS (28 días). Cada fila puede traer: pasos, energia_activa_kcal, sueno_horas, fc_reposo (en reposo), vo2max, peso_kg, cumple_meta (si ese día cumplió la meta calórica+proteína), kcal_consumido. Si tiene reloj con HeartWatch, además: hrv_sueno y hrv_vigilia (variabilidad cardíaca en ms — MAYOR es MEJOR recuperación), fc_durmiendo y fc_sedentaria (lpm — menor mejor), spo2 y spo2_durmiendo (% saturación), recuperacion_2min (caída de FC 2 min post-esfuerzo en lpm — MAYOR es mejor fitness cardiovascular). Campos en null = sin dato ese día.
 ${JSON.stringify(aiSeries, null, 2)}
 
 IMPORTANTE: "energia_activa_kcal" y "pasos" son CONTEXTO de Apple Health — NO los restes de las kcal ni del déficit; el TDEE adaptativo ya incorpora la actividad. Restarlos sería doble conteo.
 
 Evalúa CRÍTICAMENTE estas 4 dimensiones, cruzando datos entre sí (no las analices aisladas):
 1. SUEÑO/ACTIVIDAD ↔ PESO Y ADHERENCIA: ¿hay relación entre dormir mal y los días que NO cumple la meta (cumple_meta=false)? ¿baja más de peso las semanas que se mueve más? Cita días/semanas concretos.
-2. RECUPERACIÓN/ESTRÉS: cruza fc_reposo + sueno_horas. ¿Señales de sobrecarga o mal descanso? ¿Debería bajar la intensidad del Speediance alguna semana?
+2. RECUPERACIÓN/ESTRÉS: el HRV (hrv_sueno) es el marcador RECTOR — un HRV que cae es señal de recuperación incompleta, estrés acumulado o sobre-entrenamiento. Cruza hrv_sueno + fc_durmiendo + fc_reposo + sueno_horas: ¿bajó el HRV o subió la FC durmiendo en alguna semana? ¿coincide con noches cortas, alcohol, o más carga de Speediance? ¿Debería bajar la intensidad alguna semana? Si no hay HRV, usa fc_reposo + sueño y dilo. (recuperacion_2min y spo2 son contexto secundario.)
 3. ACTIVIDAD/NEAT: ¿es consistente o irregular? ¿días sedentarios? El NEAT importa para el déficit.
-4. FITNESS: tendencia de vo2max y fc_reposo en el tiempo — ¿su condición mejora?
+4. FITNESS: tendencia de vo2max, fc_reposo y recuperacion_2min en el tiempo — ¿su condición mejora?
 
 Devuelve SOLO JSON, sin markdown:
 {
   "resumen": "1-2 frases del estado general de su salud/recuperación y su relación con el objetivo",
   "peso_y_adherencia": "el cruce sueño/actividad ↔ peso y adherencia, con números/días reales (o 'sin datos suficientes')",
-  "recuperacion": "evaluación de recuperación y estrés (fc_reposo + sueño)",
+  "recuperacion": "evaluación de recuperación y estrés liderada por HRV (hrv_sueno) + fc_durmiendo + fc_reposo + sueño, con números reales",
   "actividad": "consistencia de actividad/NEAT con números",
-  "fitness": "tendencia de fitness cardiovascular (vo2max/fc_reposo)",
+  "fitness": "tendencia de fitness cardiovascular (vo2max/fc_reposo/recuperacion_2min)",
   "recomendaciones": [ { "que": "qué cambiar", "porque": "por qué importa para SU objetivo", "como": "cómo hacerlo, concreto" } ],
   "confianza": "alta|media|baja"
 }
@@ -4998,14 +5207,20 @@ Reglas: 2 a 4 recomendaciones, las más importantes y accionables. Si una dimens
 
   return (
     <div className="px-4 py-4 space-y-4">
-      <div className="px-1">
-        <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2"><span>❤️</span>Salud</h1>
-        <p className="text-sm" style={{ color: 'var(--bento-faint)' }}>Tu actividad, sueño y recuperación — y qué dicen sobre tu objetivo</p>
+      {showImport && <HeartWatchImportModal state={state} setState={setState} onClose={() => setShowImport(false)} />}
+      <div className="px-1 flex items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2"><span>❤️</span>Salud</h1>
+          <p className="text-sm" style={{ color: 'var(--bento-faint)' }}>Tu actividad, sueño y recuperación — y qué dicen sobre tu objetivo</p>
+        </div>
+        <button onClick={() => setShowImport(true)} className="shrink-0 px-3 py-1.5 rounded-xl bg-gray-100 dark:bg-gray-800 text-xs font-semibold flex items-center gap-1.5" title="Importar export CSV de HeartWatch">
+          <span>⌚</span> Importar
+        </button>
       </div>
 
       {daysWithHealth === 0 ? (
         <div className="bento-card text-center text-sm" style={{ borderStyle: 'dashed', color: 'var(--bento-muted)' }}>
-          Aún no hay datos de Apple Health. Configura el atajo "Plan Hugo Health" en tu iPhone (lee pasos, energía activa, sueño, FC y VO₂máx y los manda solo) y acá verás tus tendencias y una evaluación crítica.
+          Aún no hay datos de Apple Health. Configura el atajo "Plan Hugo Health" en tu iPhone (lee pasos, energía activa, sueño, FC y VO₂máx y los manda solo), o usa <b>⌚ Importar</b> para subir un export CSV de HeartWatch. Acá verás tus tendencias y una evaluación crítica.
         </div>
       ) : (
         <>
@@ -5211,6 +5426,9 @@ function ExercisesView({ state, setState, targets }) {
           kcal: Math.round(s.kcal), minutos: s.minutes, volumen_kg: s.volumeKg,
           distancia_km: s.distanceM != null ? +(s.distanceM / 1000).toFixed(1) : null,
           potencia_w: s.avgPowerW, cadencia_rpm: s.avgCadenceRpm, fc_prom: s.avgHr,
+          // Intensidad de HeartWatch (donde haya): RPE, carga, kcal/h y minutos por zona de FC.
+          rpe: s.rpe ?? null, carga: s.trainingLoad ?? null, kcal_h: s.calsPerHour ?? null,
+          zonas_fc_min: s.hrZones || null,
           ejercicios: (s.exercises || []).map((e) => ({
             nombre: e.name, musculo: e.muscle || null,
             series: e.sets ?? null, reps: e.reps ?? null, peso_kg: e.weightKg ?? null,
@@ -5373,7 +5591,9 @@ ${JSON.stringify(trainingHistory, null, 2)}
 
 Cada sesión tiene "tipo": "strength" (fuerza, con ejercicios) o "cardio" (bici/trote/etc., con distancia_km/potencia_w/fc_prom y SIN ejercicios). Considera el BALANCE fuerza vs cardio. En las de fuerza, cada ejercicio puede traer rm1_kg (1RM estimado), volumen_kg y calidad (nota A/B/C/D de técnica). Úsalos: la PROGRESIÓN se ve si rm1_kg/peso_kg/volumen suben sesión a sesión para el mismo ejercicio o grupo (en cardio, si sube distancia/potencia); la TÉCNICA se ve en la nota de calidad (una C/D repetida = problema a corregir).
 
-Evalúa: consistencia/frecuencia, volumen por grupo muscular (¿desbalances? ¿algún músculo descuidado?), progresión (¿sube 1RM/peso/volumen en el tiempo o está estancado?), técnica (notas de calidad bajas) y qué cambiarías.
+Algunas sesiones traen datos de INTENSIDAD del reloj (HeartWatch): rpe (esfuerzo percibido 1-10), carga (carga de entrenamiento), kcal_h (kcal/hora) y zonas_fc_min ({z90,z80,z70,z60,z50} = minutos en cada zona de FC, z90 ≈ máxima). Úsalos para juzgar la DISTRIBUCIÓN de intensidad, no solo el volumen: si casi todo cae en z50-z60 el estímulo cardiovascular es bajo; mucho z80-z90 sostenido sin descanso suficiente es señal de carga alta. Cruza rpe/carga con la recuperación si la mencionas.
+
+Evalúa: consistencia/frecuencia, volumen por grupo muscular (¿desbalances? ¿algún músculo descuidado?), progresión (¿sube 1RM/peso/volumen en el tiempo o está estancado?), distribución de intensidad (zonas de FC / RPE / carga donde haya), técnica (notas de calidad bajas) y qué cambiarías.
 
 Devuelve SOLO JSON, sin markdown:
 {
@@ -5625,6 +5845,14 @@ Reglas:
                           ? `${s.distanceM != null ? ` · ${(s.distanceM / 1000).toFixed(1)} km` : ''}${s.avgPowerW != null ? ` · ${s.avgPowerW} W` : ''}${s.minutes != null ? ` · ${s.minutes} min` : ''}`
                           : `${s.volumeKg ? ` · ${Math.round(s.volumeKg)} kg` : ''}${s.exercises.length ? ` · ${s.exercises.length} ej.` : ''}`}
                       </div>
+                      {(s.avgHr != null || s.rpe != null || s.trainingLoad != null) && (
+                        <div style={{ fontSize: 10.5, color: 'var(--bento-faint)', marginTop: 1 }}>
+                          {[s.avgHr != null ? `❤️ ${Math.round(s.avgHr)} lpm` : null,
+                            s.rpe != null ? `RPE ${s.rpe}` : null,
+                            s.trainingLoad != null ? `carga ${Math.round(s.trainingLoad)}` : null,
+                          ].filter(Boolean).join(' · ')}
+                        </div>
+                      )}
                     </div>
                     <button onClick={() => removeSession(s.date, s.id)}
                       className="shrink-0 text-xs px-2 py-1 rounded-lg" style={{ background: 'rgba(205,122,85,0.12)', color: 'var(--bento-warm)' }} aria-label="Borrar">🗑️</button>

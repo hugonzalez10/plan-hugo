@@ -33,6 +33,40 @@ test('_contentUnion mergea health por fecha (latest no-nulo gana, no duplica)', 
   assert.equal(bridge.health.length, 2);
 });
 
+test('mergea los campos de recuperación de HeartWatch (HRV/SpO₂/FC durmiendo)', () => {
+  assert.ok(gs.HEALTH_MERGE_FIELDS.includes('hrvSleep'), 'hrvSleep no está en HEALTH_MERGE_FIELDS');
+  assert.ok(gs.HEALTH_MERGE_FIELDS.includes('spo2Daily'));
+  assert.ok(gs.HEALTH_MERGE_FIELDS.includes('recovery2min'));
+  const bridge = { health: [] };
+  // El Shortcut postea pasos/sueño; luego el importador CSV postea recuperación → se acumulan.
+  gs._contentUnion(bridge, 'health', [{ date: '2026-06-18', steps: 4960, sleepHours: 5.42 }], false);
+  gs._contentUnion(bridge, 'health', [{ date: '2026-06-18', hrvSleep: 69, hrvWake: 29, sleepingHr: 57.7, spo2Daily: 94, recovery2min: 31 }], false);
+  assert.equal(bridge.health.length, 1, 'duplicó en vez de enriquecer el mismo día');
+  const h = bridge.health[0];
+  assert.equal(h.steps, 4960, 'el merge de recuperación borró los pasos del Shortcut');
+  assert.equal(h.sleepHours, 5.42);
+  assert.equal(h.hrvSleep, 69);
+  assert.equal(h.spo2Daily, 94);
+  assert.equal(h.recovery2min, 31);
+});
+
+test('workouts: hrZones/rpe/carga se mergean sobre la sesión existente (no duplica)', () => {
+  assert.ok(gs.WORKOUT_MERGE_FIELDS.includes('hrZones'));
+  assert.ok(gs.WORKOUT_MERGE_FIELDS.includes('rpe'));
+  const ts = new Date('2026-06-15T07:00:00-04:00').getTime();
+  const bridge = { workouts: [] };
+  // Primero la sesión de Speediance (nombre propio), luego el enriquecimiento de HeartWatch
+  // (mismo nombre+ventana, aporta FC/zonas). Debe mergear, no crear una segunda fila.
+  gs._contentUnion(bridge, 'workouts', [{ name: 'Día 2 — Empuje', date: '2026-06-15', ts, kcal: 540 }], false);
+  gs._contentUnion(bridge, 'workouts', [{ name: 'Día 2 — Empuje', date: '2026-06-15', ts: ts + 60000, avgHr: 117, rpe: 6, trainingLoad: 379, hrZones: { z60: 63.9, z50: 2.1 } }], false);
+  assert.equal(bridge.workouts.length, 1, 'duplicó la sesión en vez de enriquecerla');
+  const w = bridge.workouts[0];
+  assert.equal(w.kcal, 540);
+  assert.equal(w.avgHr, 117);
+  assert.equal(w.rpe, 6);
+  assert.deepEqual(w.hrZones, { z60: 63.9, z50: 2.1 });
+});
+
 test('_prune NO toca health aunque sea viejísima', () => {
   const bridge = {
     meals: [], weights: [], workouts: [], checks: [], water: [], energy: [],

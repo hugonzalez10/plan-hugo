@@ -379,6 +379,11 @@ export function computeExerciseStats(days, refDate, weeks = 8) {
         avgPowerW: w.avgPowerW != null ? Number(w.avgPowerW) : null,
         avgCadenceRpm: w.avgCadenceRpm != null ? Number(w.avgCadenceRpm) : null,
         avgHr: w.avgHr != null ? Number(w.avgHr) : null,
+        // Intensidad de HeartWatch (importador CSV): RPE, carga, kcal/h y zonas de FC.
+        rpe: w.rpe != null ? Number(w.rpe) : null,
+        trainingLoad: w.trainingLoad != null ? Number(w.trainingLoad) : null,
+        calsPerHour: w.calsPerHour != null ? Number(w.calsPerHour) : null,
+        hrZones: (w.hrZones && typeof w.hrZones === 'object') ? w.hrZones : null,
         exercises: exs,
       });
     }
