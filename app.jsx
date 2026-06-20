@@ -739,6 +739,16 @@ function BentoTodayHero({ totals, targets, streak, onStreakClick, weightSeries, 
   const kcalRemaining = Math.round(totals.kcalRemaining);
   const kcalPct = Math.min(100, kcalTarget > 0 ? (kcalEaten / kcalTarget) * 100 : 0);
   const C = 2 * Math.PI * 70;
+  const todayK = todayKey();
+
+  // Ventana del sparkline de Peso en la portada: selector mini desplegable, persistido aparte
+  // (pref de UI local, no entra al sync). El delta sigue la misma ventana.
+  const WEIGHT_WINDOWS = [{ d: 7, label: '7d' }, { d: 28, label: '28d' }, { d: 90, label: '90d' }, { d: Infinity, label: 'Todo' }];
+  const [weightWin, setWeightWin] = useState(() => {
+    try { const v = localStorage.getItem('ph-home-weight-window'); if (v === 'all') return Infinity; const n = Number(v); return [7, 28, 90].includes(n) ? n : 90; } catch { return 90; }
+  });
+  const setWeightWindow = (d) => { setWeightWin(d); try { localStorage.setItem('ph-home-weight-window', d === Infinity ? 'all' : String(d)); } catch {} };
+  const weightWinLabel = (WEIGHT_WINDOWS.find((w) => w.d === weightWin) || WEIGHT_WINDOWS[2]).label;
 
   const macros = [
     { label: 'Proteína', v: Math.round(totals.protein), t: T.proteinMin,   color: 'var(--bento-warm)'   },
@@ -747,8 +757,9 @@ function BentoTodayHero({ totals, targets, streak, onStreakClick, weightSeries, 
     { label: 'Fibra',    v: Math.round(totals.fiber),   t: T.fiberTarget,  color: 'var(--bento-lilac)'  },
   ];
 
-  const ws = (weightSeries || []).slice().filter((w) => w.weightKg != null)
-    .sort((a, b) => ((a.date || '') + (a.time || '')).localeCompare((b.date || '') + (b.time || ''))).slice(-7);
+  const wCutoff = weightWin === Infinity ? '' : shiftDate(todayK, -weightWin);
+  const ws = (weightSeries || []).slice().filter((w) => w.weightKg != null && (!wCutoff || (w.date || '') >= wCutoff))
+    .sort((a, b) => ((a.date || '') + (a.time || '')).localeCompare((b.date || '') + (b.time || '')));
   const lastWeight = ws.length ? ws[ws.length - 1] : null;
   const firstWeight = ws.length > 1 ? ws[0] : null;
   const deltaKg = lastWeight && firstWeight ? Math.round((lastWeight.weightKg - firstWeight.weightKg) * 10) / 10 : null;
@@ -763,7 +774,6 @@ function BentoTodayHero({ totals, targets, streak, onStreakClick, weightSeries, 
 
   const days = state?.days || {};
   const chips = [];
-  const todayK = todayKey();
   for (let i = 6; i >= 0; i--) {
     const k = shiftDate(todayK, -i);
     const day = days[k];
@@ -840,10 +850,22 @@ function BentoTodayHero({ totals, targets, streak, onStreakClick, weightSeries, 
 
       {/* Peso */}
       <div className="bento-card" style={{ minWidth: 0 }}>
-        <div className="flex justify-between items-baseline mb-3">
-          <span className="text-sm font-semibold" style={{ letterSpacing: '-0.01em' }}>Peso</span>
+        <div className="flex justify-between items-center mb-3">
+          <div className="flex items-center gap-1.5" style={{ minWidth: 0 }}>
+            <span className="text-sm font-semibold" style={{ letterSpacing: '-0.01em' }}>Peso</span>
+            <select
+              value={weightWin === Infinity ? 'all' : String(weightWin)}
+              onChange={(e) => setWeightWindow(e.target.value === 'all' ? Infinity : Number(e.target.value))}
+              aria-label="Ventana del gráfico de peso"
+              className="bento-mono"
+              style={{ fontSize: 10, lineHeight: 1.4, color: 'var(--bento-muted)', background: 'var(--bento-surface)', border: '1px solid var(--bento-hairline)', borderRadius: 6, padding: '1px 4px', cursor: 'pointer', appearance: 'none', WebkitAppearance: 'none' }}>
+              {WEIGHT_WINDOWS.map((w) => (
+                <option key={w.label} value={w.d === Infinity ? 'all' : String(w.d)}>{w.label}</option>
+              ))}
+            </select>
+          </div>
           {deltaKg != null && (
-            <span className="bento-mono text-xs" style={{ color: deltaKg < 0 ? 'var(--bento-pos)' : deltaKg > 0 ? 'var(--bento-warm)' : 'var(--bento-faint)' }}>{deltaKg > 0 ? '+' : ''}{deltaKg} kg / 7d</span>
+            <span className="bento-mono text-xs" style={{ color: deltaKg < 0 ? 'var(--bento-pos)' : deltaKg > 0 ? 'var(--bento-warm)' : 'var(--bento-faint)' }}>{deltaKg > 0 ? '+' : ''}{deltaKg} kg / {weightWinLabel}</span>
           )}
         </div>
         {lastWeight ? (
