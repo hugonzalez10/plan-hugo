@@ -8893,6 +8893,26 @@ function WeightView({ state, setState, targets }) {
   });
   const last = weights[0];
 
+  // Tabla de historial: columnas de composición + circunferencias (sin segmentos),
+  // mostrando solo las que tengan al menos un dato en el set de mediciones.
+  const HIST_SHORT = {
+    weightKg: 'Peso', bodyFatPct: '%Gr', score: 'Score',
+    fatKg: 'Grasa', muscleKg: 'Músc', skeletalMuscleKg: 'M.esq', fatFreeMassKg: 'MLG',
+    subcutaneousFatKg: 'Subcut', waterKg: 'Agua', proteinKg: 'Prot', boneKg: 'Hueso',
+    musclePct: '%Músc', waterPct: '%Agua', proteinPct: '%Prot',
+    bmi: 'IMC', ffmi: 'FFMI', metabolicAge: 'Edad', visceralFat: 'Visc', basalMetabolismKcal: 'TMB',
+    waistHipRatio: 'C/C', referenceWeightKg: 'PesoRef',
+    neckCm: 'Cuello', chestCm: 'Pecho', waistCm: 'Cintura', hipCm: 'Cadera',
+    bicepCm: 'Bíceps', armCm: 'Brazo', forearmCm: 'Antebr', thighCm: 'Muslo', calfCm: 'Pant',
+  };
+  const histCols = WEIGHT_FIELDS
+    .filter((wf) => ['main', 'mass', 'pct', 'idx', 'circ'].includes(wf.cat))
+    .filter((wf) => weights.some((w) => w[wf.key] != null));
+  const histFmt = (wf, v) => {
+    const d = wf.step === '1' ? 0 : wf.step === '0.01' ? 2 : 1;
+    return Number(v).toFixed(d);
+  };
+
   const remove = (id) => {
     if (!confirm('¿Eliminar esta medición?')) return;
     setState((prev) => {
@@ -9025,23 +9045,46 @@ function WeightView({ state, setState, targets }) {
           <div className="px-4 pt-3.5 pb-2">
             <div className="bento-label">Historial</div>
           </div>
-          <div>
-            {weights.map((w) => (
-              <div key={w.id} className="flex items-center gap-3 px-4 py-2.5" style={{ borderTop: '1px solid var(--bento-hairline)' }}>
-                <div className="w-16 shrink-0" style={{ fontSize: 12, color: 'var(--bento-faint)' }}>{w.date.slice(5)}{w.time ? ` ${w.time}` : ''}</div>
-                <div className="flex-1 min-w-0 flex flex-wrap gap-x-3 gap-y-0.5 text-xs">
-                  {w.weightKg != null && <span><span className="bento-num">{Number(w.weightKg).toFixed(1)}</span> kg</span>}
-                  {w.bodyFatPct != null && <span><span className="bento-num">{Number(w.bodyFatPct).toFixed(1)}</span>% grasa</span>}
-                  {w.skeletalMuscleKg != null && <span><span className="bento-num">{Number(w.skeletalMuscleKg).toFixed(1)}</span> kg m.esq.</span>}
-                  {w.bmi != null && <span><span className="bento-num">{Number(w.bmi).toFixed(1)}</span> IMC</span>}
-                  {w.waistCm != null && <span><span className="bento-num">{Number(w.waistCm).toFixed(1)}</span> cintura</span>}
-                  {w.visceralFat != null && <span><span className="bento-num">{Number(w.visceralFat).toFixed(1)}</span> visc.</span>}
-                </div>
-                <button onClick={() => setEditing(w)} className="text-xs font-medium px-2 py-1 rounded-lg" style={{ background: 'var(--bento-surface)' }}>Editar</button>
-                <button onClick={() => remove(w.id)} aria-label="Borrar"
-                  className="shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-sm" style={{ background: 'rgba(205,122,85,0.12)', color: 'var(--bento-warm)' }}>✕</button>
-              </div>
-            ))}
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ borderCollapse: 'separate', borderSpacing: 0, width: 'max-content', fontSize: 12 }}>
+              <thead>
+                <tr>
+                  <th style={{ position: 'sticky', left: 0, zIndex: 3, background: 'var(--bento-card)', textAlign: 'left', padding: '6px 10px', borderBottom: '1px solid var(--bento-hairline)', borderRight: '1px solid var(--bento-hairline)' }}>
+                    <span className="bento-label">Fecha</span>
+                  </th>
+                  {histCols.map((wf) => (
+                    <th key={wf.key} title={wf.label + (wf.unit ? ` (${wf.unit})` : '')}
+                      style={{ padding: '6px 10px', textAlign: 'right', whiteSpace: 'nowrap', borderBottom: '1px solid var(--bento-hairline)', color: 'var(--bento-faint)', fontWeight: 600 }}>
+                      {HIST_SHORT[wf.key] || wf.label}
+                    </th>
+                  ))}
+                  <th style={{ position: 'sticky', right: 0, zIndex: 3, background: 'var(--bento-card)', borderBottom: '1px solid var(--bento-hairline)', borderLeft: '1px solid var(--bento-hairline)' }} />
+                </tr>
+              </thead>
+              <tbody>
+                {weights.map((w) => (
+                  <tr key={w.id}>
+                    <td style={{ position: 'sticky', left: 0, zIndex: 2, background: 'var(--bento-card)', padding: '6px 10px', whiteSpace: 'nowrap', borderTop: '1px solid var(--bento-hairline)', borderRight: '1px solid var(--bento-hairline)', color: 'var(--bento-faint)' }}>
+                      {w.date.slice(5)}{w.time ? <span style={{ opacity: 0.7 }}> {w.time}</span> : ''}
+                    </td>
+                    {histCols.map((wf) => (
+                      <td key={wf.key} style={{ padding: '6px 10px', textAlign: 'right', whiteSpace: 'nowrap', borderTop: '1px solid var(--bento-hairline)' }}>
+                        {w[wf.key] != null
+                          ? <span className="bento-num">{histFmt(wf, w[wf.key])}</span>
+                          : <span style={{ color: 'var(--bento-faint)' }}>·</span>}
+                      </td>
+                    ))}
+                    <td style={{ position: 'sticky', right: 0, zIndex: 2, background: 'var(--bento-card)', padding: '6px 10px', borderTop: '1px solid var(--bento-hairline)', borderLeft: '1px solid var(--bento-hairline)', whiteSpace: 'nowrap' }}>
+                      <div className="flex items-center gap-2 justify-end">
+                        <button onClick={() => setEditing(w)} className="text-xs font-medium px-2 py-1 rounded-lg" style={{ background: 'var(--bento-surface)' }}>Editar</button>
+                        <button onClick={() => remove(w.id)} aria-label="Borrar"
+                          className="shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-sm" style={{ background: 'rgba(205,122,85,0.12)', color: 'var(--bento-warm)' }}>✕</button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </div>
       )}
