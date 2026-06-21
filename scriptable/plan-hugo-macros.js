@@ -123,7 +123,7 @@ function buildWidget(data, stale, family) {
   head.addSpacer();
   const df = new DateFormatter();
   df.locale = "es";
-  df.setFormat("EEE d MMM");
+  df.dateFormat = "EEE d MMM";
   const dateTxt = head.addText(df.string(new Date()));
   dateTxt.font = Font.systemFont(11);
   dateTxt.textColor = COLORS.dim;
