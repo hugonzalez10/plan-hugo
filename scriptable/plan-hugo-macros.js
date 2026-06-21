@@ -102,8 +102,62 @@ function barImage(pct, color, w, h) {
   return ctx.getImage();
 }
 
+// ── Pantalla de bloqueo (accessory*) ─────────────────────────────────────────────
+// En el bloqueo el espacio es mínimo y iOS tiñe todo de un solo color (monocromo),
+// así que se usan layouts compactos de solo texto (las barras de color no aplican).
+const rnd = (n) => Math.round(n || 0);
+
+function macroData(data) {
+  const t  = (data && data.totals)  || {};
+  const tg = Object.assign({}, DEFAULT_TARGETS, (data && data.targets) || {});
+  const kcal = (t.kcalIn != null) ? t.kcalIn : (t.kcal || 0);
+  return { t, tg, kcal };
+}
+
+// Rectangular (debajo del reloj): 3 líneas.
+function buildRectangular(data) {
+  const { t, tg, kcal } = macroData(data);
+  const w = new ListWidget();
+  const l1 = w.addText(`Macros · ${rnd(kcal)} kcal`);
+  l1.font = Font.semiboldSystemFont(13);
+  w.addSpacer(2);
+  const l2 = w.addText(`P ${rnd(t.protein)}/${rnd(tg.proteinMin)}   C ${rnd(t.carbs)}/${rnd(tg.carbsTarget)}`);
+  l2.font = Font.systemFont(12);
+  w.addSpacer(1);
+  const l3 = w.addText(`G ${rnd(t.fat)}/${rnd(tg.fatTarget)}   F ${rnd(t.fiber)}/${rnd(tg.fiberTarget)}`);
+  l3.font = Font.systemFont(12);
+  return w;
+}
+
+// Inline (junto al reloj): una sola línea.
+function buildInline(data) {
+  const { t } = macroData(data);
+  const w = new ListWidget();
+  const txt = w.addText(`P${rnd(t.protein)} C${rnd(t.carbs)} G${rnd(t.fat)} F${rnd(t.fiber)}`);
+  txt.font = Font.systemFont(13);
+  return w;
+}
+
+// Circular: anillo con la proteína (la prioridad de Hugo).
+function buildCircular(data) {
+  const { t, tg } = macroData(data);
+  const w = new ListWidget();
+  const col = w.addStack();
+  col.layoutVertically();
+  col.centerAlignContent();
+  const r1 = col.addStack(); r1.addSpacer();
+  const v = r1.addText(`${rnd(t.protein)}`); v.font = Font.boldSystemFont(17); r1.addSpacer();
+  const r2 = col.addStack(); r2.addSpacer();
+  const lab = r2.addText(`/${rnd(tg.proteinMin)}P`); lab.font = Font.systemFont(9); r2.addSpacer();
+  return w;
+}
+
 // ── Render del widget ──────────────────────────────────────────────────────────
 function buildWidget(data, stale, family) {
+  if (family === 'accessoryRectangular') return buildRectangular(data);
+  if (family === 'accessoryInline')      return buildInline(data);
+  if (family === 'accessoryCircular')    return buildCircular(data);
+
   const t  = (data && data.totals)  || {};
   const tg = Object.assign({}, DEFAULT_TARGETS, (data && data.targets) || {});
 
