@@ -118,8 +118,9 @@ function macroData(data) {
 function buildRectangular(data) {
   const { t, tg, kcal } = macroData(data);
   const w = new ListWidget();
-  const l1 = w.addText(`Macros · ${rnd(kcal)}/${rnd(tg.kcalMax)} kcal`);
-  l1.font = Font.semiboldSystemFont(13);
+  const eaten = rnd(kcal), max = rnd(tg.kcalMax), rem = Math.max(0, max - eaten);
+  const l1 = w.addText(`${eaten}/${max} kcal · quedan ${rem}`);
+  l1.font = Font.semiboldSystemFont(12);
   w.addSpacer(2);
   const l2 = w.addText(`P ${rnd(t.protein)}/${rnd(tg.proteinMin)}   C ${rnd(t.carbs)}/${rnd(tg.carbsTarget)}`);
   l2.font = Font.systemFont(12);
