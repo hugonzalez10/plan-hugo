@@ -119,7 +119,7 @@ function buildRectangular(data) {
   const { t, tg, kcal } = macroData(data);
   const w = new ListWidget();
   const eaten = rnd(kcal), max = rnd(tg.kcalMax), rem = Math.max(0, max - eaten);
-  const l1 = w.addText(`${eaten}/${max} kcal · quedan ${rem}`);
+  const l1 = w.addText(`${eaten}/${max} · quedan ${rem}`);
   l1.font = Font.semiboldSystemFont(12);
   w.addSpacer(2);
   const l2 = w.addText(`P ${rnd(t.protein)}/${rnd(tg.proteinMin)}   C ${rnd(t.carbs)}/${rnd(tg.carbsTarget)}`);
@@ -199,6 +199,13 @@ function buildWidget(data, stale, family) {
   const water = sub.addText(`💧 ${waterL} / ${waterTgtL} L`);
   water.font = Font.systemFont(12);
   water.textColor = COLORS.dim;
+
+  // Línea "quedan": kcal restantes del día
+  w.addSpacer(2);
+  const remKcal = Math.max(0, Math.round(tg.kcalMax) - Math.round(kcalEaten));
+  const remLine = w.addText(`Quedan ${remKcal} kcal`);
+  remLine.font = Font.systemFont(11);
+  remLine.textColor = COLORS.dim;
 
   w.addSpacer(compact ? 8 : 10);
 
