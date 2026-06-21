@@ -31,6 +31,7 @@ const factory = new Function(`
     _norm, _sig, _entryTs, _contentUnion, _totals, _prune, _mergeInto, _updateInto, _reconcile, _authed,
     _mealSlot, _slotByTime, _entryFromParams, _checkRedundant,
     SECTIONS, WINDOW_MS, RETENTION, SNAPSHOT_RETENTION_DAYS,
+    HEALTH_MERGE_FIELDS, WORKOUT_MERGE_FIELDS, ENERGY_MERGE_FIELDS, WEIGHT_MERGE_FIELDS,
   };
 `);
 

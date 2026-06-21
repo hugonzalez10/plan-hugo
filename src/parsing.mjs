@@ -179,3 +179,147 @@ export function normalizeRoutine(j) {
     days,
   };
 }
+
+// — Parsers de export CSV de HeartWatch (app de Apple Watch). Dos archivos relevantes:
+//   · resumen diario   → recuperación/SpO₂/HRV por día (alimenta day.health, SOLO CONTEXTO)
+//   · resumen entrenos → zonas FC, carga, RPE por sesión (enriquece day.exercise[])
+// Son CSV estructurados con headers conocidos (sin IA). Gotcha de números: HeartWatch usa punto
+// decimal para casi todo (64.6, 95.0) pero coma para peso/distancia (103,3, 1,99); _num trata la
+// coma como decimal cuando no hay punto. Duraciones/zonas vienen HH:MM:SS → _hmsToMin a minutos.
+
+// Parser CSV genérico: campos entrecomillados, comas dentro de comillas (ej. "domingo, 14 jun."),
+// "" como comilla escapada. Devuelve filas como arrays de strings; salta líneas en blanco.
+export function parseCsvRows(text) {
+  const rows = [];
+  let row = [], field = '', inQuotes = false;
+  const s = String(text || '');
+  const pushRow = () => { row.push(field); field = ''; if (row.length > 1 || row[0] !== '') rows.push(row); row = []; };
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (inQuotes) {
+      if (ch === '"') { if (s[i + 1] === '"') { field += '"'; i++; } else inQuotes = false; }
+      else field += ch;
+    } else if (ch === '"') inQuotes = true;
+    else if (ch === ',') { row.push(field); field = ''; }
+    else if (ch === '\n' || ch === '\r') { if (ch === '\r' && s[i + 1] === '\n') i++; pushRow(); }
+    else field += ch;
+  }
+  if (field !== '' || row.length) pushRow();
+  return rows;
+}
+
+// Número tolerante a locale: "" → null; "1,99" → 1.99 (coma decimal); "64.6" → 64.6.
+function _num(v) {
+  if (v == null) return null;
+  let s = String(v).trim();
+  if (!s) return null;
+  if (s.indexOf('.') < 0 && s.indexOf(',') >= 0) s = s.replace(',', '.');
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+}
+
+// "HH:MM:SS" → minutos (float). "" o formato no esperado → null.
+function _hmsToMin(v) {
+  const m = String(v || '').trim().match(/^(\d+):(\d{2}):(\d{2})$/);
+  return m ? (+m[1]) * 60 + (+m[2]) + (+m[3]) / 60 : null;
+}
+
+// Fecha YYYY-MM-DD desde la columna ISO ("2026-06-14T04:00:00-04:00" → "2026-06-14").
+function _isoDate(iso) {
+  const m = String(iso || '').match(/^(\d{4}-\d{2}-\d{2})/);
+  return m ? m[1] : null;
+}
+
+// Resumen diario de HeartWatch → filas {date, hrvSleep, hrvWake, sleepingHr, sedentaryHr,
+// spo2Daily, spo2Sleep, recovery2min, sleepHours}. Los signos vitales en 0 (celda vacía o promedio
+// nulo) se descartan. Devuelve {ok, days[], reason?}.
+export function parseHeartWatchDaily(text) {
+  const rows = parseCsvRows(text);
+  if (rows.length < 2) return { ok: false, reason: 'CSV sin filas de datos', days: [] };
+  const head = rows[0];
+  const col = (name) => head.indexOf(name);
+  // Firma del resumen diario: columna ISO + HRV de sueño (no está en el de entrenos).
+  if (col('ISO') < 0 || col('Sueño-HRV-ms') < 0) return { ok: false, reason: 'No parece el CSV de resumen diario de HeartWatch', days: [] };
+  const map = {
+    hrvSleep: col('Sueño-HRV-ms'),
+    hrvWake: col('Despertar-HRV-ms'),
+    sleepingHr: col('Sueño-lpm'),
+    sedentaryHr: col('Sed-Medio.-lpm'),
+    spo2Daily: col('SpO2 Diaria-%'),
+    spo2Sleep: col('SpO2 Durmiendo-%'),
+    recovery2min: col('Recuperación de 2 min-lpm'),
+  };
+  const isoCol = col('ISO'), sleepCol = col('Tiempo dormido');
+  const days = [];
+  for (let r = 1; r < rows.length; r++) {
+    const cells = rows[r];
+    const date = _isoDate(cells[isoCol]);
+    if (!date) continue;
+    const h = { date };
+    let any = false;
+    for (const k of Object.keys(map)) {
+      const idx = map[k];
+      if (idx < 0) continue;
+      const v = _num(cells[idx]);
+      if (v != null && v > 0) { h[k] = v; any = true; }
+    }
+    if (sleepCol >= 0) {
+      const mins = _hmsToMin(cells[sleepCol]);
+      if (mins != null && mins > 0) { h.sleepHours = +(mins / 60).toFixed(2); any = true; }
+    }
+    if (any) days.push(h);
+  }
+  return { ok: true, days };
+}
+
+// Mapa Tipo (HeartWatch) → categoría interna strength|cardio. Lo demás queda null (sin clasificar).
+const HW_WORKOUT_TYPE = {
+  'Entrenamiento con pesas': 'strength',
+  'Remo': 'cardio', 'Ciclismo': 'cardio', 'Carrera': 'cardio', 'Caminata': 'cardio', 'Elíptica': 'cardio',
+};
+
+// Resumen de entrenamientos de HeartWatch → sesiones {date, ts, name, type, minutes, avgHr, rpe,
+// trainingLoad, cals, calsPerHour, distanceKm, hrZones{z90..z50 en min}}. Devuelve {ok, sessions[], reason?}.
+export function parseHeartWatchWorkouts(text) {
+  const rows = parseCsvRows(text);
+  if (rows.length < 2) return { ok: false, reason: 'CSV sin filas de datos', sessions: [] };
+  const head = rows[0];
+  const col = (name) => head.indexOf(name);
+  if (col('ISO') < 0 || col('Duración') < 0 || col('Tipo') < 0) return { ok: false, reason: 'No parece el CSV de entrenamientos de HeartWatch', sessions: [] };
+  const c = {
+    iso: col('ISO'), dur: col('Duración'), tipo: col('Tipo'), avgHr: col('lpm-Medio.'),
+    rpe: col('rpe'), carga: col('Carga'), cals: col('Cals'), calsH: col('Cals/h'), km: col('km'),
+    z90: col('90%+-mins.'), z80: col('80-90%-mins.'), z70: col('70-80%-mins.'), z60: col('60-70%-mins.'), z50: col('50-60%-mins.'),
+  };
+  const at = (cells, i) => (i >= 0 ? cells[i] : undefined);
+  const sessions = [];
+  for (let r = 1; r < rows.length; r++) {
+    const cells = rows[r];
+    const iso = at(cells, c.iso);
+    const date = _isoDate(iso);
+    if (!date) continue;
+    const ts = Date.parse(iso);
+    const tipo = String(at(cells, c.tipo) || '').trim();
+    const zones = {};
+    for (const [zk, ci] of [['z90', c.z90], ['z80', c.z80], ['z70', c.z70], ['z60', c.z60], ['z50', c.z50]]) {
+      const mn = _hmsToMin(at(cells, ci));
+      if (mn != null && mn > 0) zones[zk] = +mn.toFixed(1);
+    }
+    const min = _hmsToMin(at(cells, c.dur));
+    sessions.push({
+      date,
+      ts: Number.isFinite(ts) ? ts : null,
+      name: tipo || 'Entrenamiento',
+      type: HW_WORKOUT_TYPE[tipo] || null,
+      minutes: min != null ? +min.toFixed(1) : null,
+      avgHr: _num(at(cells, c.avgHr)),
+      rpe: _num(at(cells, c.rpe)),
+      trainingLoad: _num(at(cells, c.carga)),
+      cals: _num(at(cells, c.cals)),
+      calsPerHour: _num(at(cells, c.calsH)),
+      distanceKm: _num(at(cells, c.km)),
+      hrZones: Object.keys(zones).length ? zones : null,
+    });
+  }
+  return { ok: true, sessions };
+}

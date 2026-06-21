@@ -9,7 +9,7 @@ import {
   extraPlanSlot, resolveColacion, computeDayTotals, chatMealSig, sameWindow, dedupeDayExtras,
 } from './meals.mjs';
 import {
-  WEIGHT_FIELDS, SEGMENT_FIELDS, STRING_FIELDS, WORKOUT_EXTRA_FIELDS, BODY_TYPE_OPTIONS,
+  WEIGHT_FIELDS, SEGMENT_FIELDS, STRING_FIELDS, WORKOUT_EXTRA_FIELDS, BODY_TYPE_OPTIONS, HEALTH_MERGE_FIELDS,
 } from './fields.mjs';
 
 export const GIST_FILENAME = 'plan-hugo.json';
@@ -334,6 +334,7 @@ export function mergeBridge(state, bridge) {
       ex[f] = (f === 'type' || f === 'activity') ? w[f] : num(w[f]);
     }
     if (Array.isArray(w.exercises) && w.exercises.length) ex.exercises = w.exercises;
+    if (w.hrZones && typeof w.hrZones === 'object' && Object.keys(w.hrZones).length) ex.hrZones = w.hrZones;
     d.exercise.push(ex);
     importedIds.add(w.id); added.workouts++;
   }
@@ -417,8 +418,17 @@ export function mergeBridge(state, bridge) {
       if (!dk) continue; // sin fecha ubicable
       const d = ensureDay(dk);
       const next = { ...(d.health || {}) };
-      for (const k of ['steps', 'activeEnergyKcal', 'sleepHours', 'restingHr', 'vo2max']) {
-        if (h[k] != null && h[k] !== '') next[k] = Number(h[k]);
+      // FC/HRV/SpO₂/VO₂máx nunca son 0 en una persona viva: un 0 es el promedio vacío del atajo
+      // (no encontró muestra de hoy) o una celda vacía del CSV → se descarta para no mostrar
+      // "FC reposo 0 lpm" ni pisar el valor previo. Pasos/energía/sueño SÍ pueden ser 0
+      // legítimamente, así que solo se filtran las métricas de signos vitales.
+      const POSITIVE_ONLY = new Set(['restingHr', 'vo2max', 'hrvSleep', 'hrvWake', 'sleepingHr', 'sedentaryHr', 'spo2Daily', 'spo2Sleep', 'recovery2min']);
+      for (const k of HEALTH_MERGE_FIELDS) {
+        if (h[k] == null || h[k] === '') continue;
+        const v = Number(h[k]);
+        if (!Number.isFinite(v)) continue;
+        if (POSITIVE_ONLY.has(k) && v <= 0) continue;
+        next[k] = v;
       }
       if (h.ts != null) next.healthTs = Number(h.ts);
       d.health = next;
