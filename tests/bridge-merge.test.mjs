@@ -133,6 +133,18 @@ test('health: overwrite por fecha, idempotente y sin usar importedIds', () => {
   assert.equal(r2.state.days['2026-06-10'].health.activeEnergyKcal, 400, 'conserva lo no reenviado');
 });
 
+test('health: restingHr/vo2max <= 0 (promedio vacío del atajo) se descarta, no pisa el previo', () => {
+  const r1 = mergeBridge(baseState(), baseBridge({ health: [{ date: '2026-06-10', restingHr: 58, vo2max: 42 }] }));
+  assert.equal(r1.state.days['2026-06-10'].health.restingHr, 58);
+  // re-post con 0 (el atajo no halló muestra de hoy) NO debe pisar el 58 ni guardar 0
+  const r2 = mergeBridge(r1.state, baseBridge({ health: [{ date: '2026-06-10', restingHr: 0, vo2max: 0 }] }));
+  assert.equal(r2.state.days['2026-06-10'].health.restingHr, 58, 'el 0 pisó la FC válida');
+  assert.equal(r2.state.days['2026-06-10'].health.vo2max, 42, 'el 0 pisó el VO2max válido');
+  // pasos SÍ pueden ser 0 legítimamente
+  const r3 = mergeBridge(baseState(), baseBridge({ health: [{ date: '2026-06-11', steps: 0 }] }));
+  assert.equal(r3.state.days['2026-06-11'].health.steps, 0, 'pasos=0 es legítimo, no debe descartarse');
+});
+
 test('healthDateKey normaliza el dd-MM-yy del atajo iOS (la etiqueta date es la autoridad)', () => {
   // El atajo manda "16-06-26" (dd-MM-yy); antes caía al fallback de ts. Ahora es la autoridad.
   assert.equal(healthDateKey({ date: '16-06-26' }), '2026-06-16');
