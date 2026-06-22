@@ -44,7 +44,7 @@ const isLocatable = (it) => (typeof it.date === 'string' && it.date) || it.ts !=
 export function normalizeBridgePayload(bridge) {
   const b = bridge || {};
   const warnings = [];
-  const dropped = { meals: 0, weights: 0, workouts: 0, water: 0, health: 0, checks: 0 };
+  const dropped = { meals: 0, weights: 0, workouts: 0, water: 0, health: 0, checks: 0, lifts: 0 };
 
   const meals = (Array.isArray(b.meals) ? b.meals : []).flatMap((raw, i) => {
     if (raw == null) { dropped.meals++; return []; }
@@ -98,7 +98,18 @@ export function normalizeBridgePayload(bridge) {
     return [{ ...raw }];
   });
 
-  const payload = { ...b, meals, weights, workouts, water, health, checks };
+  // lifts (serie de fuerza): como workouts, exige id + fecha/ts ubicable; el detalle de la serie
+  // (weightKg/reps/rpe) lo normaliza el merge. Sin id no se puede deduplicar/borrar; sin fecha no
+  // se puede ubicar en un día.
+  const lifts = (Array.isArray(b.lifts) ? b.lifts : []).flatMap((raw, i) => {
+    if (raw == null) { dropped.lifts++; return []; }
+    const label = `lift ${raw.id ?? `#${i}`}`;
+    if (isAbsent(raw.id)) { warnings.push(`${label}: sin id — descartado`); dropped.lifts++; return []; }
+    if (!isLocatable(raw)) { warnings.push(`${label}: sin date ni ts — descartado`); dropped.lifts++; return []; }
+    return [{ ...raw }];
+  });
+
+  const payload = { ...b, meals, weights, workouts, water, health, checks, lifts };
   return { payload, dropped, warnings };
 }
 

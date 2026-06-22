@@ -187,6 +187,7 @@ export async function fetchBridge(url, token) {
     checks: Array.isArray(data.checks) ? data.checks : [],
     water: Array.isArray(data.water) ? data.water : [],
     health: Array.isArray(data.health) ? data.health : [],
+    lifts: Array.isArray(data.lifts) ? data.lifts : [],
     // Singletons (objetos, no arrays). El doGet del bridge devuelve el archivo completo, así que
     // basta con forwardearlos acá para que fluyan bridge→app (energy no está y por eso nunca fluyó).
     routine: (data.routine && typeof data.routine === 'object' && !Array.isArray(data.routine)) ? data.routine : null,
@@ -246,11 +247,11 @@ export function mergeBridge(state, rawBridge) {
   const removedBridgeIds = new Set((state.bridge?.removedBridgeIds) || []);
   const days = { ...(state.days || {}) };
   const weights = Array.isArray(state.weights) ? [...state.weights] : [];
-  const added = { meals: 0, weights: 0, workouts: 0, checks: 0, water: 0, health: 0 };
+  const added = { meals: 0, weights: 0, workouts: 0, checks: 0, water: 0, health: 0, lifts: 0 };
 
   const ensureDay = (dk) => {
     const base = days[dk] || { eaten: {}, snackId1: null, snackId2: null, proteinId: null, water: { ml: 0 }, skipped: [], nudgesDismissed: [], dessertAlmuerzoId: null, dessertCenaId: null, notes: null };
-    days[dk] = { ...base, extras: [...(base.extras || [])], exercise: [...(base.exercise || [])] };
+    days[dk] = { ...base, extras: [...(base.extras || [])], exercise: [...(base.exercise || [])], lifts: [...(base.lifts || [])] };
     return days[dk];
   };
 
@@ -349,12 +350,39 @@ export function mergeBridge(state, rawBridge) {
     const ex = { id: w.id, ts: w.ts != null ? w.ts : Date.now(), name: w.name || 'Entrenamiento', kcal: num(w.kcal) };
     for (const f of WORKOUT_EXTRA_FIELDS) {
       if (w[f] == null) continue;
-      ex[f] = (f === 'type' || f === 'activity') ? w[f] : num(w[f]);
+      // type/activity/hrZonePct son strings (hrZonePct = "86/12/1/0/0"); el resto, numérico.
+      ex[f] = (f === 'type' || f === 'activity' || f === 'hrZonePct') ? w[f] : num(w[f]);
     }
     if (Array.isArray(w.exercises) && w.exercises.length) ex.exercises = w.exercises;
     if (w.hrZones && typeof w.hrZones === 'object' && Object.keys(w.hrZones).length) ex.hrZones = w.hrZones;
     d.exercise.push(ex);
     importedIds.add(w.id); added.workouts++;
+  }
+
+  // Sección `lifts`: una SERIE de fuerza por fila (ejercicio ancla + nº de serie). Espejo del loop
+  // de workouts: dedup por id y luego por contenido (ejercicio|nº de serie|fecha), import a
+  // day.lifts[]. Solo plumbing a estado (no hay UI todavía); fluye al estado persistido vía `days`.
+  for (const l of (bridge.lifts || [])) {
+    if (l.id == null || removedBridgeIds.has(l.id)) continue;
+    const dk = bridgeDateKey(l);
+    const d = ensureDay(dk);
+    if (d.lifts.some((x) => x.id === l.id)) { importedIds.add(l.id); continue; }
+    const lname = normalizeName(l.exercise);
+    if (d.lifts.some((x) => normalizeName(x.exercise) === lname && (x.setNumber ?? null) === (l.setNumber ?? null))) {
+      importedIds.add(l.id); continue;
+    }
+    d.lifts.push({
+      id: l.id, ts: l.ts != null ? l.ts : Date.now(), date: dk,
+      exercise: l.exercise || 'Ejercicio',
+      setNumber: l.setNumber != null ? num(l.setNumber) : null,
+      weightKg: l.weightKg != null ? num(l.weightKg) : null,
+      reps: l.reps != null ? num(l.reps) : null,
+      rpe: l.rpe != null ? num(l.rpe) : null,
+      isPR: l.isPR === true || l.isPR === 'true' || l.isPR === 1,
+      bilateralFlag: l.bilateralFlag === true || l.bilateralFlag === 'true' || l.bilateralFlag === 1,
+      source: l.source || 'skill-chat',
+    });
+    importedIds.add(l.id); added.lifts++;
   }
 
   for (const wt of bridge.weights) {

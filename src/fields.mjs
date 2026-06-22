@@ -5,7 +5,10 @@
 // Campos escalares de un entrenamiento que deben sobrevivir el round-trip por el bridge
 // (igual que WEIGHT_FIELDS para composición). El array `exercises` y el objeto `hrZones` se
 // tratan aparte (no escalares). rpe/trainingLoad/calsPerHour los aporta HeartWatch.
-export const WORKOUT_EXTRA_FIELDS = ['type', 'activity', 'minutes', 'volumeKg', 'distanceM', 'avgPowerW', 'avgCadenceRpm', 'avgHr', 'rpe', 'trainingLoad', 'calsPerHour'];
+// `maxHr` (FC pico) y `hrZonePct` (string "86/12/1/0/0" = %Z1..Z5) son escalares nuevos; ojo:
+// `hrZonePct` es STRING (mergeBridge no lo castea a número, ver el round-trip), distinto del
+// objeto `hrZones` (minutos por zona de HeartWatch).
+export const WORKOUT_EXTRA_FIELDS = ['type', 'activity', 'minutes', 'volumeKg', 'distanceM', 'avgPowerW', 'avgCadenceRpm', 'avgHr', 'maxHr', 'rpe', 'hrZonePct', 'trainingLoad', 'calsPerHour'];
 
 // — Shape canónico de una comida (MealItem) que viaja por el bridge. Única fuente de verdad
 //   para el normalizador (validate.mjs): estos son los campos numéricos esperados.
