@@ -4,7 +4,7 @@
  * NO interceptamos llamadas a api.anthropic.com.
  */
 
-const CACHE_NAME = 'plan-hugo-v64-validacion-bridge';
+const CACHE_NAME = 'plan-hugo-v65-lifts-hr-volumen';
 const CORE_URLS = [
   './index.html',
   './app.js',

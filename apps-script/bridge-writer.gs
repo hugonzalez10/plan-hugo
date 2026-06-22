@@ -32,8 +32,11 @@
 // ── Contrato ─────────────────────────────────────────────────────────────────
 //  GET  /exec?w=add&section=...&...  → ESCRITURA INLINE (chat por curl/bash o app).
 //                                       Arma una entrada desde params key=value y la
-//                                       aplica. section ∈ meals|weights|workouts|checks.
+//                                       aplica. section ∈ meals|weights|workouts|checks|lifts.
 //                                       Ej: ?w=add&section=meals&date=..&name=..&kcal=..
+//                                       workouts acepta además avgHr|maxHr|hrZonePct("86/12/1/0/0")|rpe|volumeKg.
+//                                       lifts (una SERIE de fuerza): exercise|setNumber|weightKg|reps|
+//                                       rpe|isPR|bilateralFlag (dedup por ejercicio+fecha+nº de serie).
 //                                       El SERVIDOR asigna el id (uuid) y deduplica por
 //                                       CONTENIDO (ver "Dedup" abajo); el id del cliente
 //                                       es opcional/ignorado en esta rama.
@@ -79,7 +82,7 @@
 //  Formato del "delta" (lo que postea el chat/app):
 //    { "op":"add", "section":"meals", "today":"2026-05-30",
 //      "entries":[ { ...una o varias entradas... } ] }
-//    section ∈ meals | weights | workouts | checks
+//    section ∈ meals | weights | workouts | checks | lifts
 //  Borrado:  { "op":"delete", "section":"meals", "id":"<id>" }
 //  Update :  { "op":"update", "section":"weights", "date":"<date>"(o "id":"<id>"),
 //             "fields":{ ...campos a mergear... } }  (también acepta los campos planos
@@ -170,9 +173,12 @@ var UPLOAD_TITLE = 'plan-hugo-bridge.upload.json';
 //     resta de las kcal: el TDEE adaptativo ya captura el gasto vía tendencia de peso). Compacta;
 //     nunca se poda; mergea por fecha (latest gana, no duplica). La postea un iOS Shortcut (Apple
 //     Health) o el importador CSV de la app (HeartWatch).
-var RETENTION    = { weights: 0, meals: 30, workouts: 0, checks: 30, water: 30, energy: 0, health: 0 };
+//   · lifts → 0: un registro por SERIE de ejercicio ancla (sentadilla, peso muerto, …). Es la serie
+//     de progresión de fuerza/PRs; liviana (~pocas filas por sesión de fuerza) y podarla rompería el
+//     historial de cargas. Nunca se poda; mergea por ejercicio+fecha+nº de serie (no duplica).
+var RETENTION    = { weights: 0, meals: 30, workouts: 0, checks: 30, water: 30, energy: 0, health: 0, lifts: 0 };
 var SNAPSHOT_RETENTION_DAYS = 30; // los snapshots por fecha siguen la misma ventana que meals
-var SECTIONS     = ['meals', 'weights', 'workouts', 'checks', 'water', 'energy', 'health'];
+var SECTIONS     = ['meals', 'weights', 'workouts', 'checks', 'water', 'energy', 'health', 'lifts'];
 // Campos de la sección `energy` que se mergean por fecha (latest gana). Mantener en sync con
 // buildEnergySeries() de app.jsx.
 var ENERGY_MERGE_FIELDS = ['kcalIn', 'trendWeightKg'];
@@ -185,7 +191,13 @@ var HEALTH_MERGE_FIELDS = ['steps', 'activeEnergyKcal', 'sleepHours', 'restingHr
 // más rica gana): si primero llegó una línea simple (name/kcal) y luego una con desglose, no se
 // pierde el detalle. Mantener en sync con WORKOUT_EXTRA_FIELDS + `exercises`/`hrZones` de app.jsx.
 // `hrZones` es objeto: se trata aparte (como `exercises`), solo sobrescribe si trae claves.
-var WORKOUT_MERGE_FIELDS = ['type', 'activity', 'minutes', 'volumeKg', 'distanceM', 'avgPowerW', 'avgCadenceRpm', 'avgHr', 'rpe', 'trainingLoad', 'calsPerHour', 'exercises', 'hrZones'];
+// `maxHr` (FC pico) y `hrZonePct` (string "86/12/1/0/0" = %Z1..Z5) son escalares: la rama genérica
+// de merge los cubre. `hrZonePct` es DISTINTO de `hrZones` (este último, objeto en minutos de HeartWatch).
+var WORKOUT_MERGE_FIELDS = ['type', 'activity', 'minutes', 'volumeKg', 'distanceM', 'avgPowerW', 'avgCadenceRpm', 'avgHr', 'maxHr', 'rpe', 'hrZonePct', 'trainingLoad', 'calsPerHour', 'exercises', 'hrZones'];
+// Campos de una SERIE de fuerza (sección lifts) que se mergean sobre la serie existente del mismo
+// (ejercicio|fecha|nº de serie): re-registrar una serie la CORRIGE, no la duplica. Los booleanos
+// isPR/bilateralFlag se mergean también (el guard `!= null && !== ''` deja escribir `false`).
+var LIFT_MERGE_FIELDS = ['weightKg', 'reps', 'rpe', 'isPR', 'bilateralFlag'];
 var WINDOW_MS    = 5 * 60 * 1000; // ventana de dedup por contenido (meals/workouts)
 // Campos de composición que se mergean sobre la medición del día (no duplica peso).
 // Lista COMPLETA alineada con WEIGHT_FIELDS + STRING_FIELDS + SEGMENT_FIELDS de app.jsx:
@@ -517,6 +529,7 @@ function _sig(sec, e) {
   if (sec === 'energy')   return (e.date || '');
   if (sec === 'health')   return (e.date || '');
   if (sec === 'checks')   return _norm(e.meal) + '|' + (e.date || '');
+  if (sec === 'lifts')    return _norm(e.exercise) + '|' + (e.date || '') + '|' + (e.setNumber != null ? e.setNumber : '');
   return null;
 }
 
@@ -661,8 +674,14 @@ function _contentUnion(bridge, sec, entries, assignId) {
             curW[k] = e[k];
           }
         });
+      } else if (sec === 'lifts') {
+        // Misma serie (ejercicio|fecha|nº de serie) → corrige los campos en sitio (no duplica).
+        var curL = bridge[sec][hitIdx];
+        LIFT_MERGE_FIELDS.forEach(function (k) {
+          if (e[k] != null && e[k] !== '') curL[k] = e[k];
+        });
       }
-      return; // dedup: ya existe (o mergeado, en weights/energy/workouts)
+      return; // dedup: ya existe (o mergeado, en weights/energy/workouts/lifts)
     }
     // Anti-doble-conteo: un check de una sección que ese día YA tiene comida registrada
     // es redundante (el extra es la comida; el check sumaría el plan fijo fantasma). Como
@@ -822,7 +841,7 @@ function _commitFromUpload(uploadId) {
 // venir de un search). Esta rama arma UNA entrada desde parámetros key=value y reusa
 // _apply (mismo merge/poda/dedup/totales que doPost).
 //   GET ?w=add&section=meals&date=YYYY-MM-DD&name=...&kcal=..&protein=..[&ts=<ms>]
-//   section ∈ meals|weights|workouts|checks. El servidor asigna el id y dedup por
+//   section ∈ meals|weights|workouts|checks|lifts. El servidor asigna el id y dedup por
 //   contenido; manda `ts` (ms) o `time` para afinar la ventana de 5 min.
 // Alternativa: ?delta=<json url-encoded> para mandar el objeto/payload entero.
 function _entryFromParams(p) {
@@ -834,10 +853,13 @@ function _entryFromParams(p) {
     if (p.waterMl != null && p.waterMl !== '') p.ml = p.waterMl;
     else if (p.water != null && p.water !== '') p.ml = p.water;
   }
-  ['date', 'time', 'name', 'mealSlot', 'meal', 'gi', 'notes'].forEach(function (k) {
+  // Strings: campos de comida + `exercise` (sección lifts) + `hrZonePct` (workouts, "86/12/1/0/0").
+  ['date', 'time', 'name', 'mealSlot', 'meal', 'gi', 'notes', 'exercise', 'hrZonePct'].forEach(function (k) {
     if (p[k] != null && p[k] !== '') entry[k] = p[k];
   });
+  // Numéricos: comida/peso + entrenamiento (avgHr/maxHr/rpe/volumeKg) + serie de fuerza (setNumber/reps).
   ['kcal', 'protein', 'carbs', 'fat', 'fiber', 'minutes', 'ts', 'ml',
+   'avgHr', 'maxHr', 'rpe', 'volumeKg', 'setNumber', 'reps',
    'weightKg', 'bodyFatPct', 'score', 'fatKg', 'subcutaneousFatKg', 'muscleKg',
    'skeletalMuscleKg', 'fatFreeMassKg', 'waterKg', 'proteinKg', 'boneKg',
    'musclePct', 'waterPct', 'proteinPct', 'bmi', 'ffmi', 'metabolicAge', 'visceralFat',
@@ -856,6 +878,9 @@ function _entryFromParams(p) {
   // Se conserva solo como pista para derivar el ts si no viene `ts`/`time`.
   if (p.id != null && p.id !== '') entry.id = Number(p.id);
   if (p.satfat != null) entry.sat_fat_warning = (p.satfat === '1' || p.satfat === 'true');
+  // Booleanos de la sección lifts (opcionales, default false al leer si están ausentes).
+  if (p.isPR != null && p.isPR !== '') entry.isPR = (p.isPR === '1' || p.isPR === 'true');
+  if (p.bilateralFlag != null && p.bilateralFlag !== '') entry.bilateralFlag = (p.bilateralFlag === '1' || p.bilateralFlag === 'true');
   // Relleno de mealSlot cuando la skill no lo mandó: nombre → hora. Solo si está AUSENTE,
   // para no pisar un 'extra' explícito (comida fuera de plan). Así no cae todo a 'extra'.
   if (p.section === 'meals' && entry.mealSlot == null) {
