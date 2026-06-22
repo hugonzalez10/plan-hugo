@@ -7,6 +7,86 @@
 // tratan aparte (no escalares). rpe/trainingLoad/calsPerHour los aporta HeartWatch.
 export const WORKOUT_EXTRA_FIELDS = ['type', 'activity', 'minutes', 'volumeKg', 'distanceM', 'avgPowerW', 'avgCadenceRpm', 'avgHr', 'rpe', 'trainingLoad', 'calsPerHour'];
 
+// — Shape canónico de una comida (MealItem) que viaja por el bridge. Única fuente de verdad
+//   para el normalizador (validate.mjs): estos son los campos numéricos esperados.
+export const MEAL_NUMERIC_FIELDS = ['kcal', 'protein', 'carbs', 'fat', 'fiber'];
+
+// Nombres equivocados conocidos → campo canónico. Cuando un item del bridge trae el alias y
+// NO trae el canónico, el normalizador remapea el valor y emite un warning (para corregir la
+// fuente: la skill o el .gs). Evita que `calories`/`fats`/`kg` se pierdan en silencio. La
+// causa raíz es que no hay tipado en la frontera; este mapa es la red de seguridad.
+export const FIELD_ALIASES = {
+  calories: 'kcal',
+  cal: 'kcal',
+  fats: 'fat',
+  grasa: 'fat',
+  kg: 'weightKg',
+  weight: 'weightKg',
+  pesoKg: 'weightKg',
+};
+
+// — Tipos conceptuales (JSDoc). No se chequean en build (no hay TS), pero dan autocompletado
+//   y aviso en el editor: escribir `m.calories` se marca como propiedad inexistente. Derivados
+//   de los shapes verificados contra el código (handoff V4).
+/**
+ * @typedef {Object} MealItem
+ * @property {string} id
+ * @property {number} ts          Date.now() del registro
+ * @property {string} name
+ * @property {number} kcal        ⚠️ es `kcal`, NUNCA `calories`
+ * @property {number} protein     gramos
+ * @property {number} carbs
+ * @property {number} fat          ⚠️ es `fat`, NUNCA `fats`
+ * @property {number} fiber
+ * @property {('desayuno'|'colacion1'|'almuerzo'|'colacion2'|'cena'|'extra')} mealSlot
+ * @property {('photo'|'text'|'manual'|'haiku-estimate'|'barcode'|'substitution'|'skill-chat')} source
+ * @property {string} [barcode]
+ * @property {string} [date]      "YYYY-MM-DD"; si falta, se deriva del ts
+ */
+/**
+ * @typedef {Object} WeightEntry
+ * @property {string} date        "YYYY-MM-DD"
+ * @property {(number|null)} weightKg   ⚠️ es `weightKg`, NUNCA `kg` ni `weight`
+ * @property {number} [bodyFatPct]
+ * @property {number} [muscleKg]
+ * @property {number} [score]
+ */
+/**
+ * @typedef {Object} WorkoutItem  En day.exercise[] — ⚠️ NUNCA "workouts" ni "training"
+ * @property {string} id
+ * @property {number} ts
+ * @property {string} name
+ * @property {number} [kcal]
+ * @property {number} [minutes]
+ * @property {string} [type]
+ * @property {Array<Object>} [exercises]
+ */
+/**
+ * @typedef {Object} HealthDay  Solo contexto: NUNCA toca kcal
+ * @property {number} [steps]
+ * @property {number} [restingHr]
+ * @property {number} [vo2max]
+ */
+/**
+ * @typedef {Object} Day
+ * @property {string} date
+ * @property {MealItem[]} meals
+ * @property {MealItem[]} extras   ⚠️ lo registrado por IA/foto/chat cae acá, NO en meals
+ * @property {WorkoutItem[]} exercise
+ * @property {Object<string,boolean>} [eaten]
+ * @property {{ml:number, log?:Array, bridgeMl?:number}} [water]
+ * @property {HealthDay} [health]
+ */
+/**
+ * @typedef {Object} BridgePayload  Lo que devuelve fetchBridge / consume mergeBridge
+ * @property {MealItem[]} meals
+ * @property {WeightEntry[]} weights
+ * @property {WorkoutItem[]} workouts
+ * @property {Array<Object>} checks
+ * @property {Array<{id:string, ml:number, ts?:number, date?:string, source?:string, deviceId?:string}>} water
+ * @property {HealthDay[]} health
+ */
+
 // Métricas diarias de salud (Apple Health vía Shortcut + recuperación de HeartWatch vía importador
 // CSV). Una fila por día en day.health. SOLO CONTEXTO: nunca restan de las kcal (el TDEE adaptativo
 // ya captura el gasto). Mantener key/orden en sync con HEALTH_MERGE_FIELDS del bridge .gs y con el

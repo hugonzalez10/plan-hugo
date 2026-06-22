@@ -11,6 +11,7 @@ import {
 import {
   WEIGHT_FIELDS, SEGMENT_FIELDS, STRING_FIELDS, WORKOUT_EXTRA_FIELDS, BODY_TYPE_OPTIONS, HEALTH_MERGE_FIELDS,
 } from './fields.mjs';
+import { normalizeBridgePayload } from './validate.mjs';
 
 export const GIST_FILENAME = 'plan-hugo.json';
 export const GIST_DESCRIPTION = 'Plan Hugo · backup privado (no compartir)';
@@ -123,7 +124,20 @@ export function syncSig(state) {
   return h;
 }
 
+// ¿El estado remoto del Gist tiene la forma mínima esperada? Defensa contra un Gist corrupto
+// o truncado: `days` debe ser objeto y los bancos/weights arrays. Si no, NO se adopta (se
+// conserva el estado local bueno) en vez de pisarlo con basura.
+export function isPlausibleState(s) {
+  if (!s || typeof s !== 'object') return false;
+  if (s.days != null && (typeof s.days !== 'object' || Array.isArray(s.days))) return false;
+  for (const k of ['weights', 'snackBank', 'proteinBank', 'dessertBank']) {
+    if (s[k] != null && !Array.isArray(s[k])) return false;
+  }
+  return true;
+}
+
 export function applyRemoteState(prev, remote, updatedAt) {
+  if (!isPlausibleState(remote)) return prev; // Gist corrupto → no pisar lo local
   const merged = { ...remote };
   merged.settings = {
     ...(remote.settings || {}),
@@ -218,7 +232,11 @@ export function healthDateKey(h) {
   return null;
 }
 
-export function mergeBridge(state, bridge) {
+export function mergeBridge(state, rawBridge) {
+  // Frontera del bridge: validar/normalizar ANTES de mergear. Remapea alias conocidos
+  // (calories→kcal, kg→weightKg, …) y descarta items irrecuperables, contándolos. Va acá
+  // dentro (no solo en fetchBridge) para cubrir TODO camino que llega al merge —live y tests.
+  const { payload: bridge, dropped, warnings } = normalizeBridgePayload(rawBridge);
   const num = (v) => Number(v) || 0;
   const importedIds = new Set((state.bridge?.importedIds) || []);
   // Borrados a propósito en la app: el bridge los conserva hasta 10 días, pero NO debemos
@@ -498,9 +516,10 @@ export function mergeBridge(state, bridge) {
       ...(state.bridge || {}),
       lastSyncAt: new Date().toISOString(),
       lastSyncOk: true, lastSyncError: null, lastSyncAdded: added,
+      lastSyncDropped: dropped, lastSyncWarnings: warnings,
       importedIds: [...importedIds],
     },
   };
-  return { state: nextState, added };
+  return { state: nextState, added, dropped, warnings };
 }
 
