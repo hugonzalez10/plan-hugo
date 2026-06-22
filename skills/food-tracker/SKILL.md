@@ -22,7 +22,7 @@ description: >
 
 La skill hace TODO el trabajo con IA. La app solo lee el JSON desde Drive y lo
 mergea a su estado local. **Un solo archivo en Drive: `plan-hugo-bridge.json`**
-con cinco secciones (`meals`, `weights`, `workouts`, `checks`, `water`).
+con secciones (`meals`, `weights`, `workouts`, `checks`, `water`, `lifts`).
 
 ## Persistencia — registro por `curl`/Bash al Apps Script (LEER ANTES DE GUARDAR)
 
@@ -82,8 +82,8 @@ Forma del `delta` (lo que postea la skill):
 ```json
 { "op": "add", "section": "meals", "today": "2026-05-30", "entries": [ { ...entrada... } ] }
 ```
-`section` ∈ `meals` | `weights` | `workouts` | `checks` | `water`. `entries` admite una o
-varias (p. ej. dos workouts de una foto). El Apps Script asigna el `id` y dedup por
+`section` ∈ `meals` | `weights` | `workouts` | `checks` | `water` | `lifts`. `entries` admite una o
+varias (p. ej. dos workouts de una foto, o varias series de un mismo ejercicio en `lifts`). El Apps Script asigna el `id` y dedup por
 contenido (ventana ~5 min), poda entradas con `date` de más de 10 días y actualiza
 `updated_at` solo.
 
@@ -221,8 +221,18 @@ Cada entrenamiento, con los keys que apliquen (omite los que no aparezcan):
 - kcal (calorías quemadas TOTALES, número. Si hay "activas" y "totales", usa las TOTALES)
 - minutes (duración total en minutos, número entero)
 - volumeKg (volumen total levantado en kg — solo fuerza)
+- avgHr (FC promedio lpm/bpm), maxHr (FC máxima lpm/bpm) — donde aparezcan (fuerza o cardio)
+- rpe (esfuerzo percibido 1-10, número) — si aparece o lo dijo Hugo
+- hrZonePct (STRING "%Z1/%Z2/%Z3/%Z4/%Z5", ej. "86/12/1/0/0" = % del tiempo en cada zona de FC) —
+  solo si la captura muestra la distribución porcentual por zona. NO lo confundas con minutos por zona.
 - (SOLO cardio) activity (ej. "Bicicleta", "Trote"), distanceM (metros: "21.5 km"→21500),
-  avgPowerW (vatios), avgCadenceRpm (rpm), avgHr (lpm/bpm)
+  avgPowerW (vatios), avgCadenceRpm (rpm)
+- lifts (SOLO si Hugo registra series ancla de fuerza set a set, p.ej. "sentadilla 3x5 @100kg" o una
+  captura con el detalle por serie de un ejercicio ancla): array, UN objeto POR SERIE, con:
+   - exercise (nombre del ejercicio ancla: "Sentadilla", "Peso muerto rumano", …)
+   - setNumber (nº de serie: 1, 2, 3…), weightKg (decimal), reps (entero)
+   - rpe (1-10) — null si no aparece
+   - isPR (true si es récord personal, opcional), bilateralFlag (true si "fuerza bilateral desigual", opcional)
 - exercises (SOLO si la captura lista los movimientos de UNA sesión de fuerza, no en resúmenes
   agregados): array EN ORDEN, un objeto por ejercicio con:
    - name (nombre tal cual aparece)
@@ -244,9 +254,12 @@ ejercicios de solo "Duración" (00:00:30) son "movilidad" (reps/weightKg null); 
 devuelvas "exercises" ni "volumeKg"; si solo ves totales (sin desglose por ejercicio), omite "exercises".
 
 Ejemplo fuerza: { "name":"Pesas", "type":"strength", "kcal":297, "minutes":32, "volumeKg":8462,
-  "exercises":[{"name":"Squat delantera","muscle":"piernas","sets":3,"reps":13,"weightKg":25,"volumeKg":1668,"oneRepMaxKg":33,"quality":"B"}] }
+  "avgHr":128, "maxHr":162, "rpe":8, "hrZonePct":"40/45/12/3/0",
+  "exercises":[{"name":"Squat delantera","muscle":"piernas","sets":3,"reps":13,"weightKg":25,"volumeKg":1668,"oneRepMaxKg":33,"quality":"B"}],
+  "lifts":[{"exercise":"Sentadilla","setNumber":1,"weightKg":100,"reps":5,"rpe":8,"isPR":true},
+           {"exercise":"Sentadilla","setNumber":2,"weightKg":100,"reps":5,"rpe":8.5}] }
 Ejemplo cardio: { "name":"Bicicleta", "type":"cardio", "activity":"Bicicleta", "kcal":629, "minutes":45,
-  "distanceM":21534, "avgPowerW":173, "avgCadenceRpm":58, "avgHr":138 }
+  "distanceM":21534, "avgPowerW":173, "avgCadenceRpm":58, "avgHr":138, "maxHr":171, "hrZonePct":"10/35/40/13/2" }
 ```
 
 ---
@@ -313,18 +326,34 @@ muchos campos; incluye solo los que de verdad aparezcan):
 ```
 
 **Ejercicio** → push a `workouts` (una entrada por entrenamiento). **Incluye TODOS los campos
-que extrajiste** (`type`, `volumeKg`, `exercises[]` en fuerza; `distanceM`/`avgPowerW`/`avgCadenceRpm`/`avgHr`
-en cardio): la app los necesita para el desglose por músculo y la progresión de la pestaña Ejercicios.
-El servidor los preserva y, si una versión simple ya estaba registrada, la versión con desglose la mejora.
+que extrajiste** (`type`, `volumeKg`, `avgHr`, `maxHr`, `rpe`, `hrZonePct`, `exercises[]` en fuerza;
+`distanceM`/`avgPowerW`/`avgCadenceRpm` en cardio): la app los necesita para el desglose por músculo,
+la intensidad y la progresión de la pestaña Ejercicios. El servidor los preserva y, si una versión
+simple ya estaba registrada, la versión con desglose la mejora. `hrZonePct` es STRING ("86/12/1/0/0").
 ```json
 { "date": "2026-05-28", "time": "07:30", "name": "Bicicleta fija", "type": "cardio", "activity": "Bicicleta",
-  "kcal": 307, "minutes": 20, "distanceM": 9800, "avgPowerW": 165, "avgHr": 132, "source": "skill-chat" },
+  "kcal": 307, "minutes": 20, "distanceM": 9800, "avgPowerW": 165, "avgHr": 132, "maxHr": 168, "rpe": 6,
+  "hrZonePct": "10/35/40/13/2", "source": "skill-chat" },
 { "date": "2026-05-28", "time": "08:05", "name": "Pesas", "type": "strength", "kcal": 319, "minutes": 35,
-  "volumeKg": 8462, "source": "skill-chat",
+  "volumeKg": 8462, "avgHr": 124, "maxHr": 158, "rpe": 8, "source": "skill-chat",
   "exercises": [ { "name": "Squat delantera", "muscle": "piernas", "sets": 3, "reps": 13, "weightKg": 25, "volumeKg": 1668, "oneRepMaxKg": 33, "quality": "B" } ] }
 ```
 > ⚠️ `exercises[]` es un array → **solo viaja por el POST del delta** (Paso 4.a), no por la URL `?w=add` (Paso 4.b).
 > Para entrenamientos de fuerza con desglose usa siempre el POST del delta.
+
+**Series de fuerza (lifts)** → push a `lifts` (UNA entrada POR SERIE de ejercicio ancla), cuando Hugo
+registra el detalle set a set ("sentadilla 3x5 @100kg, la última fue PR"). El servidor deduplica por
+`exercise`+`date`+`setNumber` (re-registrar una serie la corrige, no la duplica). Es independiente del
+desglose `exercises[]` del workout: `lifts` es la progresión fina de los movimientos ancla.
+```json
+{ "section": "lifts", "entries": [
+  { "date": "2026-05-28", "time": "08:10", "exercise": "Sentadilla", "setNumber": 1, "weightKg": 100, "reps": 5, "rpe": 8, "source": "skill-chat" },
+  { "date": "2026-05-28", "time": "08:13", "exercise": "Sentadilla", "setNumber": 2, "weightKg": 100, "reps": 5, "rpe": 8.5 },
+  { "date": "2026-05-28", "time": "08:16", "exercise": "Sentadilla", "setNumber": 3, "weightKg": 102.5, "reps": 5, "rpe": 9, "isPR": true } ] }
+```
+> Por la URL `?w=add` (Paso 4.b) registra UNA serie a la vez:
+> `?w=add&section=lifts&date=2026-05-28&exercise=Sentadilla&setNumber=1&weightKg=100&reps=5&rpe=8&isPR=true`
+> (codifica las barras de `hrZonePct` como `%2F` si lo mandas por URL). Para varias series de una, usa el POST del delta.
 
 **Agua** → push a `water` (campo `ml`). Es **append-only**: el servidor SUMA cada
 registro al agua del día (no dedup), así que registrar dos vasos seguidos suma los dos.
