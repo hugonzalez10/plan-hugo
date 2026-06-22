@@ -10082,6 +10082,14 @@ function bridgeSyncStatus(state) {
   if (b.lastSyncAt) {
     const a = b.lastSyncAdded || {};
     const n = (a.meals || 0) + (a.weights || 0) + (a.workouts || 0);
+    // Items del bridge descartados por malformados (campo mal nombrado, sin id, kcal ilegible).
+    // Se avisa en ámbar para que el dato no se pierda en silencio (ver validate.mjs).
+    const d = b.lastSyncDropped || {};
+    const nDrop = (d.meals || 0) + (d.weights || 0) + (d.workouts || 0) + (d.water || 0) + (d.health || 0) + (d.checks || 0);
+    if (nDrop > 0) {
+      const detail = (b.lastSyncWarnings || [])[0] || `${nDrop} registro(s) del bridge descartado(s)`;
+      return { color: '#f59e0b', label: `Bridge: ${nDrop} descartado(s)`, detail, at: b.lastSyncAt };
+    }
     return { color: '#22c55e', label: n > 0 ? `Bridge: +${n} ítem(s)` : 'Bridge sincronizado', detail: null, at: b.lastSyncAt };
   }
   return { color: '#9ca3af', label: 'Bridge: sin sincronizar aún', detail: null, at: null };
