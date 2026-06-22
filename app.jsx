@@ -5415,6 +5415,38 @@ function ExercisesView({ state, setState, targets }) {
 
   const stats = useMemo(() => computeExerciseStats(state.days || {}, todayKey(), 8), [state.days]);
 
+  // Series de fuerza (sección lifts del bridge) agrupadas por fecha→ejercicio, con PR (mejor peso)
+  // por ejercicio. Solo lectura; el dato llega a day.lifts[] vía mergeBridge.
+  const liftStats = useMemo(() => {
+    const all = [];
+    for (const [dk, day] of Object.entries(state.days || {})) {
+      const ls = Array.isArray(day?.lifts) ? day.lifts : [];
+      for (const l of ls) all.push({ ...l, date: l.date || dk });
+    }
+    if (!all.length) return null;
+    const prByEx = {};
+    for (const l of all) {
+      const w = Number(l.weightKg);
+      if (!Number.isFinite(w)) continue;
+      const k = String(l.exercise || '').toLowerCase().trim();
+      if (!prByEx[k] || w > prByEx[k]) prByEx[k] = w;
+    }
+    const byDate = {};
+    for (const l of all) {
+      (byDate[l.date] ||= {});
+      (byDate[l.date][l.exercise || 'Ejercicio'] ||= []).push(l);
+    }
+    const dates = Object.keys(byDate).sort((a, b) => (a < b ? 1 : -1)).slice(0, 8); // 8 sesiones recientes
+    const groups = dates.map((d) => ({
+      date: d,
+      exercises: Object.entries(byDate[d]).map(([ex, sets]) => ({
+        exercise: ex,
+        sets: sets.slice().sort((a, b) => (a.setNumber ?? 0) - (b.setNumber ?? 0)),
+      })),
+    }));
+    return { groups, prByEx, total: all.length };
+  }, [state.days]);
+
   const trainingHistory = useMemo(() => {
     const start = shiftDate(todayKey(), -55);
     return (stats.sessions || [])
@@ -5425,10 +5457,10 @@ function ExercisesView({ state, setState, targets }) {
           fecha: s.date, dia: DAY_SHORT[dow], nombre: s.name, tipo: s.type,
           kcal: Math.round(s.kcal), minutos: s.minutes, volumen_kg: s.volumeKg,
           distancia_km: s.distanceM != null ? +(s.distanceM / 1000).toFixed(1) : null,
-          potencia_w: s.avgPowerW, cadencia_rpm: s.avgCadenceRpm, fc_prom: s.avgHr,
+          potencia_w: s.avgPowerW, cadencia_rpm: s.avgCadenceRpm, fc_prom: s.avgHr, fc_max: s.maxHr ?? null,
           // Intensidad de HeartWatch (donde haya): RPE, carga, kcal/h y minutos por zona de FC.
           rpe: s.rpe ?? null, carga: s.trainingLoad ?? null, kcal_h: s.calsPerHour ?? null,
-          zonas_fc_min: s.hrZones || null,
+          zonas_fc_min: s.hrZones || null, zonas_fc_pct: s.hrZonePct || null,
           ejercicios: (s.exercises || []).map((e) => ({
             nombre: e.name, musculo: e.muscle || null,
             series: e.sets ?? null, reps: e.reps ?? null, peso_kg: e.weightKg ?? null,
@@ -5845,12 +5877,18 @@ Reglas:
                           ? `${s.distanceM != null ? ` · ${(s.distanceM / 1000).toFixed(1)} km` : ''}${s.avgPowerW != null ? ` · ${s.avgPowerW} W` : ''}${s.minutes != null ? ` · ${s.minutes} min` : ''}`
                           : `${s.volumeKg ? ` · ${Math.round(s.volumeKg)} kg` : ''}${s.exercises.length ? ` · ${s.exercises.length} ej.` : ''}`}
                       </div>
-                      {(s.avgHr != null || s.rpe != null || s.trainingLoad != null) && (
+                      {(s.avgHr != null || s.maxHr != null || s.rpe != null || s.trainingLoad != null) && (
                         <div style={{ fontSize: 10.5, color: 'var(--bento-faint)', marginTop: 1 }}>
                           {[s.avgHr != null ? `❤️ ${Math.round(s.avgHr)} lpm` : null,
+                            s.maxHr != null ? `máx ${Math.round(s.maxHr)}` : null,
                             s.rpe != null ? `RPE ${s.rpe}` : null,
                             s.trainingLoad != null ? `carga ${Math.round(s.trainingLoad)}` : null,
                           ].filter(Boolean).join(' · ')}
+                        </div>
+                      )}
+                      {s.hrZonePct && (
+                        <div style={{ fontSize: 10.5, color: 'var(--bento-faint)', marginTop: 1 }}>
+                          🫀 zonas FC {s.hrZonePct.split('/').map((p, i) => `Z${i + 1} ${p}%`).join(' · ')}
                         </div>
                       )}
                     </div>
@@ -5861,6 +5899,55 @@ Reglas:
               </div>
             )}
           </div>
+
+          {/* Series de fuerza (lifts) — set a set, con PRs */}
+          {liftStats && (
+            <div className="bento-card space-y-3">
+              <div className="bento-label">🏋️ Series de fuerza ({liftStats.total})</div>
+              <div className="space-y-3">
+                {liftStats.groups.map((g) => (
+                  <div key={g.date}>
+                    <div className="bento-mono" style={{ fontSize: 10, color: 'var(--bento-faint)', marginBottom: 4 }}>
+                      {new Date(g.date + 'T12:00:00').toLocaleDateString('es-CL', { weekday: 'short', day: 'numeric', month: 'short' })}
+                    </div>
+                    <div className="space-y-1.5">
+                      {g.exercises.map((ex) => {
+                        const prW = liftStats.prByEx[String(ex.exercise).toLowerCase().trim()];
+                        return (
+                          <div key={ex.exercise} style={{ padding: '8px 12px', border: '1px solid var(--bento-hairline)', borderRadius: 10 }}>
+                            <div className="flex items-center gap-1.5" style={{ fontSize: 12.5, fontWeight: 600 }}>
+                              <span>{emojiForExercise(ex.exercise)}</span>
+                              <span className="truncate">{ex.exercise}</span>
+                              {ex.sets.some((s) => s.bilateralFlag) && (
+                                <span title="Fuerza bilateral desigual" style={{ fontSize: 11, color: 'var(--bento-warm)' }}>⚖️</span>
+                              )}
+                              {prW != null && (
+                                <span className="bento-mono" style={{ fontSize: 9, marginLeft: 'auto', color: 'var(--bento-faint)' }}>PR {prW}kg</span>
+                              )}
+                            </div>
+                            <div className="flex flex-wrap gap-1.5" style={{ marginTop: 6 }}>
+                              {ex.sets.map((s, i) => (
+                                <span key={s.id || i} className="bento-mono"
+                                  title={`Serie ${s.setNumber ?? i + 1}${s.rpe != null ? ` · RPE ${s.rpe}` : ''}${s.isPR ? ' · PR' : ''}`}
+                                  style={{
+                                    fontSize: 11, padding: '2px 7px', borderRadius: 8,
+                                    background: s.isPR ? 'rgba(122,154,120,0.16)' : 'var(--bento-surface)',
+                                    color: s.isPR ? 'var(--bento-pos)' : 'var(--bento-ink)',
+                                    border: s.isPR ? '1px solid var(--bento-pos)' : '1px solid var(--bento-hairline)',
+                                  }}>
+                                  {s.isPR ? '⭐ ' : ''}{s.weightKg != null ? s.weightKg : '—'}kg×{s.reps != null ? s.reps : '—'}{s.rpe != null ? ` @${s.rpe}` : ''}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Exportar CSV */}
           <div className="bento-card space-y-3">
