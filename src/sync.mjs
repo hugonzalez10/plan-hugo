@@ -341,10 +341,12 @@ export function mergeBridge(state, rawBridge) {
     const d = ensureDay(bridgeDateKey(w));
     // No se corta por importedIds (ver meals): reimporta si falta localmente.
     if (d.exercise.some((x) => x.id === w.id)) { importedIds.add(w.id); continue; }
-    // Dedup por contenido+ventana (nombre normalizado dentro del día): absorbe el eco del
-    // empuje app→bridge, que vuelve con id de servidor distinto.
+    // Dedup por contenido: mismo nombre normalizado DENTRO del día = mismo entreno. NO se exige
+    // ventana de ±5 min: el eco del empuje app→bridge vuelve con id E HORA distintos (el servidor
+    // sella otro ts), así que `sameWindow` lo dejaba pasar y duplicaba la sesión. Dentro de un día
+    // no hay dos sesiones con el mismo nombre, así que el nombre basta (igual que dedup del bridge).
     const wname = normalizeName(w.name);
-    if (d.exercise.some((x) => normalizeName(x.name) === wname && sameWindow(x.ts, w.ts))) {
+    if (d.exercise.some((x) => normalizeName(x.name) === wname)) {
       importedIds.add(w.id); continue;
     }
     const ex = { id: w.id, ts: w.ts != null ? w.ts : Date.now(), name: w.name || 'Entrenamiento', kcal: num(w.kcal) };
@@ -357,6 +359,29 @@ export function mergeBridge(state, rawBridge) {
     if (w.hrZones && typeof w.hrZones === 'object' && Object.keys(w.hrZones).length) ex.hrZones = w.hrZones;
     d.exercise.push(ex);
     importedIds.add(w.id); added.workouts++;
+  }
+
+  // Auto-heal de duplicados ya plantados: colapsa entrenos del MISMO nombre el MISMO día que el eco
+  // app→bridge dejó antes de este fix (cuando la ventana de ±5 min no los reconocía). Por nombre, se
+  // conserva uno: prioriza el de id del bridge (estable en futuros sync), luego el de más campos. Solo
+  // toca días que el bridge cubre (a prueba de fallos de fetch), igual que la reconciliación de meals.
+  const bridgeWorkoutIds = new Set((bridge.workouts || []).filter(Boolean).map((w) => w.id));
+  const bridgeWorkoutDates = new Set((bridge.workouts || []).filter((w) => w && w.id != null).map((w) => bridgeDateKey(w)));
+  for (const dk of bridgeWorkoutDates) {
+    const d = days[dk];
+    if (!d || !Array.isArray(d.exercise) || d.exercise.length < 2) continue;
+    const seen = new Map(); // nombre normalizado → índice en `kept`
+    const kept = [];
+    for (const x of d.exercise) {
+      const key = normalizeName(x.name);
+      if (!seen.has(key)) { seen.set(key, kept.length); kept.push(x); continue; }
+      const i = seen.get(key); const cur = kept[i];
+      const xWins = bridgeWorkoutIds.has(x.id) !== bridgeWorkoutIds.has(cur.id)
+        ? bridgeWorkoutIds.has(x.id)                        // el de id del bridge gana
+        : Object.keys(x).length > Object.keys(cur).length; // si empatan, el más completo
+      if (xWins) kept[i] = x;
+    }
+    if (kept.length !== d.exercise.length) days[dk] = { ...d, exercise: kept };
   }
 
   // Sección `lifts`: una SERIE de fuerza por fila (ejercicio ancla + nº de serie). Espejo del loop
