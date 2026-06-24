@@ -5745,40 +5745,24 @@ Reglas:
             </div>
           </div>
 
-          {/* Volumen por grupo · Ejercicios frecuentes */}
-          {(stats.muscleVolume.length > 0 || stats.topExercises.length > 0) && (
-            <div className={`items-start ${stats.muscleVolume.length > 0 && stats.topExercises.length > 0 ? 'bento-grid2 is-b' : 'bento-grid2'}`}>
-              {stats.muscleVolume.length > 0 && (
-                <div className="bento-card">
-                  <div className="bento-label" style={{ marginBottom: 16 }}>Volumen por grupo muscular · series/sem ({stats.weeks} sem)</div>
-                  <div className="flex flex-col gap-3">
-                    {stats.muscleVolume.map((m) => {
-                      const perWeek = m.sets / stats.weeks;
-                      return (
-                      <div key={m.muscle} className="grid items-center gap-3" style={{ gridTemplateColumns: '84px 1fr 44px' }}>
-                        <div className="capitalize" style={{ fontSize: 12, color: 'var(--bento-muted)' }}>{m.muscle}</div>
-                        <div style={{ height: 6, borderRadius: 99, background: 'var(--bento-surface)', overflow: 'hidden' }} title={`${m.sets} series en ${stats.weeks} sem`}>
-                          <div style={{ height: '100%', borderRadius: 99, width: `${(m.sets / maxMuscle) * 100}%`, background: muscleColorVar(m.muscle) }} />
-                        </div>
-                        <div className="bento-mono" style={{ fontSize: 12, textAlign: 'right', fontWeight: 600 }}>{perWeek.toFixed(1)}</div>
-                      </div>
-                      );
-                    })}
+          {/* Volumen por grupo muscular */}
+          {stats.muscleVolume.length > 0 && (
+            <div className="bento-card">
+              <div className="bento-label" style={{ marginBottom: 16 }}>Volumen por grupo muscular · series/sem ({stats.weeks} sem)</div>
+              <div className="flex flex-col gap-3">
+                {stats.muscleVolume.map((m) => {
+                  const perWeek = m.sets / stats.weeks;
+                  return (
+                  <div key={m.muscle} className="grid items-center gap-3" style={{ gridTemplateColumns: '84px 1fr 44px' }}>
+                    <div className="capitalize" style={{ fontSize: 12, color: 'var(--bento-muted)' }}>{m.muscle}</div>
+                    <div style={{ height: 6, borderRadius: 99, background: 'var(--bento-surface)', overflow: 'hidden' }} title={`${m.sets} series en ${stats.weeks} sem`}>
+                      <div style={{ height: '100%', borderRadius: 99, width: `${(m.sets / maxMuscle) * 100}%`, background: muscleColorVar(m.muscle) }} />
+                    </div>
+                    <div className="bento-mono" style={{ fontSize: 12, textAlign: 'right', fontWeight: 600 }}>{perWeek.toFixed(1)}</div>
                   </div>
-                </div>
-              )}
-              {stats.topExercises.length > 0 && (
-                <div className="bento-card">
-                  <div className="bento-label" style={{ marginBottom: 14 }}>Ejercicios más frecuentes</div>
-                  <div className="flex flex-wrap gap-2">
-                    {stats.topExercises.map((e) => (
-                      <span key={e.name} className="inline-flex items-center gap-1.5" style={{ padding: '6px 10px', borderRadius: 8, background: 'var(--bento-surface)', fontSize: 12 }}>
-                        {emojiForExercise(e.name)} {e.name} <span className="bento-mono" style={{ color: 'var(--bento-faint)' }}>×{e.count}</span>
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              )}
+                  );
+                })}
+              </div>
             </div>
           )}
 

@@ -424,20 +424,16 @@ export function computeExerciseStats(days, refDate, weeks = 8) {
     });
   }
 
-  // Volumen por grupo muscular (sets como proxy; 1 por ejercicio si no hay sets) + top ejercicios
+  // Volumen por grupo muscular (sets como proxy; 1 por ejercicio si no hay sets)
   const muscleSets = {};
-  const exNameCount = {};
   for (const s of inWindow) {
     for (const e of s.exercises) {
       const m = (e.muscle || 'otros').toLowerCase();
       const sets = Number(e.sets) > 0 ? Number(e.sets) : 1;
       muscleSets[m] = (muscleSets[m] || 0) + sets;
-      const nm = (e.name || '').trim();
-      if (nm) exNameCount[nm] = (exNameCount[nm] || 0) + 1;
     }
   }
   const muscleVolume = Object.entries(muscleSets).map(([muscle, sets]) => ({ muscle, sets })).sort((a, b) => b.sets - a.sets);
-  const topExercises = Object.entries(exNameCount).map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count).slice(0, 6);
   const detailSessions = sessions.filter((s) => s.exercises.length > 0).length;
 
   // Progresión / récords por ejercicio (solo los que cargan peso/volumen, no movilidad pura).
@@ -477,7 +473,6 @@ export function computeExerciseStats(days, refDate, weeks = 8) {
     lastDate,
     weekBuckets,
     muscleVolume,
-    topExercises,
     detailSessions,
     byExercise,
     weeks,
