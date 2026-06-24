@@ -5658,6 +5658,7 @@ Reglas:
   }
   const maxWeekSessions = Math.max(1, ...stats.weekBuckets.map((w) => w.sessions));
   const maxMuscle = Math.max(1, ...stats.muscleVolume.map((m) => m.sets));
+  const maxTonnage = Math.max(1, ...stats.tonnage.weeks.map((w) => w.volumeKg));
   const confColor = response?.confidence === 'alta' ? 'green' : response?.confidence === 'media' ? 'amber' : 'red';
   // Color por grupo muscular (variante B): piernas→ink, espalda→blue, pecho/brazos→warm,
   // core→yellow, movilidad→lilac, glúteos/hombros→pos. Las claves vienen en minúscula.
@@ -5745,6 +5746,73 @@ Reglas:
             </div>
           </div>
 
+          {/* Tonelaje semanal (tendencia de carga) · Esfuerzo medio (RPE + FC) */}
+          {(stats.tonnage.weeksWithData >= 1 || stats.effort.avgRpe != null || stats.effort.avgHr != null) && (
+            <div className="bento-grid2 is-a items-start">
+              <div className="bento-card">
+                <div className="flex items-baseline justify-between gap-2" style={{ marginBottom: 14 }}>
+                  <div className="bento-label">Tonelaje semanal · carga kg/sem</div>
+                  {stats.tonnage.pctPerWeek != null && (
+                    <span className="bento-mono" style={{ fontSize: 12, fontWeight: 600, color: stats.tonnage.pctPerWeek > 0 ? 'var(--bento-pos)' : stats.tonnage.pctPerWeek < 0 ? 'var(--bento-warm)' : 'var(--bento-faint)' }}>
+                      {stats.tonnage.pctPerWeek > 0 ? '↑' : stats.tonnage.pctPerWeek < 0 ? '↓' : ''} {stats.tonnage.pctPerWeek > 0 ? '+' : ''}{stats.tonnage.pctPerWeek}%/sem
+                    </span>
+                  )}
+                </div>
+                {stats.tonnage.weeksWithData >= 1 ? (
+                  <>
+                    <div className="flex items-end gap-2.5" style={{ height: 96 }}>
+                      {stats.tonnage.weeks.map((w, i) => (
+                        <div key={i} className="flex-1 flex flex-col items-center gap-1.5">
+                          <div style={{ width: '100%', maxWidth: 54, height: `${Math.max(3, (w.volumeKg / maxTonnage) * 72)}px`, background: w.volumeKg > 0 ? 'var(--bento-blue)' : 'var(--bento-surface)', borderRadius: 4 }} title={`${w.volumeKg.toLocaleString('es-CL')} kg`} />
+                          <div className="bento-mono" style={{ fontSize: 9, color: 'var(--bento-faint)' }}>{w.label}</div>
+                        </div>
+                      ))}
+                    </div>
+                    <div style={{ fontSize: 11, color: 'var(--bento-muted)', marginTop: 10 }}>
+                      Esta semana <span className="bento-mono" style={{ fontWeight: 600, color: 'var(--bento-ink)' }}>{stats.tonnage.current.toLocaleString('es-CL')} kg</span>
+                      {stats.tonnage.slopePerWeek != null && stats.tonnage.slopePerWeek !== 0 && <> · {stats.tonnage.slopePerWeek > 0 ? '+' : ''}{stats.tonnage.slopePerWeek.toLocaleString('es-CL')} kg/sem de tendencia</>}
+                    </div>
+                  </>
+                ) : (
+                  <p style={{ fontSize: 11, color: 'var(--bento-faint)' }}>Sin volumen de carga aún. Sube capturas con kg×reps para ver la tendencia de tonelaje.</p>
+                )}
+              </div>
+              <div className="bento-card">
+                <div className="bento-label" style={{ marginBottom: 16 }}>Esfuerzo medio · últimas {stats.weeks} sem</div>
+                {(stats.effort.avgRpe != null || stats.effort.avgHr != null) ? (
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <div className="bento-label" style={{ fontSize: 9, marginBottom: 4 }}>RPE medio</div>
+                      {stats.effort.avgRpe != null ? (
+                        <>
+                          <div className="bento-num" style={{ fontSize: 26 }}>{stats.effort.avgRpe}<span style={{ fontSize: 13, color: 'var(--bento-faint)', fontWeight: 400 }}>/10</span></div>
+                          {stats.effort.rpeTrend != null && stats.effort.rpeTrend !== 0 && (
+                            <div className="bento-mono" style={{ fontSize: 11, color: stats.effort.rpeTrend > 0 ? 'var(--bento-warm)' : 'var(--bento-pos)' }}>{stats.effort.rpeTrend > 0 ? '↑ +' : '↓ '}{stats.effort.rpeTrend} vs antes</div>
+                          )}
+                          <div style={{ fontSize: 9, color: 'var(--bento-faint)', marginTop: 2 }}>{stats.effort.nRpe} sesiones</div>
+                        </>
+                      ) : <div style={{ fontSize: 12, color: 'var(--bento-faint)' }}>—</div>}
+                    </div>
+                    <div>
+                      <div className="bento-label" style={{ fontSize: 9, marginBottom: 4 }}>FC media</div>
+                      {stats.effort.avgHr != null ? (
+                        <>
+                          <div className="bento-num" style={{ fontSize: 26 }}>{stats.effort.avgHr}<span style={{ fontSize: 13, color: 'var(--bento-faint)', fontWeight: 400 }}> lpm</span></div>
+                          {stats.effort.hrTrend != null && stats.effort.hrTrend !== 0 && (
+                            <div className="bento-mono" style={{ fontSize: 11, color: stats.effort.hrTrend > 0 ? 'var(--bento-warm)' : 'var(--bento-pos)' }}>{stats.effort.hrTrend > 0 ? '↑ +' : '↓ '}{stats.effort.hrTrend} vs antes</div>
+                          )}
+                          <div style={{ fontSize: 9, color: 'var(--bento-faint)', marginTop: 2 }}>{stats.effort.nHr} sesiones</div>
+                        </>
+                      ) : <div style={{ fontSize: 12, color: 'var(--bento-faint)' }}>—</div>}
+                    </div>
+                  </div>
+                ) : (
+                  <p style={{ fontSize: 11, color: 'var(--bento-faint)' }}>Sin datos de RPE/FC. Importa HeartWatch o registra entrenos con pulso para verlo.</p>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* Volumen por grupo muscular */}
           {stats.muscleVolume.length > 0 && (
             <div className="bento-card">
@@ -5771,6 +5839,26 @@ Reglas:
               💡 Ninguna captura trae el desglose por ejercicio todavía. Sube capturas que listen los movimientos (series/reps/peso) para desbloquear el análisis de desbalances y progresión.
             </p>
           )}
+
+          {/* Aviso de mesetas · ejercicios de la rutina sin progreso reciente */}
+          {routineProg.hasRoutine && (() => {
+            const stuck = routineProg.routine.filter((x) => x.data && x.stagnant);
+            if (!stuck.length) return null;
+            return (
+              <div className="bento-card" style={{ borderLeft: '3px solid var(--bento-warm)' }}>
+                <div className="bento-label" style={{ marginBottom: 8, color: 'var(--bento-warm)' }}>⚠️ Posible meseta · {stuck.length} ejercicio{stuck.length > 1 ? 's' : ''}</div>
+                <div className="flex flex-col gap-2">
+                  {stuck.map((x) => (
+                    <div key={x.slug} className="flex items-center justify-between gap-2" style={{ fontSize: 12 }}>
+                      <span className="flex items-center gap-1.5 min-w-0"><span className="shrink-0">{emojiForExercise(x.name)}</span><span className="truncate">{x.name}</span></span>
+                      <span className="bento-mono shrink-0" style={{ color: 'var(--bento-faint)', fontSize: 11 }}>{x.current != null ? `${x.current} kg` : ''}{x.daysSince != null ? ` · hace ${x.daysSince}d` : ''}</span>
+                    </div>
+                  ))}
+                </div>
+                <p style={{ fontSize: 11, color: 'var(--bento-muted)', marginTop: 10 }}>Sin récord en las últimas sesiones. Considera un deload, subir reps antes que peso, o cambiar la variante.</p>
+              </div>
+            );
+          })()}
 
           {/* Adherencia a la rutina · esta semana */}
           {routineProg.hasRoutine && (() => {
