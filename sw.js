@@ -4,7 +4,7 @@
  * NO interceptamos llamadas a api.anthropic.com.
  */
 
-const CACHE_NAME = 'plan-hugo-v67-fix-workout-dedup';
+const CACHE_NAME = 'plan-hugo-v68-ejercicios-rutina';
 const CORE_URLS = [
   './index.html',
   './app.js',
