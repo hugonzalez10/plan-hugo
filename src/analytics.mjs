@@ -424,20 +424,62 @@ export function computeExerciseStats(days, refDate, weeks = 8) {
     });
   }
 
-  // Volumen por grupo muscular (sets como proxy; 1 por ejercicio si no hay sets) + top ejercicios
+  // Tonelaje semanal (carga total kg/sem) + tendencia por regresión sobre las semanas con datos.
+  // weekBuckets ya trae volumeKg por semana; la pendiente es el indicador de progresión en fuerza.
+  const tonnageWeeks = weekBuckets.map((b) => ({ label: b.label, volumeKg: Math.round(b.volumeKg) }));
+  const tonnagePts = tonnageWeeks.map((b, i) => ({ x: i, y: b.volumeKg })).filter((p) => p.y > 0);
+  let tonnageSlope = null, tonnagePctPerWeek = null;
+  if (tonnagePts.length >= 2) {
+    const n = tonnagePts.length;
+    const sx = tonnagePts.reduce((a, p) => a + p.x, 0);
+    const sy = tonnagePts.reduce((a, p) => a + p.y, 0);
+    const sxx = tonnagePts.reduce((a, p) => a + p.x * p.x, 0);
+    const sxy = tonnagePts.reduce((a, p) => a + p.x * p.y, 0);
+    const denom = n * sxx - sx * sx;
+    if (denom !== 0) {
+      tonnageSlope = (n * sxy - sx * sy) / denom; // kg por semana
+      const mean = sy / n;
+      if (mean > 0) tonnagePctPerWeek = (tonnageSlope / mean) * 100;
+    }
+  }
+  const tonnage = {
+    weeks: tonnageWeeks,
+    slopePerWeek: tonnageSlope != null ? Math.round(tonnageSlope) : null,
+    pctPerWeek: tonnagePctPerWeek != null ? Number(tonnagePctPerWeek.toFixed(1)) : null,
+    current: tonnageWeeks.length ? tonnageWeeks[tonnageWeeks.length - 1].volumeKg : 0,
+    weeksWithData: tonnagePts.length,
+  };
+
+  // Esfuerzo medio (RPE + FC) en la ventana, con tendencia primera-mitad vs segunda-mitad.
+  const asc = inWindow.slice().reverse(); // ventana en orden cronológico
+  const halfDelta = (arr) => {
+    if (arr.length < 4) return null;
+    const mid = Math.floor(arr.length / 2);
+    const mean = (xs) => xs.reduce((s, x) => s + x, 0) / xs.length;
+    return mean(arr.slice(mid)) - mean(arr.slice(0, mid));
+  };
+  const rpeVals = asc.map((s) => s.rpe).filter((v) => v != null && v > 0);
+  const hrVals = asc.map((s) => s.avgHr).filter((v) => v != null && v > 0);
+  const mean = (xs) => xs.reduce((s, x) => s + x, 0) / xs.length;
+  const effort = {
+    avgRpe: rpeVals.length ? Number(mean(rpeVals).toFixed(1)) : null,
+    avgHr: hrVals.length ? Math.round(mean(hrVals)) : null,
+    rpeTrend: rpeVals.length >= 4 ? Number(halfDelta(rpeVals).toFixed(1)) : null,
+    hrTrend: hrVals.length >= 4 ? Math.round(halfDelta(hrVals)) : null,
+    nRpe: rpeVals.length,
+    nHr: hrVals.length,
+  };
+
+  // Volumen por grupo muscular (sets como proxy; 1 por ejercicio si no hay sets)
   const muscleSets = {};
-  const exNameCount = {};
   for (const s of inWindow) {
     for (const e of s.exercises) {
       const m = (e.muscle || 'otros').toLowerCase();
       const sets = Number(e.sets) > 0 ? Number(e.sets) : 1;
       muscleSets[m] = (muscleSets[m] || 0) + sets;
-      const nm = (e.name || '').trim();
-      if (nm) exNameCount[nm] = (exNameCount[nm] || 0) + 1;
     }
   }
   const muscleVolume = Object.entries(muscleSets).map(([muscle, sets]) => ({ muscle, sets })).sort((a, b) => b.sets - a.sets);
-  const topExercises = Object.entries(exNameCount).map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count).slice(0, 6);
   const detailSessions = sessions.filter((s) => s.exercises.length > 0).length;
 
   // Progresión / récords por ejercicio (solo los que cargan peso/volumen, no movilidad pura).
@@ -476,8 +518,9 @@ export function computeExerciseStats(days, refDate, weeks = 8) {
     daysSinceLast,
     lastDate,
     weekBuckets,
+    tonnage,
+    effort,
     muscleVolume,
-    topExercises,
     detailSessions,
     byExercise,
     weeks,
