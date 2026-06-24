@@ -9,6 +9,7 @@ import { weightSeries, trendWeightAt, linRegSlopePerDay, WEEKLY_LOSS } from './e
 import { calcTargets, KCAL_PER_KG_FAT, DEFAULT_TARGETS } from './nutrition.mjs';
 import { computeDayTotals } from './meals.mjs';
 import { normalizeName } from './util.mjs';
+import { slugifyExercise } from './parsing.mjs';
 
 // TDEE de referencia fijo: TMB medida 1878 × ~1.5 factor actividad. Constante a propósito —
 // estimarlo sobre ventanas cortas (peso × Δpeso × kcal de pocos días) es ruido, no señal.
@@ -482,6 +483,98 @@ export function computeExerciseStats(days, refDate, weeks = 8) {
     weeks,
     sessions,
   };
+}
+
+// Cruza los récords/progresión (stats.byExercise, por nombre libre) con la rutina vigente
+// (routine.days[].exercises[], cada uno con slug). Devuelve un item por ejercicio de la rutina
+// enriquecido con su histórico (o data:false si nunca se registró), más los que NO calzan con la
+// rutina ("otros"). El match es por slug exacto y, si falla, por subconjunto de tokens (la rutina
+// dice "Sentadilla" → calza "sentadilla-frontal-con-mancuernas", y viceversa). Puro, sin React.
+export function computeRoutineExerciseProgress(stats, routine, refDate = todayKey()) {
+  const today = refDate || todayKey();
+  const byExercise = Array.isArray(stats?.byExercise) ? stats.byExercise : [];
+  const reg = byExercise.map((x) => {
+    const slug = slugifyExercise(x.name);
+    return { x, slug, tokens: slug.split('-').filter(Boolean) };
+  });
+  const valOf = (e) => (e.oneRepMaxKg ?? e.weightKg ?? null);
+
+  const matchFor = (name) => {
+    const slug = slugifyExercise(name);
+    if (!slug) return null;
+    let hit = reg.find((r) => r.slug === slug);
+    if (hit) return hit;
+    const rtoks = slug.split('-').filter(Boolean);
+    if (!rtoks.length) return null;
+    // Todos los tokens de la rutina presentes en el registro (registro más específico).
+    hit = reg.find((r) => rtoks.every((t) => r.tokens.includes(t)));
+    if (hit) return hit;
+    // O al revés: el registro más corto contenido en el nombre de la rutina.
+    hit = reg.find((r) => r.tokens.length && r.tokens.every((t) => rtoks.includes(t)));
+    return hit || null;
+  };
+
+  const enrich = (base, name, slug) => {
+    if (!base) {
+      return {
+        slug, name, muscle: null, data: false, entries: [], spark: [],
+        current: null, first: null, delta: null, lastDate: null, daysSince: null,
+        trainedThisWeek: false, stagnant: false, suggestNextKg: null,
+        bestRm: null, bestWeight: null, bestVolume: null, sessions: 0,
+      };
+    }
+    const entries = base.entries || [];
+    const vals = entries.map(valOf).filter((v) => v != null);
+    const first = vals.length ? vals[0] : null;
+    const current = vals.length ? vals[vals.length - 1] : null;
+    const delta = first != null && current != null ? Math.round((current - first) * 10) / 10 : null;
+    const lastDate = entries.length ? entries[entries.length - 1].date : null;
+    const daysSince = lastDate ? daysBetween(lastDate, today) : null;
+    const trainedThisWeek = daysSince != null && daysSince <= 7;
+    // Meseta: el máximo de las últimas 3 apariciones no supera el de las previas (necesita ≥4).
+    let stagnant = false;
+    if (vals.length >= 4) {
+      const maxRecent = Math.max(...vals.slice(-3));
+      const maxEarlier = Math.max(...vals.slice(0, -3));
+      stagnant = maxRecent <= maxEarlier;
+    }
+    // Sobrecarga progresiva: sobre el peso (o 1RM) — si la última sesión igualó/superó la previa,
+    // sugerir +2.5 kg; si bajó, mantener. Heurística, etiquetada como sugerencia en la UI.
+    let suggestNextKg = null, suggestUp = false;
+    const wVals = entries.map((e) => e.weightKg ?? e.oneRepMaxKg).filter((v) => v != null);
+    if (wVals.length) {
+      const lastW = wVals[wVals.length - 1];
+      const prevW = wVals.length >= 2 ? wVals[wVals.length - 2] : null;
+      suggestUp = (prevW == null || lastW >= prevW);
+      suggestNextKg = suggestUp ? Math.round((lastW + 2.5) * 10) / 10 : lastW;
+    }
+    return {
+      slug, name, muscle: base.muscle || null, data: true, entries, spark: vals,
+      current, first, delta, lastDate, daysSince, trainedThisWeek, stagnant, suggestNextKg, suggestUp,
+      bestRm: base.bestRm ?? null, bestWeight: base.bestWeight ?? null, bestVolume: base.bestVolume ?? null,
+      sessions: base.sessions ?? entries.length,
+    };
+  };
+
+  const routineExs = [];
+  const seenSlugs = new Set();
+  const usedNames = new Set();
+  const days = Array.isArray(routine?.days) ? routine.days : [];
+  for (const d of days) {
+    for (const ex of (Array.isArray(d?.exercises) ? d.exercises : [])) {
+      const name = (ex?.name || '').trim();
+      const slug = ex?.slug || slugifyExercise(name);
+      if (!name || !slug || seenSlugs.has(slug)) continue;
+      seenSlugs.add(slug);
+      const hit = matchFor(name);
+      if (hit) usedNames.add(hit.x.name);
+      routineExs.push(enrich(hit ? hit.x : null, name, slug));
+    }
+  }
+
+  const others = byExercise.filter((x) => !usedNames.has(x.name));
+  const hasRoutine = routineExs.length > 0;
+  return { hasRoutine, routine: routineExs, others };
 }
 
 export function computeStreak(days, snackBank, proteinBank, targets, refDate, dessertBank, customAntojoItems) {

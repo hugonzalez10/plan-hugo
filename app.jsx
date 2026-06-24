@@ -27,7 +27,7 @@ import { evaluateRule, getRulesStatus, evaluateAllRules } from './src/rules.mjs'
 import {
   computeAdaptiveTDEE, buildEnergySeries, computePlanAdjustment, dayMetsTarget,
   computeTrendAnalysis, computeEvolution, interpretTrend, TREND_MIN_DAYS, TREND_WINDOW_DAYS,
-  computeExerciseStats, computeStreak, computeComparison, computeRecents,
+  computeExerciseStats, computeRoutineExerciseProgress, computeStreak, computeComparison, computeRecents,
 } from './src/analytics.mjs';
 import { uuid, normalizeName, getDeviceId } from './src/util.mjs';
 import {
@@ -5401,6 +5401,32 @@ function HealthMetricDetail({ metric, series, onClose }) {
   );
 }
 
+// Sparkline SVG liviano (línea, sin librería): normaliza la serie a un viewBox fijo. Si hay un
+// solo punto dibuja una marca; vacío no renderiza nada.
+function Sparkline({ values, color = 'var(--bento-blue)', width = 96, height = 28 }) {
+  const vals = (values || []).filter((v) => v != null);
+  if (vals.length < 1) return null;
+  const min = Math.min(...vals), max = Math.max(...vals);
+  const span = max - min || 1;
+  const pad = 3;
+  const x = (i) => vals.length === 1 ? width / 2 : pad + (i * (width - pad * 2)) / (vals.length - 1);
+  const y = (v) => height - pad - ((v - min) / span) * (height - pad * 2);
+  if (vals.length === 1) {
+    return (
+      <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} style={{ overflow: 'visible' }}>
+        <circle cx={x(0)} cy={y(vals[0])} r={2.5} fill={color} />
+      </svg>
+    );
+  }
+  const pts = vals.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+  return (
+    <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} style={{ overflow: 'visible' }}>
+      <polyline points={pts} fill="none" stroke={color} strokeWidth="1.75" strokeLinejoin="round" strokeLinecap="round" />
+      <circle cx={x(vals.length - 1)} cy={y(vals[vals.length - 1])} r={2.5} fill={color} />
+    </svg>
+  );
+}
+
 function ExercisesView({ state, setState, targets }) {
   const apiKey = state.settings?.anthropicApiKey;
   const [capturing, setCapturing] = useState(false);
@@ -5408,44 +5434,14 @@ function ExercisesView({ state, setState, targets }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [response, setResponse] = useState(cached?.response || null);
-  const [progEx, setProgEx] = useState('');             // ejercicio elegido para la progresión
   const [historyOpen, setHistoryOpen] = useState(false);
   const [csvFrom, setCsvFrom] = useState('');           // '' = sin límite inferior (todo)
   const [csvTo, setCsvTo] = useState(todayKey());
 
   const stats = useMemo(() => computeExerciseStats(state.days || {}, todayKey(), 8), [state.days]);
 
-  // Series de fuerza (sección lifts del bridge) agrupadas por fecha→ejercicio, con PR (mejor peso)
-  // por ejercicio. Solo lectura; el dato llega a day.lifts[] vía mergeBridge.
-  const liftStats = useMemo(() => {
-    const all = [];
-    for (const [dk, day] of Object.entries(state.days || {})) {
-      const ls = Array.isArray(day?.lifts) ? day.lifts : [];
-      for (const l of ls) all.push({ ...l, date: l.date || dk });
-    }
-    if (!all.length) return null;
-    const prByEx = {};
-    for (const l of all) {
-      const w = Number(l.weightKg);
-      if (!Number.isFinite(w)) continue;
-      const k = String(l.exercise || '').toLowerCase().trim();
-      if (!prByEx[k] || w > prByEx[k]) prByEx[k] = w;
-    }
-    const byDate = {};
-    for (const l of all) {
-      (byDate[l.date] ||= {});
-      (byDate[l.date][l.exercise || 'Ejercicio'] ||= []).push(l);
-    }
-    const dates = Object.keys(byDate).sort((a, b) => (a < b ? 1 : -1)).slice(0, 8); // 8 sesiones recientes
-    const groups = dates.map((d) => ({
-      date: d,
-      exercises: Object.entries(byDate[d]).map(([ex, sets]) => ({
-        exercise: ex,
-        sets: sets.slice().sort((a, b) => (a.setNumber ?? 0) - (b.setNumber ?? 0)),
-      })),
-    }));
-    return { groups, prByEx, total: all.length };
-  }, [state.days]);
+  // Récords y progresión acotados a la rutina vigente (cruce por slug; "otros" = lo no-rutina).
+  const routineProg = useMemo(() => computeRoutineExerciseProgress(stats, state.routine, todayKey()), [stats, state.routine]);
 
   const trainingHistory = useMemo(() => {
     const start = shiftDate(todayKey(), -55);
@@ -5754,17 +5750,20 @@ Reglas:
             <div className={`items-start ${stats.muscleVolume.length > 0 && stats.topExercises.length > 0 ? 'bento-grid2 is-b' : 'bento-grid2'}`}>
               {stats.muscleVolume.length > 0 && (
                 <div className="bento-card">
-                  <div className="bento-label" style={{ marginBottom: 16 }}>Volumen por grupo muscular · series ({stats.weeks} sem)</div>
+                  <div className="bento-label" style={{ marginBottom: 16 }}>Volumen por grupo muscular · series/sem ({stats.weeks} sem)</div>
                   <div className="flex flex-col gap-3">
-                    {stats.muscleVolume.map((m) => (
-                      <div key={m.muscle} className="grid items-center gap-3" style={{ gridTemplateColumns: '84px 1fr 40px' }}>
+                    {stats.muscleVolume.map((m) => {
+                      const perWeek = m.sets / stats.weeks;
+                      return (
+                      <div key={m.muscle} className="grid items-center gap-3" style={{ gridTemplateColumns: '84px 1fr 44px' }}>
                         <div className="capitalize" style={{ fontSize: 12, color: 'var(--bento-muted)' }}>{m.muscle}</div>
-                        <div style={{ height: 6, borderRadius: 99, background: 'var(--bento-surface)', overflow: 'hidden' }}>
+                        <div style={{ height: 6, borderRadius: 99, background: 'var(--bento-surface)', overflow: 'hidden' }} title={`${m.sets} series en ${stats.weeks} sem`}>
                           <div style={{ height: '100%', borderRadius: 99, width: `${(m.sets / maxMuscle) * 100}%`, background: muscleColorVar(m.muscle) }} />
                         </div>
-                        <div className="bento-mono" style={{ fontSize: 12, textAlign: 'right', fontWeight: 600 }}>{m.sets}</div>
+                        <div className="bento-mono" style={{ fontSize: 12, textAlign: 'right', fontWeight: 600 }}>{perWeek.toFixed(1)}</div>
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </div>
               )}
@@ -5789,71 +5788,140 @@ Reglas:
             </p>
           )}
 
-          {/* Récords (PRs) · grilla 2 columnas */}
-          {stats.byExercise.length > 0 && (
-            <div className="bento-card">
-              <div className="bento-label" style={{ marginBottom: 14 }}>🏆 Récords por ejercicio</div>
-              <div className="bento-grid2 is-eq">
-                {stats.byExercise.slice(0, 6).map((x) => {
-                  const primLabel = x.bestRm != null ? '1RM' : 'Peso';
-                  const primVal = x.bestRm != null ? x.bestRm : x.bestWeight;
+          {/* Adherencia a la rutina · esta semana */}
+          {routineProg.hasRoutine && (() => {
+            const r = routineProg.routine;
+            const done = r.filter((x) => x.trainedThisWeek).length;
+            return (
+              <div className="bento-card space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="bento-label">🎯 Adherencia a la rutina · esta semana</div>
+                  <div className="bento-mono" style={{ fontSize: 12, fontWeight: 600 }}>{done}/{r.length}</div>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {r.map((x) => {
+                    const label = x.trainedThisWeek ? '✓' : (x.daysSince != null ? `${x.daysSince}d` : '—');
+                    return (
+                      <span key={x.slug} title={x.daysSince != null ? `Última hace ${x.daysSince} días` : 'Sin registro'}
+                        className="inline-flex items-center gap-1.5" style={{
+                          padding: '5px 9px', borderRadius: 8, fontSize: 12,
+                          background: x.trainedThisWeek ? 'rgba(122,154,120,0.16)' : 'var(--bento-surface)',
+                          color: x.trainedThisWeek ? 'var(--bento-pos)' : 'var(--bento-faint)',
+                          border: x.trainedThisWeek ? '1px solid var(--bento-pos)' : '1px solid var(--bento-hairline)',
+                        }}>
+                        {emojiForExercise(x.name)} <span className="truncate" style={{ maxWidth: 140 }}>{x.name}</span>
+                        <span className="bento-mono" style={{ fontSize: 10 }}>{label}</span>
+                      </span>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* Récords (PRs) · acotado a la rutina, con "otros" colapsado */}
+          {stats.byExercise.length > 0 && (() => {
+            const recCell = (x, key) => {
+              const primLabel = x.bestRm != null ? '1RM' : 'Peso';
+              const primVal = x.bestRm != null ? x.bestRm : x.bestWeight;
+              const noData = x.data === false;
+              return (
+                <div key={key} style={{ padding: '12px 14px', border: '1px solid var(--bento-hairline)', borderRadius: 10, opacity: noData ? 0.55 : 1 }}>
+                  <div className="flex items-center gap-1.5" style={{ fontSize: 12.5, fontWeight: 600, lineHeight: 1.3 }}>
+                    <span>{emojiForExercise(x.name)}</span><span className="truncate">{x.name}</span>
+                  </div>
+                  {noData ? (
+                    <div style={{ marginTop: 8, fontSize: 11, color: 'var(--bento-faint)' }}>sin datos aún</div>
+                  ) : (
+                    <div className="flex gap-4" style={{ marginTop: 8 }}>
+                      {primVal != null && (
+                        <div>
+                          <div className="bento-label" style={{ fontSize: 9 }}>{primLabel}</div>
+                          <div className="bento-num" style={{ fontSize: 18 }}>{primVal}<span style={{ fontSize: 10, color: 'var(--bento-faint)' }}> kg</span></div>
+                        </div>
+                      )}
+                      {x.bestVolume != null && (
+                        <div>
+                          <div className="bento-label" style={{ fontSize: 9 }}>Volumen</div>
+                          <div className="bento-num" style={{ fontSize: 18 }}>{Math.round(x.bestVolume)}</div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            };
+            if (routineProg.hasRoutine) {
+              return (
+                <div className="bento-card">
+                  <div className="bento-label" style={{ marginBottom: 14 }}>🏆 Récords · ejercicios de la rutina</div>
+                  <div className="bento-grid2 is-eq">
+                    {routineProg.routine.map((x) => recCell(x, x.slug))}
+                  </div>
+                  {routineProg.others.length > 0 && (
+                    <details style={{ marginTop: 14 }}>
+                      <summary className="bento-label" style={{ cursor: 'pointer', fontSize: 11 }}>Otros ejercicios ({routineProg.others.length})</summary>
+                      <div className="bento-grid2 is-eq" style={{ marginTop: 12 }}>
+                        {routineProg.others.slice(0, 12).map((x) => recCell(x, x.name))}
+                      </div>
+                    </details>
+                  )}
+                </div>
+              );
+            }
+            return (
+              <div className="bento-card">
+                <div className="bento-label" style={{ marginBottom: 6 }}>🏆 Récords por ejercicio</div>
+                <div style={{ fontSize: 11, color: 'var(--bento-faint)', marginBottom: 12 }}>Carga tu rutina en la pestaña Rutina para acotar esto a tus ejercicios.</div>
+                <div className="bento-grid2 is-eq">
+                  {stats.byExercise.slice(0, 6).map((x) => recCell(x, x.name))}
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* Progresión por ejercicio · sparklines */}
+          {(() => {
+            const rows = routineProg.hasRoutine
+              ? routineProg.routine.filter((x) => x.spark.length >= 1)
+              : stats.byExercise.slice(0, 10).map((x) => {
+                  const vals = (x.entries || []).map((e) => e.oneRepMaxKg ?? e.weightKg).filter((v) => v != null);
+                  const first = vals.length ? vals[0] : null;
+                  const current = vals.length ? vals[vals.length - 1] : null;
+                  return { name: x.name, slug: x.name, spark: vals, current, bestRm: x.bestRm,
+                    delta: first != null && current != null ? Math.round((current - first) * 10) / 10 : null,
+                    stagnant: false, suggestNextKg: null };
+                }).filter((x) => x.spark.length >= 1);
+            if (!rows.length) return null;
+            return (
+              <div className="bento-card space-y-1">
+                <div className="bento-label" style={{ marginBottom: 8 }}>📈 Progresión por ejercicio</div>
+                <div style={{ fontSize: 10.5, color: 'var(--bento-faint)', marginBottom: 6 }}>1RM / peso máx por sesión · ↑ = sugerencia de carga próxima</div>
+                {rows.map((it) => {
+                  const noData = !it.spark || it.spark.length < 1;
                   return (
-                    <div key={x.name} style={{ padding: '12px 14px', border: '1px solid var(--bento-hairline)', borderRadius: 10 }}>
-                      <div className="flex items-center gap-1.5" style={{ fontSize: 12.5, fontWeight: 600, lineHeight: 1.3 }}>
-                        <span>{emojiForExercise(x.name)}</span><span className="truncate">{x.name}</span>
+                    <div key={it.slug || it.name} className="flex items-center gap-3" style={{ padding: '7px 0', borderTop: '1px solid var(--bento-hairline)' }}>
+                      <div className="min-w-0" style={{ flex: '1 1 0' }}>
+                        <div className="flex items-center gap-1.5" style={{ fontSize: 12.5, fontWeight: 600 }}>
+                          <span>{emojiForExercise(it.name)}</span><span className="truncate">{it.name}</span>
+                          {it.stagnant && <span title="Sin progreso en las últimas sesiones" style={{ fontSize: 9, padding: '1px 6px', borderRadius: 6, background: 'rgba(205,122,85,0.14)', color: 'var(--bento-warm)' }}>meseta</span>}
+                        </div>
+                        <div style={{ fontSize: 10.5, color: 'var(--bento-faint)', marginTop: 2 }}>
+                          {noData ? 'sin datos aún' : (
+                            <>
+                              {it.current != null ? <b style={{ color: 'var(--bento-ink)' }}>{it.current} kg</b> : '—'}
+                              {it.delta != null && it.delta !== 0 ? <span style={{ color: it.delta >= 0 ? 'var(--bento-pos)' : 'var(--bento-warm)' }}> · {it.delta >= 0 ? '+' : ''}{it.delta}</span> : null}
+                              {it.suggestNextKg != null ? (it.suggestUp
+                                ? <span style={{ color: 'var(--bento-blue)' }}> · ↑ ~{it.suggestNextKg}kg</span>
+                                : <span style={{ color: 'var(--bento-faint)' }}> · → mantén {it.suggestNextKg}kg</span>) : null}
+                            </>
+                          )}
+                        </div>
                       </div>
-                      <div className="flex gap-4" style={{ marginTop: 8 }}>
-                        {primVal != null && (
-                          <div>
-                            <div className="bento-label" style={{ fontSize: 9 }}>{primLabel}</div>
-                            <div className="bento-num" style={{ fontSize: 18 }}>{primVal}<span style={{ fontSize: 10, color: 'var(--bento-faint)' }}> kg</span></div>
-                          </div>
-                        )}
-                        {x.bestVolume != null && (
-                          <div>
-                            <div className="bento-label" style={{ fontSize: 9 }}>Volumen</div>
-                            <div className="bento-num" style={{ fontSize: 18 }}>{Math.round(x.bestVolume)}</div>
-                          </div>
-                        )}
-                      </div>
+                      {!noData && <div className="shrink-0"><Sparkline values={it.spark} color={it.stagnant ? 'var(--bento-warm)' : 'var(--bento-blue)'} /></div>}
                     </div>
                   );
                 })}
-              </div>
-            </div>
-          )}
-
-          {/* Progresión por ejercicio (interactivo) */}
-          {stats.byExercise.length > 0 && (() => {
-            const sel = stats.byExercise.find((x) => x.name === progEx) || stats.byExercise[0];
-            const valOf = (e) => (e.oneRepMaxKg ?? e.weightKg ?? null);
-            const vals = sel.entries.map(valOf).filter((v) => v != null);
-            const maxV = vals.length ? Math.max(...vals) : 1;
-            const first = vals.length ? vals[0] : null;
-            const last = vals.length ? vals[vals.length - 1] : null;
-            const delta = first != null && last != null ? last - first : null;
-            return (
-              <div className="bento-card space-y-2">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="bento-label shrink-0">📈 Progresión</div>
-                  <select value={sel.name} onChange={(e) => setProgEx(e.target.value)}
-                    className="text-xs rounded-lg px-2 py-1 max-w-[62%] truncate"
-                    style={{ border: '1px solid var(--bento-hairline)', background: 'var(--bento-surface)', color: 'var(--bento-ink)' }}>
-                    {stats.byExercise.map((x) => <option key={x.name} value={x.name}>{x.name}</option>)}
-                  </select>
-                </div>
-                <div style={{ fontSize: 11, color: 'var(--bento-faint)' }}>
-                  1RM / peso máx por sesión · {sel.entries.length} registros
-                  {delta != null ? <span style={{ color: delta >= 0 ? 'var(--bento-pos)' : 'var(--bento-warm)' }}> · {first}→{last} kg ({delta >= 0 ? '+' : ''}{delta})</span> : null}
-                </div>
-                <div className="flex items-end gap-1.5" style={{ height: 80 }}>
-                  {sel.entries.map((e, i) => { const v = valOf(e); return (
-                    <div key={i} className="flex-1 flex flex-col items-center gap-1" title={`${e.date}: ${v ?? '—'} kg`}>
-                      <div style={{ width: '100%', borderRadius: '4px 4px 0 0', background: 'var(--bento-blue)', height: `${v != null ? Math.max(4, (v / maxV) * 64) : 2}px` }} />
-                      <div className="bento-mono" style={{ fontSize: 8, color: 'var(--bento-faint)' }}>{e.date.slice(5)}</div>
-                    </div>
-                  ); })}
-                </div>
               </div>
             );
           })()}
@@ -5899,55 +5967,6 @@ Reglas:
               </div>
             )}
           </div>
-
-          {/* Series de fuerza (lifts) — set a set, con PRs */}
-          {liftStats && (
-            <div className="bento-card space-y-3">
-              <div className="bento-label">🏋️ Series de fuerza ({liftStats.total})</div>
-              <div className="space-y-3">
-                {liftStats.groups.map((g) => (
-                  <div key={g.date}>
-                    <div className="bento-mono" style={{ fontSize: 10, color: 'var(--bento-faint)', marginBottom: 4 }}>
-                      {new Date(g.date + 'T12:00:00').toLocaleDateString('es-CL', { weekday: 'short', day: 'numeric', month: 'short' })}
-                    </div>
-                    <div className="space-y-1.5">
-                      {g.exercises.map((ex) => {
-                        const prW = liftStats.prByEx[String(ex.exercise).toLowerCase().trim()];
-                        return (
-                          <div key={ex.exercise} style={{ padding: '8px 12px', border: '1px solid var(--bento-hairline)', borderRadius: 10 }}>
-                            <div className="flex items-center gap-1.5" style={{ fontSize: 12.5, fontWeight: 600 }}>
-                              <span>{emojiForExercise(ex.exercise)}</span>
-                              <span className="truncate">{ex.exercise}</span>
-                              {ex.sets.some((s) => s.bilateralFlag) && (
-                                <span title="Fuerza bilateral desigual" style={{ fontSize: 11, color: 'var(--bento-warm)' }}>⚖️</span>
-                              )}
-                              {prW != null && (
-                                <span className="bento-mono" style={{ fontSize: 9, marginLeft: 'auto', color: 'var(--bento-faint)' }}>PR {prW}kg</span>
-                              )}
-                            </div>
-                            <div className="flex flex-wrap gap-1.5" style={{ marginTop: 6 }}>
-                              {ex.sets.map((s, i) => (
-                                <span key={s.id || i} className="bento-mono"
-                                  title={`Serie ${s.setNumber ?? i + 1}${s.rpe != null ? ` · RPE ${s.rpe}` : ''}${s.isPR ? ' · PR' : ''}`}
-                                  style={{
-                                    fontSize: 11, padding: '2px 7px', borderRadius: 8,
-                                    background: s.isPR ? 'rgba(122,154,120,0.16)' : 'var(--bento-surface)',
-                                    color: s.isPR ? 'var(--bento-pos)' : 'var(--bento-ink)',
-                                    border: s.isPR ? '1px solid var(--bento-pos)' : '1px solid var(--bento-hairline)',
-                                  }}>
-                                  {s.isPR ? '⭐ ' : ''}{s.weightKg != null ? s.weightKg : '—'}kg×{s.reps != null ? s.reps : '—'}{s.rpe != null ? ` @${s.rpe}` : ''}
-                                </span>
-                              ))}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
 
           {/* Exportar CSV */}
           <div className="bento-card space-y-3">
