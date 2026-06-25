@@ -789,6 +789,23 @@ function BentoTodayHero({ totals, targets, streak, onStreakClick, weightSeries, 
     chips.push({ k, label: ['D','L','M','M','J','V','S'][dow], met, isToday: i === 0 });
   }
 
+  // Composición: último escaneo con datos de composición (visceral/músculo/%grasa) + delta vs el anterior.
+  // Grasa visceral = marcador #1 (objetivo índice 15 → <10); músculo y %grasa = lente de recomposición.
+  const comps = (state?.weights || [])
+    .filter((w) => w.visceralFat != null || w.skeletalMuscleKg != null || w.bodyFatPct != null)
+    .slice().sort((a, b) => ((a.date || '') + (a.time || '')).localeCompare((b.date || '') + (b.time || '')));
+  const lastComp = comps.length ? comps[comps.length - 1] : null;
+  const prevComp = comps.length > 1 ? comps[comps.length - 2] : null;
+  const compDelta = (key) => (lastComp && prevComp && lastComp[key] != null && prevComp[key] != null)
+    ? Math.round((lastComp[key] - prevComp[key]) * 10) / 10 : null;
+  const visc = lastComp?.visceralFat;
+  const viscDelta = compDelta('visceralFat');
+  const viscColor = visc == null ? 'var(--bento-faint)' : visc < 10 ? 'var(--bento-pos)' : visc <= 12 ? 'var(--bento-yellow)' : 'var(--bento-warm)';
+  const recompRows = [
+    { label: 'Músculo esq.', v: lastComp?.skeletalMuscleKg, unit: ' kg', d: compDelta('skeletalMuscleKg'), goodWhenUp: true },
+    { label: 'Grasa corp.', v: lastComp?.bodyFatPct, unit: '%', d: compDelta('bodyFatPct'), goodWhenUp: false },
+  ];
+
   return (
     <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))' }}>
       {/* Energía */}
@@ -884,6 +901,48 @@ function BentoTodayHero({ totals, targets, streak, onStreakClick, weightSeries, 
           </>
         ) : (
           <div className="text-sm py-3" style={{ color: 'var(--bento-faint)' }}>Sin mediciones aún.</div>
+        )}
+      </div>
+
+      {/* Composición — grasa visceral (#1) + lente de recomposición */}
+      <div className="bento-card" style={{ minWidth: 0 }}>
+        <div className="flex justify-between items-center mb-3">
+          <span className="text-sm font-semibold" style={{ letterSpacing: '-0.01em' }}>Composición</span>
+          {lastComp?.date && <span className="bento-label">{lastComp.date.slice(5)}</span>}
+        </div>
+        {lastComp ? (
+          <>
+            <div className="flex items-baseline justify-between">
+              <div style={{ minWidth: 0 }}>
+                <div className="bento-label">Grasa visceral</div>
+                <div className="font-bold" style={{ fontSize: 30, letterSpacing: '-0.04em', fontVariantNumeric: 'tabular-nums', lineHeight: 1, color: viscColor }}>
+                  {visc != null ? visc : '—'}
+                  <span className="text-xs font-normal" style={{ color: 'var(--bento-faint)' }}> → &lt;10</span>
+                </div>
+              </div>
+              {viscDelta != null && viscDelta !== 0 && (
+                <span className="bento-mono text-xs" style={{ color: viscDelta < 0 ? 'var(--bento-pos)' : 'var(--bento-warm)', fontVariantNumeric: 'tabular-nums' }}>{viscDelta > 0 ? '+' : ''}{viscDelta}</span>
+              )}
+            </div>
+            <div className="mt-3 space-y-2">
+              {recompRows.filter((r) => r.v != null).map((r) => {
+                const isGood = r.d == null || r.d === 0 ? null : (r.goodWhenUp ? r.d > 0 : r.d < 0);
+                return (
+                  <div key={r.label} className="flex justify-between items-baseline">
+                    <span className="text-xs font-medium" style={{ color: 'var(--bento-muted)' }}>{r.label}</span>
+                    <span className="text-xs bento-mono" style={{ fontVariantNumeric: 'tabular-nums' }}>
+                      <span style={{ color: 'var(--bento-ink)' }}>{r.v}{r.unit}</span>
+                      {isGood != null && (
+                        <span style={{ marginLeft: 6, color: isGood ? 'var(--bento-pos)' : 'var(--bento-warm)' }}>{r.d > 0 ? '+' : ''}{r.d}</span>
+                      )}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        ) : (
+          <div className="text-sm py-3" style={{ color: 'var(--bento-faint)' }}>Sin escaneo de composición aún.</div>
         )}
       </div>
 
