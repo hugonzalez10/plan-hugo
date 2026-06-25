@@ -688,6 +688,77 @@ camino normal y preferido es el dashboard.
 
 ---
 
+## Recetar comida — "qué como" / "qué me falta" / "qué ceno"
+
+Cuando Hugo pregunta **qué comer** (no registrar): "qué como ahora", "qué ceno", "qué me
+falta", "qué colación llevo", "dame algo de mi arsenal", o cuando en "cómo voy" quede
+proteína/kcal por cerrar y haga sentido proponer. Esto **prescribe**, no registra.
+
+Lógica:
+1. Trae los totales del día (`?totals=`) y, con las metas congeladas, calcula lo que
+   **falta**: `kcalFalta = 2000 − kcalIn`, `protFalta = 190 − protein`, idem carbos/grasa/fibra.
+2. Mira la hora (`now`) y la toma que toca (tabla de slots) o la que Hugo nombre.
+3. Propón **2-3 opciones del arsenal** que cierren el hueco, priorizando EN ESTE ORDEN:
+   - **Proteína primero** si `protFalta > 20 g` (piso innegociable de 190 g).
+   - **Caber sin pasar 2000**, dejando preferible **200-400 kcal de colchón** (no rellenar
+     al ras: el riesgo de Hugo es subingerir de día y atracar de noche, no pasarse).
+   - **No repetir** lo que ya comió hoy ni la toma anterior.
+   - Toma correcta: colaciones → preferir `portable`/`sin-refrigeración`.
+   - Reglas de la semana: **máx 3 dulces/sem, máx 1 delivery/sem, sin extras pasando 2000**.
+4. Cada opción: **nombre + (kcal / P) + 1 línea de por qué cuadra**. Tuteo chileno, sin relleno.
+5. Si ya cerró proteína y queda poco margen y es tarde (`≥21:00`): no empujes comida —
+   sugiere agua si falta y listo.
+
+**Restricciones DURAS (nunca las rompas):**
+- **JAMÁS nueces / almendras / frutos secos.**
+- **Yogur griego siempre mezclado** (berries / whey / chía), nunca "solo".
+- No repetir el mismo alimento en el día.
+- El ejercicio **NO abre margen** para comer más.
+
+### Arsenal de referencia (staples de Hugo)
+
+> Snapshot del banco (fuente viva = pestaña **Banco** de la app / `src/seed.mjs`). Macros por
+> porción: **kcal · P · C · G** (g). Úsalo para componer; si Hugo nombra algo que no está, estímalo.
+
+**Colaciones / proteína portable** (desayuno, colacion1, colacion2):
+| Alimento | kcal | P | C | G |
+|----------|------|---|---|---|
+| ISO 100 whey (1 scoop) | 110 | 25 | 2 | 1 |
+| Yogur griego 0% 200g + frambuesa + whey + chía | 250 | 35 | 20 | 5 |
+| Charqui 40g | 130 | 25 | 2 | 3 |
+| Colún Protein (botella) | 160 | 18 | 18 | 2 |
+| Loncoleche/Yogurt Protein Colún | 100-160 | 11-18 | 12-20 | 1-3 |
+| Atún en lata solo / + 4 galletas de arroz | 120 / 280 | 26 / 25 | 0 / 30 | 1 / 6 |
+| 2 huevos duros (+ 1 yogurt Colún) | 180 / 270 | 13 / 24 | 1 / 10 | 12 / 14 |
+| 100g pavo en láminas + 1 fruta | 230 | 22 | 22 | 4 |
+| Quesillo/Requesón 100-150g + galletas/fruta | 185-190 | 14-20 | 18-20 | 4-6 |
+| Avena 60g + scoop proteína | 350 | 32 | 42 | 6 |
+| Batido proteína + leche descremada + plátano | 280 | 32 | 30 | 4 |
+| 4 claras revueltas + champiñón | 95 | 15 | 2 | 2 |
+| Quest Bar | 200 | 21 | 22 | 8 |
+
+**Almuerzos / cenas (recetas completas):**
+| Plato | Ocasión | kcal | P | C | G |
+|-------|---------|------|---|---|---|
+| Pollo 150g + arroz integral + ensalada | almuerzo | 505 | 43 | 48 | 12 |
+| Posta 120g + puré de coliflor + verduras | almuerzo | 330 | 36 | 18 | 13 |
+| Lentejas guisadas + carne molida magra | almuerzo | 380 | 36 | 42 | 9 |
+| Salmón 150g + quinoa + brócoli | cena | 550 | 43 | 40 | 22 |
+| Merluza 180g al horno + papas + ensalada | cena | 320 | 37 | 30 | 6 |
+| Pavo molido 140g + zapallo italiano + arroz | cena | 420 | 36 | 45 | 8 |
+| (proteína sola: pollo/salmón/posta/atún 2 latas) | cena | 240-280 | 32-52 | 0 | 2-16 |
+
+**Postres (almuerzo/cena, ojo regla de 3 dulces/sem):**
+| Postre | kcal | P | C | G |
+|--------|------|---|---|---|
+| Jalea protein / Brownie proteico casero | 60 / 118 | 10 / 11 | 4 / 8 | 0 / 5 |
+| Fruta (manzana/pera/plátano/uvas/berries) | 65-105 | 0-2 | 15-27 | 0-1 |
+| Yogurt Colún light / Gelatina light | 70 / 10 | 6 / 1 | 9 / 0 | 1 / 0 |
+| Chocolate amargo 70% (20g) | 120 | 1 | 9 | 8 |
+| Helado bajo cal (1 bola) | 90 | 3 | 14 | 2 |
+
+---
+
 ## Check-in semanal (lunes) — tasa de pérdida + pacing a la meta + recomposición
 
 El criterio de progreso ya **no es el déficit calórico fijo** sino la **tasa de pérdida
