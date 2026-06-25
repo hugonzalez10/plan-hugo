@@ -877,6 +877,48 @@ en una línea: "van 4 días, ¿hacemos el check de composición?").
 
 ---
 
+## Reporte semanal narrado (lunes) — LA salida unificada
+
+Los lunes (o si Hugo pide "reporte de la semana", "resumen semanal", "cómo viene la
+semana"), entrega **UN solo mensaje narrado**, sin consuelo, que junta las **4 dimensiones**
+en un veredicto. El check-in de peso y el check de composición aportan los números; aquí se
+**orquestan** con entreno y nutrición. No es una tabla: es un parte de situación corto.
+
+### Datos (un par de curls al bridge)
+- `curl -sL "$BRIDGE_URL?k=$BRIDGE_TOKEN"` → JSON completo. Filtra a la **semana
+  lunes-domingo** que cierra: `weights`, `workouts`, `meals`.
+- Hoy con `TZ=America/Santiago date +%F`; deriva el lunes y el domingo de la semana evaluada.
+
+### Estructura del mensaje (en este orden)
+1. **Veredicto (1 línea, primero):** ¿la semana sumó a la meta del 27-nov-2026? → "en
+   fecha" / "atrasado N sem" / "semana perdida, hay que recuperar".
+2. **Peso & pacing** (usa el check-in semanal A+B): tasa %/sem (Garthe, banda 0.5-0.7) +
+   **ETA a 90 kg vs 27-nov**. Una línea con el número, no la tabla completa.
+3. **Composición** (si hubo escaneo esta semana, usa el check de composición): **visceral
+   Δ hacia <10 primero**, luego músculo esq. y %grasa. Si NO hubo escaneo, dilo: "sin
+   escaneo esta semana → toca uno".
+4. **Entreno** (de `workouts` de la semana):
+   - **Nº de sesiones vs 5** (cuenta entrenos distintos).
+   - **¿Día 3 (Cardio Z2) hecho?** Si falta, es la **alerta #1** de la semana (palanca
+     anti-visceral; no se sacrifica).
+   - **Tren inferior vs superior:** suma volumen/series por grupo (`exercises[].muscle`);
+     avisa si piernas/glúteos quedaron bajo cuota.
+   - **Progresión en anclas:** ¿subió carga/reps vs la semana previa o se estancó? (variar
+     ejercicios sin progresar = error, márcalo).
+5. **Nutrición** (de `meals` de la semana):
+   - **Días que cumplieron** kcal ≤ 2.000 **y** proteína ≥ 190 (cuéntalos, ej. "4/7").
+   - **Proteína promedio/día** y si hubo días con **distribución subóptima** (<4 tomas ≥36 g).
+   - **Reglas:** dulces y delivery usados vs tope (máx 3 / máx 1 por semana).
+6. **Una sola acción** para la semana que entra (NO una lista): la palanca de mayor retorno
+   según lo de arriba — casi siempre **cerrar el Día 3 Z2**, subir proteína los días que
+   faltó, o extender el cardio si el pacing va atrasado. **Nunca** recortar kcal (congeladas).
+
+Tono: directo, chileno (tuteo), sin relleno ni consuelo, números redondeados. Si una
+dimensión no tiene data (semana sin pesajes, sin escaneo, sin entrenos registrados), **dilo
+explícito** en vez de inventar.
+
+---
+
 ## Categoría de comida según hora
 
 Misma regla que `slotByTime()` en la app (`app.jsx`) y `_slotByTime()` en el `.gs`, para
