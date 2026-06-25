@@ -806,6 +806,32 @@ function BentoTodayHero({ totals, targets, streak, onStreakClick, weightSeries, 
     { label: 'Grasa corp.', v: lastComp?.bodyFatPct, unit: '%', d: compDelta('bodyFatPct'), goodWhenUp: false },
   ];
 
+  // Pacing a la meta: ¿el ritmo real de pérdida alcanza para llegar al peso objetivo en la fecha límite?
+  const GOAL_DEADLINE = '2026-11-27';
+  const goalKg = state?.userProfile?.goalWeightKg || 90;
+  let pacing = null;
+  const trend = computeTrendAnalysis(state?.weights || [], state?.days || {}, state?.snackBank || [], state?.proteinBank || [], T, state?.dessertBank || [], state?.antojoCustomItems || []);
+  if (trend && trend.lossPctPerWeek != null && trend.last?.weightKg != null) {
+    const curKg = trend.last.weightKg;
+    const kgToGo = curKg - goalKg;
+    const realRate = (trend.lossPctPerWeek / 100) * curKg; // kg/sem (+ = bajando)
+    const nowMs = new Date(todayK + 'T12:00:00').getTime();
+    const weeksToDeadline = (new Date(GOAL_DEADLINE + 'T12:00:00').getTime() - nowMs) / (7 * 86400000);
+    if (kgToGo <= 0.2) {
+      pacing = { tone: 'pos', text: `meta ${goalKg} kg alcanzada` };
+    } else if (realRate <= 0.02 || weeksToDeadline <= 0) {
+      pacing = { tone: 'warm', text: `a ${goalKg} kg · sin avance` };
+    } else {
+      const etaWeeks = kgToGo / realRate;
+      const eta = new Date(nowMs + etaWeeks * 7 * 86400000);
+      const meses = ['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic'];
+      const slack = weeksToDeadline - etaWeeks; // + = llega antes del 27-nov
+      const tone = slack >= 0 ? 'pos' : (slack >= -4 ? 'yellow' : 'warm');
+      const verdict = slack >= 0 ? `en fecha · ~${eta.getDate()} ${meses[eta.getMonth()]}` : `atrasado ${Math.ceil(-slack)} sem`;
+      pacing = { tone, text: `a ${goalKg} kg · ${verdict}` };
+    }
+  }
+
   return (
     <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))' }}>
       {/* Energía */}
@@ -889,6 +915,12 @@ function BentoTodayHero({ totals, targets, streak, onStreakClick, weightSeries, 
         {lastWeight ? (
           <>
             <div className="text-3xl font-bold" style={{ letterSpacing: '-0.04em', fontVariantNumeric: 'tabular-nums', lineHeight: 1 }}>{lastWeight.weightKg}<span className="text-xs font-normal" style={{ color: 'var(--bento-faint)' }}> kg</span></div>
+            {pacing && (
+              <div className="mt-2" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ width: 7, height: 7, borderRadius: 99, background: `var(--bento-${pacing.tone})`, flexShrink: 0 }} />
+                <span className="bento-mono" style={{ fontSize: 10, color: 'var(--bento-muted)' }}>{pacing.text}</span>
+              </div>
+            )}
             {path && (
               <svg viewBox="0 0 100 30" preserveAspectRatio="none" style={{ width: '100%', height: 56, marginTop: 12 }}>
                 <path d={path + ` L100,30 L0,30 Z`} fill="var(--bento-pos)" opacity="0.13" />

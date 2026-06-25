@@ -4,7 +4,7 @@
  * NO interceptamos llamadas a api.anthropic.com.
  */
 
-const CACHE_NAME = 'plan-hugo-v70-composicion-visceral-recomposicion';
+const CACHE_NAME = 'plan-hugo-v71-badge-pacing-meta';
 const CORE_URLS = [
   './index.html',
   './app.js',
