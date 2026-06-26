@@ -88,3 +88,67 @@ test('día tranquilo y temprano sin pesajes → sin ruido (lista vacía)', () =>
   const ins = computeProactiveInsights(st, '2026-06-26', T, { hour: 11, refDate: '2026-06-26' });
   assert.deepEqual(ins, []);
 });
+
+// --- Schedule-aware: usa state.settings.notifications ---
+const withNotif = (days, notif) => ({ ...stateWith(days), settings: { notifications: notif } });
+
+test('comida puntual atrasada: pasó la hora de almuerzo (13:30) y no se marcó', () => {
+  const st = withNotif(
+    { '2026-06-26': { eaten: {}, extras: [], water: { ml: 3000 } } },
+    { almuerzo: '13:30', cena: '20:30' }
+  );
+  // 15:00 = 900 min, almuerzo 13:30+75min de gracia = 885 → atrasado.
+  const ins = computeProactiveInsights(st, '2026-06-26', T, { nowMinutes: 15 * 60, refDate: '2026-06-26' });
+  const m = ins.find((i) => i.title.toLowerCase().includes('hora de almuerzo'));
+  assert.ok(m);
+  assert.equal(m.severity, 'warn');
+});
+
+test('comida puntual: dentro del margen de gracia → todavía NO avisa', () => {
+  const st = withNotif(
+    { '2026-06-26': { eaten: {}, extras: [], water: { ml: 3000 } } },
+    { almuerzo: '13:30' }
+  );
+  // 14:00 = 840 < 13:30+75 = 885 → aún no.
+  const ins = computeProactiveInsights(st, '2026-06-26', T, { nowMinutes: 14 * 60, refDate: '2026-06-26' });
+  assert.ok(!ins.some((i) => i.title.toLowerCase().includes('hora de almuerzo')));
+});
+
+test('comida puntual: si la registraste, no avisa aunque pase la hora', () => {
+  const st = withNotif(
+    { '2026-06-26': { eaten: {}, extras: [extra({ kcal: 600, protein: 45, mealSlot: 'almuerzo' })], water: { ml: 3000 } } },
+    { almuerzo: '13:30' }
+  );
+  const ins = computeProactiveInsights(st, '2026-06-26', T, { nowMinutes: 15 * 60, refDate: '2026-06-26' });
+  assert.ok(!ins.some((i) => i.title.toLowerCase().includes('hora de almuerzo')));
+});
+
+test('comida puntual: solo avisa de la MÁS temprana atrasada', () => {
+  const st = withNotif(
+    { '2026-06-26': { eaten: {}, extras: [], water: { ml: 3000 } } },
+    { colacion1: '11:00', almuerzo: '13:30', colacion2: '18:00' }
+  );
+  const ins = computeProactiveInsights(st, '2026-06-26', T, { nowMinutes: 19 * 60, refDate: '2026-06-26' });
+  const meals = ins.filter((i) => i.title.toLowerCase().includes('pasó tu hora'));
+  assert.equal(meals.length, 1);
+  assert.match(meals[0].title, /colación 1/i);
+});
+
+test('proteína urgente se ata a tu hora de cena configurada', () => {
+  const days = { '2026-06-26': { eaten: {}, extras: [extra({ kcal: 900, protein: 100 })], water: { ml: 3000 } } };
+  // Cena 21:30: a las 21:00 (1260) aún NO es "tarde" para proteína → no urgente todavía.
+  const early = computeProactiveInsights(withNotif(days, { cena: '21:30' }), '2026-06-26', T, { nowMinutes: 21 * 60, refDate: '2026-06-26' });
+  assert.ok(!early.some((i) => i.icon === '🥩' && i.severity === 'urgent'));
+  // 21:45 (1305) ≥ 21:30 → urgente.
+  const late = computeProactiveInsights(withNotif(days, { cena: '21:30' }), '2026-06-26', T, { nowMinutes: 21 * 60 + 45, refDate: '2026-06-26' });
+  assert.ok(late.some((i) => i.icon === '🥩' && i.severity === 'urgent'));
+});
+
+test('lista capada a 5 tarjetas', () => {
+  const st = withNotif(
+    { '2026-06-26': { eaten: {}, extras: [extra({ kcal: 2400, protein: 20 })], water: { ml: 0 } } },
+    { colacion1: '11:00' }
+  );
+  const ins = computeProactiveInsights(st, '2026-06-26', T, { nowMinutes: 22 * 60, refDate: '2026-06-26' }, []);
+  assert.ok(ins.length <= 5);
+});

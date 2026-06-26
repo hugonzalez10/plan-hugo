@@ -2421,8 +2421,8 @@ function CoachModal({ state, setState, dateKey, targets, onClose, onOpenSubstitu
 
   // Señales deterministas (sin IA): se muestran siempre y fundamentan el prompt del coach.
   const insights = useMemo(
-    () => computeProactiveInsights(state, dateKey, T, { hour: new Date().getHours() }),
-    [state.days, state.weights, state.snackBank, state.proteinBank, state.dessertBank, dateKey, T]
+    () => { const n = new Date(); return computeProactiveInsights(state, dateKey, T, { nowMinutes: n.getHours() * 60 + n.getMinutes() }); },
+    [state.days, state.weights, state.snackBank, state.proteinBank, state.dessertBank, state.settings, dateKey, T]
   );
 
   const sig = hashSig({
@@ -4588,8 +4588,8 @@ Reglas:
 
   // Señales proactivas de HOY (deterministas, sin IA): se muestran arriba, no requieren el análisis.
   const todayInsights = useMemo(
-    () => computeProactiveInsights(state, todayKey(), targets, { hour: new Date().getHours() }),
-    [state.days, state.weights, state.snackBank, state.proteinBank, state.dessertBank, targets]
+    () => { const n = new Date(); return computeProactiveInsights(state, todayKey(), targets, { nowMinutes: n.getHours() * 60 + n.getMinutes() }); },
+    [state.days, state.weights, state.snackBank, state.proteinBank, state.dessertBank, state.settings, targets]
   );
 
   return (
