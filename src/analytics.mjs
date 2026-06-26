@@ -670,6 +670,95 @@ export function computeStreak(days, snackBank, proteinBank, targets, refDate, de
   };
 }
 
+// Orden de prioridad para rankear las tarjetas (urgent primero).
+const INSIGHT_RANK = { urgent: 0, warn: 1, info: 2, good: 3 };
+
+// Motor de insights proactivos DETERMINISTA (sin IA): compone las señales que ya calculamos
+// (ajuste de plan, racha) con chequeos del día (brecha de proteína/agua/exceso según la hora) en
+// una lista rankeada de tarjetas accionables. Funciona offline y sin API key, y alimenta tanto el
+// panel del Coach como su prompt (para que la IA hable de números REALES, no de generalidades).
+// Puro y testeable: la hora y la fecha de referencia entran por `options` (sin tocar el reloj).
+export function computeProactiveInsights(state, dateKey, targets, options = {}) {
+  const refDate = options.refDate || dateKey || todayKey();
+  const hour = Number.isFinite(options.hour) ? options.hour : new Date().getHours();
+  const T = targets || DEFAULT_TARGETS;
+  const days = state?.days || {};
+  const day = days[dateKey] || {};
+  const snackBank = state?.snackBank || [];
+  const proteinBank = state?.proteinBank || [];
+  const dessertBank = state?.dessertBank || [];
+  const customAntojo = state?.antojoCustomItems || [];
+  const totals = computeDayTotals(day, snackBank, proteinBank, T, dessertBank, customAntojo);
+  const out = [];
+  const push = (severity, icon, title, detail, action) =>
+    out.push({ id: title, severity, icon, title, detail, action: action || { kind: 'none' } });
+
+  // 1. Ajuste de plan (pérdida muy rápida/lenta): ya es determinista.
+  const adj = computePlanAdjustment(state, refDate);
+  if (adj) {
+    push(adj.kind === 'too_fast' ? 'warn' : 'info',
+      adj.kind === 'too_fast' ? '🐇' : '🐢',
+      adj.kind === 'too_fast' ? 'Bajando muy rápido' : 'Ritmo lento',
+      adj.message);
+  }
+
+  // 2. Proteína: brecha grande y ya de noche → urgente; media a la tarde → aviso.
+  const protGap = Math.round(totals.proteinRemaining);
+  if (protGap >= 25 && hour >= 19) {
+    push('urgent', '🥩', `Faltan ${protGap} g de proteína`,
+      `Son las ${hour} h y vas ${Math.round(totals.protein)}/${T.proteinMin} g. Mete una fuente proteica ya (atún, claras, yogur proteico).`,
+      { kind: 'substitution', label: 'Ver opciones' });
+  } else if (protGap >= 40 && hour >= 16) {
+    push('warn', '🥩', `Vas corto de proteína (${protGap} g)`,
+      `${Math.round(totals.protein)}/${T.proteinMin} g a media tarde. Prioriza proteína en lo que queda del día.`,
+      { kind: 'substitution', label: 'Ver opciones' });
+  }
+
+  // 3. Agua: lejos de la meta entrada la tarde/noche.
+  const waterGap = Math.round(totals.waterRemaining);
+  if (T.waterTarget > 0 && waterGap >= 750 && hour >= 17) {
+    push('warn', '💧', `Faltan ${waterGap} ml de agua`,
+      `${totals.waterMl}/${T.waterTarget} ml. Un par de vasos ahora y llegas.`,
+      { kind: 'water500', label: '+500 ml' });
+  }
+
+  // 4. Exceso de calorías sobre el umbral rojo.
+  if (totals.eatenAny && T.kcalRed && totals.kcal > T.kcalRed) {
+    const over = Math.round(totals.kcal - T.kcalMax);
+    push('warn', '⚠️', `${over} kcal sobre la meta`,
+      `Vas ${Math.round(totals.kcal)} kcal (meta ${T.kcalMax}). Mañana retoma; no compenses saltándote comidas.`);
+  }
+
+  // 5. Racha: viva pero hoy sin cumplir y se hace tarde → en juego; cumplida y larga → felicitar.
+  // Ojo: streak.current se corta HOY si hoy no está cumplido, así que el "en juego" mira la racha
+  // hasta AYER (prev) para saber cuántos días se arriesgan.
+  const streak = computeStreak(days, snackBank, proteinBank, T, refDate, dessertBank, customAntojo);
+  if (!streak.todayMet && hour >= 18) {
+    const prev = computeStreak(days, snackBank, proteinBank, T, shiftDate(refDate, -1), dessertBank, customAntojo);
+    if (prev.current > 0) {
+      push('warn', '🔥', `Tu racha de ${prev.current} días está en juego`,
+        'Completa kcal y proteína del día para no cortarla.');
+    }
+  } else if (streak.todayMet && streak.current >= 3) {
+    push('good', '🔥', `Racha de ${streak.current} días`, 'Día cumplido. Sigue así.');
+  }
+
+  // 6. Peso desactualizado: el pacing y el TDEE adaptativo se vuelven ruido sin pesajes recientes.
+  const lastW = (state?.weights || [])
+    .filter((w) => w && w.weightKg != null && w.date)
+    .map((w) => w.date).sort().pop();
+  if (lastW) {
+    const stale = daysBetween(lastW, refDate);
+    if (stale >= 10) {
+      push('info', '⚖️', `${stale} días sin pesarte`,
+        'El pacing y el TDEE adaptativo se desactualizan. Registra un peso cuando puedas.',
+        { kind: 'logWeight', label: 'Registrar peso' });
+    }
+  }
+
+  return out.sort((a, b) => INSIGHT_RANK[a.severity] - INSIGHT_RANK[b.severity]);
+}
+
 export function computeComparison(state, dateKey, targets) {
   const days = state.days || {};
   const weights = state.weights || [];
