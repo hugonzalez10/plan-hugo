@@ -144,6 +144,40 @@ test('proteína urgente se ata a tu hora de cena configurada', () => {
   assert.ok(late.some((i) => i.icon === '🥩' && i.severity === 'urgent'));
 });
 
+test('cierre del día: por la tarde proyecta el margen y si la cena del plan cubre la proteína', () => {
+  const st = {
+    ...withNotif(
+      { '2026-06-26': { eaten: {}, extras: [extra({ kcal: 900, protein: 100, mealSlot: 'almuerzo' })], water: { ml: 3000 }, proteinId: 'p1' } },
+      { almuerzo: '13:30', cena: '20:30' }
+    ),
+    proteinBank: [{ id: 'p1', name: 'Atún', kcal: 300, protein: 60 }],
+  };
+  const ins = computeProactiveInsights(st, '2026-06-26', T, { nowMinutes: 15 * 60, refDate: '2026-06-26' });
+  const c = ins.find((i) => i.icon === '🎯');
+  assert.ok(c, 'debe proyectar el cierre del día');
+  assert.equal(c.severity, 'info');
+  assert.match(c.detail, /Atún/);
+  assert.match(c.detail, /faltarían 40 g/); // 100 restantes − 60 de la cena
+});
+
+test('cierre del día: si ya te pasaste de kcal, no proyecta', () => {
+  const st = withNotif(
+    { '2026-06-26': { eaten: {}, extras: [extra({ kcal: 2400, protein: 100, mealSlot: 'almuerzo' })], water: { ml: 3000 } } },
+    { cena: '20:30' }
+  );
+  const ins = computeProactiveInsights(st, '2026-06-26', T, { nowMinutes: 15 * 60, refDate: '2026-06-26' });
+  assert.ok(!ins.some((i) => i.icon === '🎯'));
+});
+
+test('cierre del día: pasada la cena ya no proyecta (los nudges nocturnos toman la posta)', () => {
+  const st = withNotif(
+    { '2026-06-26': { eaten: {}, extras: [extra({ kcal: 900, protein: 100, mealSlot: 'almuerzo' })], water: { ml: 3000 } } },
+    { cena: '20:30' }
+  );
+  const ins = computeProactiveInsights(st, '2026-06-26', T, { nowMinutes: 21 * 60, refDate: '2026-06-26' });
+  assert.ok(!ins.some((i) => i.icon === '🎯'));
+});
+
 test('lista capada a 5 tarjetas', () => {
   const st = withNotif(
     { '2026-06-26': { eaten: {}, extras: [extra({ kcal: 2400, protein: 20 })], water: { ml: 0 } } },
