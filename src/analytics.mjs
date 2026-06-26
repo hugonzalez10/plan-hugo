@@ -337,6 +337,95 @@ export function computeEvolution(weights, goal) {
   return { metrics, count: sorted.length, firstDate: firstW.date, lastDate: lastW.date, spanDays, recomp };
 }
 
+// Meta de grasa visceral (índice). Bajo este valor = zona buena.
+export const VISCERAL_GOAL = 10;
+
+// Indicadores de grasa "reales" en kg, por prioridad. Si la balanza no exporta
+// ninguno, derivamos la grasa total (peso × %grasa/100).
+const FAT_PRIORITY = [
+  { key: 'fatKg',             label: 'Grasa',            unit: 'kg' },
+  { key: 'subcutaneousFatKg', label: 'Grasa subcutánea', unit: 'kg' },
+];
+
+// Trayectoria de una serie de puntos {date, v} YA ordenada por fecha: primer→último
+// valor, delta de arco largo, ritmo semanal y estado con zona muerta `eps`. Mismo
+// criterio que computeEvolution, pero sirve también para métricas derivadas (no
+// almacenadas, como la grasa total estimada) que aquel no contempla.
+function trendOf(pts, meta, { better, eps }) {
+  const first = pts[0].v;
+  const last = pts[pts.length - 1].v;
+  const deltaArc = Number((last - first).toFixed(2));
+  const d1 = new Date(pts[0].date + 'T12:00:00');
+  const d2 = new Date(pts[pts.length - 1].date + 'T12:00:00');
+  const days = Math.max(1, Math.round((d2 - d1) / 86400000));
+  const weekly = Number(((deltaArc / days) * 7).toFixed(2));
+  let status;
+  if (Math.abs(deltaArc) < (eps || 0.2)) status = 'estable';
+  else if (better === 'down') status = deltaArc < 0 ? 'mejora' : 'empeora';
+  else status = deltaArc > 0 ? 'mejora' : 'empeora';
+  return {
+    key: meta.key, label: meta.label, unit: meta.unit, derived: !!meta.derived,
+    better, first, last, deltaArc, days, weekly, status, values: pts.map((p) => p.v),
+  };
+}
+
+// Foco de composición para la tarjeta de inicio.
+//
+// La grasa visceral es un índice ENTERO que casi no se mueve entre escaneos, y el
+// delta scan-to-scan que se mostraba era ~0 (desmotivante). Acá elegimos un
+// indicador de grasa CONTINUO (cambia en cada medición), mostramos su trayectoria
+// de largo plazo (primer→último escaneo, no vs el anterior) y la historia de
+// recomposición: si el peso queda fijo pero sube el músculo, la grasa bajó
+// (balance de masa). La grasa derivada (peso × %grasa) captura eso aunque la
+// balanza no entregue grasa en kg.
+//
+// `goal === 'gain'` invierte la dirección deseada de la grasa (fase de volumen).
+export function computeCompositionFocus(weights, goal) {
+  const sorted = (weights || []).filter((w) => w.weightKg != null)
+    .slice().sort((a, b) => a.date.localeCompare(b.date));
+  if (sorted.length < 1) return null;
+
+  const fatBetter = goal === 'gain' ? 'up' : 'down';
+
+  // Indicador de grasa: el de mayor prioridad con ≥2 puntos (para tener trayectoria);
+  // si ninguno tiene historia, el de mayor prioridad con ≥1 (headline estático).
+  const cands = [];
+  for (const src of FAT_PRIORITY) {
+    const pts = sorted.filter((w) => w[src.key] != null)
+      .map((w) => ({ date: w.date, v: Number(w[src.key]) }));
+    if (pts.length) cands.push({ src, pts });
+  }
+  const dpts = sorted.filter((w) => w.bodyFatPct != null)
+    .map((w) => ({ date: w.date, v: Math.round((w.weightKg * w.bodyFatPct / 100) * 10) / 10 }));
+  if (dpts.length) cands.push({ src: { key: 'fatMassKg', label: 'Grasa (est.)', unit: 'kg', derived: true }, pts: dpts });
+  const fatCand = cands.find((c) => c.pts.length >= 2) || cands[0] || null;
+  const fat = fatCand ? trendOf(fatCand.pts, fatCand.src, { better: fatBetter, eps: 0.2 }) : null;
+
+  // Músculo esquelético (sube = mejor).
+  const mpts = sorted.filter((w) => w.skeletalMuscleKg != null)
+    .map((w) => ({ date: w.date, v: Number(w.skeletalMuscleKg) }));
+  const muscle = mpts.length >= 1
+    ? trendOf(mpts, { key: 'skeletalMuscleKg', label: 'Músculo esq.', unit: 'kg' }, { better: 'up', eps: 0.2 })
+    : null;
+
+  // Grasa visceral: arco largo + distancia a la meta (sigue siendo el objetivo #1).
+  const vpts = sorted.filter((w) => w.visceralFat != null)
+    .map((w) => ({ date: w.date, v: Number(w.visceralFat) }));
+  let visceral = null;
+  if (vpts.length >= 1) {
+    const t = trendOf(vpts, { key: 'visceralFat', label: 'Grasa visceral', unit: '' }, { better: 'down', eps: 0.5 });
+    const toGoal = Math.max(0, Math.round((t.last - VISCERAL_GOAL) * 10) / 10);
+    visceral = { ...t, goal: VISCERAL_GOAL, toGoal, reached: t.last <= VISCERAL_GOAL };
+  }
+
+  if (!fat && !muscle && !visceral) return null;
+
+  // Recomposición: la grasa bajó (más allá del ruido) sin perder músculo.
+  const recomp = !!(fat && fat.deltaArc < -0.2 && muscle && muscle.deltaArc >= -0.2);
+
+  return { fat, muscle, visceral, recomp };
+}
+
 export function interpretTrend(data, targets) {
   if (!data) return null;
   const T = targets || DEFAULT_TARGETS;
