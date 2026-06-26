@@ -2,20 +2,16 @@
 name: food-tracker
 description: >
   Registra alimentación, peso, ejercicio y agua diarios del Dr. Hugo González con
-  fotos o texto, estima calorías/macros/composición con visión IA, y escribe un
-  JSON depurado en Google Drive (plan-hugo-bridge.json) para que la app "Plan
-  Hugo" lo consuma directo sin llamar a la API. USAR SIEMPRE que Hugo mande una
-  foto de comida, una captura de báscula/composición corporal (peso, % grasa,
-  músculo), o una captura de entrenamiento (Apple Fitness, Strava, etc.), o diga
-  "comí X", "registra esto", "anota esta comida", "cuántas calorías tiene esto",
-  "pésame esto", "registra mi peso", "anota este entrenamiento", "registra este
-  ejercicio", "registra X de agua", "agrega X de agua", "añade X litros/lt",
-  "suma X de agua", "tomé X vasos", "anota un vaso de agua",
-  "me tomé una botella/un litro", o cualquier variación de registro de comida,
-  peso, actividad o agua/hidratación. **agregar/añadir/sumar son sinónimos de
-  registrar** (ej. "agrega 1.5lt de agua" = registrar 1500 ml de agua); cualquiera
-  de esos verbos sobre comida/peso/ejercicio/agua DEBE activar la skill.
-  También activar con "cómo voy hoy", "cuánto llevo", "resumen del día".
+  fotos o texto, estima calorías/macros/composición con visión IA y escribe el JSON
+  del bridge para que la app "Plan Hugo" lo consuma sin llamar a la API. USAR SIEMPRE
+  que Hugo mande una foto de comida, una captura de báscula/composición (peso, %
+  grasa, músculo) o de entrenamiento (Apple Fitness, Strava), o diga "comí X",
+  "registra/anota esto", "cuántas calorías tiene esto", "pésame esto", "registra mi
+  peso", "anota este entrenamiento/ejercicio", "registra/agrega/añade/suma X de agua",
+  "tomé X vasos", "me tomé una botella/un litro", o cualquier variación de registro de
+  comida, peso, actividad o agua. agregar/añadir/sumar = registrar (ej. "agrega 1.5lt
+  de agua" = 1500 ml). También activar con "cómo voy hoy", "cuánto llevo", "resumen
+  del día".
 ---
 
 # Food Tracker — Plan Hugo
