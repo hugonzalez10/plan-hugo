@@ -4,7 +4,7 @@
  * NO interceptamos llamadas a api.anthropic.com.
  */
 
-const CACHE_NAME = 'plan-hugo-v71-badge-pacing-meta';
+const CACHE_NAME = 'plan-hugo-v72-sync-merge-3way';
 const CORE_URLS = [
   './index.html',
   './app.js',
