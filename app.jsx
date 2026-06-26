@@ -28,7 +28,7 @@ import {
   computeAdaptiveTDEE, buildEnergySeries, computePlanAdjustment, dayMetsTarget,
   computeTrendAnalysis, computeEvolution, interpretTrend, TREND_MIN_DAYS, TREND_WINDOW_DAYS,
   computeExerciseStats, computeRoutineExerciseProgress, computeStreak, computeComparison, computeRecents,
-  computeProactiveInsights,
+  computeProactiveInsights, computeCompositionFocus,
 } from './src/analytics.mjs';
 import { uuid, normalizeName, getDeviceId } from './src/util.mjs';
 import {
@@ -805,22 +805,18 @@ function BentoTodayHero({ totals, targets, streak, onStreakClick, weightSeries, 
     chips.push({ k, label: ['D','L','M','M','J','V','S'][dow], met, isToday: i === 0 });
   }
 
-  // Composición: último escaneo con datos de composición (visceral/músculo/%grasa) + delta vs el anterior.
-  // Grasa visceral = marcador #1 (objetivo índice 15 → <10); músculo y %grasa = lente de recomposición.
-  const comps = (state?.weights || [])
+  // Composición: indicador de grasa CONTINUO (se mueve cada escaneo) con su trayectoria
+  // de largo plazo + lente de recomposición. La grasa visceral (índice entero) queda como
+  // meta de fondo con su arco, en vez del número congelado scan-to-scan. Ver
+  // computeCompositionFocus en src/analytics.mjs.
+  const comp = computeCompositionFocus(state?.weights || [], state?.userProfile?.goal);
+  const lastCompDate = (state?.weights || [])
     .filter((w) => w.visceralFat != null || w.skeletalMuscleKg != null || w.bodyFatPct != null)
-    .slice().sort((a, b) => ((a.date || '') + (a.time || '')).localeCompare((b.date || '') + (b.time || '')));
-  const lastComp = comps.length ? comps[comps.length - 1] : null;
-  const prevComp = comps.length > 1 ? comps[comps.length - 2] : null;
-  const compDelta = (key) => (lastComp && prevComp && lastComp[key] != null && prevComp[key] != null)
-    ? Math.round((lastComp[key] - prevComp[key]) * 10) / 10 : null;
-  const visc = lastComp?.visceralFat;
-  const viscDelta = compDelta('visceralFat');
-  const viscColor = visc == null ? 'var(--bento-faint)' : visc < 10 ? 'var(--bento-pos)' : visc <= 12 ? 'var(--bento-yellow)' : 'var(--bento-warm)';
-  const recompRows = [
-    { label: 'Músculo esq.', v: lastComp?.skeletalMuscleKg, unit: ' kg', d: compDelta('skeletalMuscleKg'), goodWhenUp: true },
-    { label: 'Grasa corp.', v: lastComp?.bodyFatPct, unit: '%', d: compDelta('bodyFatPct'), goodWhenUp: false },
-  ];
+    .map((w) => w.date).sort().pop();
+  // Color por estado de la métrica de grasa (mejora = verde, empeora = cálido, estable = tenue).
+  const statusColor = (s) => s === 'mejora' ? 'var(--bento-pos)' : s === 'empeora' ? 'var(--bento-warm)' : 'var(--bento-muted)';
+  // Color del índice visceral por rangos clínicos (mantiene la semántica previa).
+  const viscColor = (v) => v == null ? 'var(--bento-faint)' : v < 10 ? 'var(--bento-pos)' : v <= 12 ? 'var(--bento-yellow)' : 'var(--bento-warm)';
 
   // Pacing a la meta: ¿el ritmo real de pérdida alcanza para llegar al peso objetivo en la fecha límite?
   const GOAL_DEADLINE = '2026-11-27';
@@ -952,42 +948,86 @@ function BentoTodayHero({ totals, targets, streak, onStreakClick, weightSeries, 
         )}
       </div>
 
-      {/* Composición — grasa visceral (#1) + lente de recomposición */}
+      {/* Composición — grasa continua (se mueve cada escaneo) + recomposición; visceral = meta de fondo */}
       <div className="bento-card" style={{ minWidth: 0 }}>
         <div className="flex justify-between items-center mb-3">
           <span className="text-sm font-semibold" style={{ letterSpacing: '-0.01em' }}>Composición</span>
-          {lastComp?.date && <span className="bento-label">{lastComp.date.slice(5)}</span>}
+          {lastCompDate && <span className="bento-label">{lastCompDate.slice(5)}</span>}
         </div>
-        {lastComp ? (
+        {comp ? (
           <>
-            <div className="flex items-baseline justify-between">
-              <div style={{ minWidth: 0 }}>
-                <div className="bento-label">Grasa visceral</div>
-                <div className="font-bold" style={{ fontSize: 30, letterSpacing: '-0.04em', fontVariantNumeric: 'tabular-nums', lineHeight: 1, color: viscColor }}>
-                  {visc != null ? visc : '—'}
-                  <span className="text-xs font-normal" style={{ color: 'var(--bento-faint)' }}> → &lt;10</span>
+            {comp.fat && (
+              <div className="flex items-end justify-between gap-2">
+                <div style={{ minWidth: 0 }}>
+                  <div className="bento-label">{comp.fat.label}</div>
+                  <div className="font-bold" style={{ fontSize: 30, letterSpacing: '-0.04em', fontVariantNumeric: 'tabular-nums', lineHeight: 1, color: statusColor(comp.fat.status) }}>
+                    {comp.fat.last}<span className="text-xs font-normal" style={{ color: 'var(--bento-faint)' }}> {comp.fat.unit}</span>
+                  </div>
+                  {comp.fat.deltaArc !== 0 && (
+                    <div className="bento-mono text-xs mt-1" style={{ color: statusColor(comp.fat.status), fontVariantNumeric: 'tabular-nums' }}>
+                      {comp.fat.deltaArc > 0 ? '+' : ''}{comp.fat.deltaArc} {comp.fat.unit}
+                      <span style={{ color: 'var(--bento-faint)' }}> · desde {comp.fat.first}</span>
+                    </div>
+                  )}
                 </div>
+                {comp.fat.values.length > 1 && (
+                  <Sparkline values={comp.fat.values} color={statusColor(comp.fat.status)} width={76} height={30} />
+                )}
               </div>
-              {viscDelta != null && viscDelta !== 0 && (
-                <span className="bento-mono text-xs" style={{ color: viscDelta < 0 ? 'var(--bento-pos)' : 'var(--bento-warm)', fontVariantNumeric: 'tabular-nums' }}>{viscDelta > 0 ? '+' : ''}{viscDelta}</span>
-              )}
-            </div>
-            <div className="mt-3 space-y-2">
-              {recompRows.filter((r) => r.v != null).map((r) => {
-                const isGood = r.d == null || r.d === 0 ? null : (r.goodWhenUp ? r.d > 0 : r.d < 0);
-                return (
-                  <div key={r.label} className="flex justify-between items-baseline">
-                    <span className="text-xs font-medium" style={{ color: 'var(--bento-muted)' }}>{r.label}</span>
+            )}
+            {comp.recomp && (
+              <div className="mt-3" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '3px 8px', borderRadius: 99, background: 'var(--bento-surface)' }}>
+                <span style={{ width: 6, height: 6, borderRadius: 99, background: 'var(--bento-pos)', flexShrink: 0 }} />
+                <span className="text-xs font-medium" style={{ color: 'var(--bento-pos)' }}>Recomposición</span>
+                <span className="bento-mono text-xs" style={{ color: 'var(--bento-muted)', fontVariantNumeric: 'tabular-nums' }}>
+                  grasa {comp.fat.deltaArc}{comp.fat.unit} · músculo {Math.abs(comp.muscle.deltaArc) < 0.2 ? 'intacto' : `${comp.muscle.deltaArc > 0 ? '+' : ''}${comp.muscle.deltaArc}`}
+                </span>
+              </div>
+            )}
+            {comp.muscle && (
+              <div className="mt-3 flex justify-between items-baseline">
+                <span className="text-xs font-medium" style={{ color: 'var(--bento-muted)' }}>{comp.muscle.label}</span>
+                <span className="text-xs bento-mono" style={{ fontVariantNumeric: 'tabular-nums' }}>
+                  <span style={{ color: 'var(--bento-ink)' }}>{comp.muscle.last} kg</span>
+                  {comp.muscle.deltaArc !== 0 && (
+                    <span style={{ marginLeft: 6, color: statusColor(comp.muscle.status) }}>{comp.muscle.deltaArc > 0 ? '+' : ''}{comp.muscle.deltaArc}</span>
+                  )}
+                </span>
+              </div>
+            )}
+            {comp.visceral && (() => {
+              const { first, last, goal, toGoal, reached } = comp.visceral;
+              const span = first - goal;
+              const done = reached ? 1 : span > 0 ? Math.min(1, Math.max(0, (first - last) / span)) : 0;
+              return (
+                <div className="mt-3 pt-3" style={{ borderTop: '1px solid var(--bento-hairline)' }}>
+                  <div className="flex justify-between items-baseline">
+                    <span className="text-xs font-medium" style={{ color: 'var(--bento-muted)' }}>
+                      Grasa visceral <span style={{ color: 'var(--bento-faint)' }}>· meta &lt;{goal}</span>
+                    </span>
                     <span className="text-xs bento-mono" style={{ fontVariantNumeric: 'tabular-nums' }}>
-                      <span style={{ color: 'var(--bento-ink)' }}>{r.v}{r.unit}</span>
-                      {isGood != null && (
-                        <span style={{ marginLeft: 6, color: isGood ? 'var(--bento-pos)' : 'var(--bento-warm)' }}>{r.d > 0 ? '+' : ''}{r.d}</span>
-                      )}
+                      <span style={{ color: viscColor(last) }}>{last}</span>
+                      {first !== last && <span style={{ color: 'var(--bento-faint)' }}> · desde {first}</span>}
+                      {!reached && <span style={{ color: 'var(--bento-faint)' }}> · faltan {toGoal}</span>}
                     </span>
                   </div>
-                );
-              })}
-            </div>
+                  <div style={{ height: 4, background: 'var(--bento-surface)', borderRadius: 99, marginTop: 6 }}>
+                    <div style={{ height: '100%', width: `${done * 100}%`, background: viscColor(last), borderRadius: 99 }} />
+                  </div>
+                  {comp.waist && comp.waist.deltaArc !== 0 && (
+                    <div className="flex justify-between items-baseline mt-2">
+                      <span className="text-xs font-medium" style={{ color: 'var(--bento-muted)' }}>
+                        Cintura <span style={{ color: 'var(--bento-faint)' }}>· confirma el avance</span>
+                      </span>
+                      <span className="text-xs bento-mono" style={{ fontVariantNumeric: 'tabular-nums' }}>
+                        <span style={{ color: 'var(--bento-ink)' }}>{comp.waist.last} cm</span>
+                        <span style={{ marginLeft: 6, color: statusColor(comp.waist.status) }}>{comp.waist.deltaArc > 0 ? '+' : ''}{comp.waist.deltaArc}</span>
+                      </span>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
           </>
         ) : (
           <div className="text-sm py-3" style={{ color: 'var(--bento-faint)' }}>Sin escaneo de composición aún.</div>
