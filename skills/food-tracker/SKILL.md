@@ -479,6 +479,10 @@ Barra de 10 bloques. Los totales vienen **directos en la respuesta del registro*
 bridge. Si por alguna razón la respuesta no trajo `totals`, recién ahí
 `curl -sL "$BRIDGE_URL?totals=<hoy>&k=$BRIDGE_TOKEN"`.
 
+**`[alerta si corresponde]`** = la señal MÁS severa de las reglas de "Insights proactivos"
+que solo dependen de `totals` + la hora (proteína 🥩, agua 💧, exceso ⚠️, cierre 🎯). Una
+sola línea, accionable. Las demás (racha, comida atrasada, peso) quedan para "cómo voy".
+
 ### Peso
 ```
 ⚖️ Peso registrado: [weightKg] kg[, % grasa X, músculo Y]
@@ -506,8 +510,9 @@ Usa el `waterMl` que devuelve la respuesta del registro (o `?totals=`); no recal
 > voy hoy"**, **"cuánto llevo"**, **"resumen del día"** o equivalente, **renderiza un
 > dashboard HTML interactivo inline** (la herramienta de visualización inline, **NO un
 > archivo**, NO `create_file`) con datos REALES del bridge, en bloques **A → B → C → D
-> → E** en ese orden. El resto de la skill (registro de comida/peso/workouts/agua) NO
-> cambia.
+> → E** en ese orden, y debajo (en el texto del chat) el **Bloque F — Señales de hoy**
+> (ver "Insights proactivos", más abajo). El resto de la skill (registro de
+> comida/peso/workouts/agua) NO cambia.
 
 ### Paso D1 — Traer TODA la data en una sola llamada
 
@@ -685,6 +690,63 @@ usando `workoutsRecent` para no repetir estímulo:
 Si el entorno no puede renderizar HTML inline, cae a un resumen de texto compacto con los
 mismos números (`totals` vs `targets`, `remaining`, distribución proteica) — pero el
 camino normal y preferido es el dashboard.
+
+---
+
+## Insights proactivos (deterministas, SIN API)
+
+> **Esto reemplaza al "Coach" de la app** (que gasta la API key de Anthropic). Son reglas
+> **aritméticas, sin IA**: las aplicas tú sobre los datos que YA bajó el gatherer del Paso
+> D1 (`now`, `totals`, `targets`, `remaining`, `eaten`, `mealsToday`, `weights`, `trend`).
+> Espejan la función `computeProactiveInsights` de la app (`src/analytics.mjs`) — si cambian
+> los umbrales allá, actualízalos aquí. Salida: **lista corta rankeada de tarjetas**, máx 5,
+> ordenadas por severidad. Si ninguna regla dispara, no muestres nada (no inventes).
+
+**Dónde se usan:**
+- En **"cómo voy hoy"**: agrégalas como **Bloque F** (texto del chat, debajo del dashboard),
+  arriba la más severa.
+- En el **feedback post-comida** (Paso 5): si la respuesta del registro trae `totals`,
+  puedes evaluar las reglas que solo dependen de `totals`/hora (proteína, agua, exceso,
+  cierre) y mostrar **la más severa** como `[alerta si corresponde]`. Las que necesitan
+  `trend`/`weights`/`mealsToday` (racha, comida atrasada, peso) van solo en "cómo voy".
+
+**Umbrales derivados** (de las metas congeladas: kcalMax 2000, proteinMin 190):
+- `kcalMin = round(kcalMax × 0.92)` ≈ 1840 · `kcalRed = round(kcalMax × 1.08)` ≈ 2160
+- `proteinYellow = round(proteinMin × 0.87)` ≈ 165
+- `mins(now)` = hora→minutos desde medianoche (p. ej. "19:30" → 1170).
+- **Horario de comidas** (default, ya en Paso D1): desayuno 08:00, colación 1 11:00,
+  almuerzo 13:30, colación 2 18:00, cena 20:30. `cenaMin` = 1230.
+- **Slot cubierto** = existe una comida con ese `mealSlot` en `mealsToday` (ojo: `eaten` del
+  gatherer son NOMBRES de comidas, no slots — no lo uses para esto). Margen de gracia 75 min.
+
+**Severidad** (orden de la lista): 🔴 urgente → 🟠 aviso → 🔵 info → 🟢 bien.
+
+**Reglas** (evalúa todas; emite las que cumplan, ordena, corta a 5):
+
+| # | Disparo | Tarjeta |
+|---|---------|---------|
+| 1 🍽️ | La comida **más temprana** cuya hora pautada + 75 min < `mins(now)` y cuyo slot NO está cubierto | 🟠 "Pasó tu hora de {comida} (~HH:MM) y no la registraste." (solo UNA, la más temprana) |
+| 2 🥩 | `protGap = proteinMin − protein` ≥ 25 **y** `mins(now) ≥ cenaMin` | 🔴 "Faltan {protGap} g de proteína — son las {now}, mete una fuente ya (atún, claras, yogur proteico)." |
+| 2b 🥩 | `protGap ≥ 40` **y** `hora ≥ 16` (y NO se cumplió 2) | 🟠 "Vas corto de proteína ({protGap} g) — priorízala en lo que queda del día." |
+| 3 💧 | `waterGap = waterTarget − waterMl` ≥ 750 **y** `hora ≥ 17` | 🟠 "Faltan {waterGap} ml de agua — un par de vasos ahora y llegas." |
+| 4 ⚠️ | `kcalIn > kcalRed` | 🟠 "{kcalIn − kcalMax} kcal sobre la meta — mañana retoma; no compenses saltándote comidas." |
+| 5 🔥 | Racha previa (días consecutivos **antes de hoy** en `trend` que cumplieron) ≥ 1, **hoy NO cumplido**, `hora ≥ 18` | 🟠 "Tu racha de {N} días está en juego — cierra kcal y proteína del día." |
+| 6 ⚖️ | Días desde el último `weights[].date` ≥ 10 | 🔵 "{N} días sin pesarte — el pacing y el TDEE se desactualizan, registra un peso." |
+| 7 🎯 | `14 ≤ hora` **y** `mins(now) < cenaMin` **y** `kcalIn ≤ kcalRed` **y** (`protGap ≥ 15` o `kcalMax − kcalIn ≥ 200`) | 🔵 "Cómo cerrar el día — quedan {max(0, kcalMax−kcalIn)} kcal de margen y {max(0, protGap)} g de proteína; una cena con ~{min(protGap, proteinMin)} g te deja en línea." |
+| 8 🟢 | Hoy cumplido (kcalIn∈[kcalMin, kcalRed] y protein ≥ proteinYellow) **y** racha (incl. hoy) ≥ 3 | 🟢 "Racha de {N} días — día cumplido, sigue así." |
+
+**"Cumplió" un día** (para 5 y 8) = `kcalIn` de ese día ∈ [`kcalMin`, `kcalRed`] **y**
+`protein ≥ proteinYellow`, usando los `totals`/`targets` de ESE día (en `trend[i]`).
+
+**Formato de salida** (Bloque F, en el chat):
+```
+Señales de hoy
+🔴 Faltan 45 g de proteína — son las 21:10, mete una fuente ya (atún, claras, yogur proteico).
+🟠 Pasó tu hora de cena (~20:30) y no la registraste.
+🔵 12 días sin pesarte — el pacing se desactualiza, registra un peso.
+```
+No repitas lo que ya dijo el dashboard; estas son **acciones**, cortas y accionables. Si
+quieres, cierra ofreciendo "¿te receto algo?" cuando haya 🥩/🎯 (enlaza con "qué como").
 
 ---
 
