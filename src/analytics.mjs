@@ -418,12 +418,20 @@ export function computeCompositionFocus(weights, goal) {
     visceral = { ...t, goal: VISCERAL_GOAL, toGoal, reached: t.last <= VISCERAL_GOAL };
   }
 
+  // Cintura: mejor proxy real de grasa abdominal/visceral, y se mueve mucho más que
+  // el índice visceral entero. Acompaña a la meta de fondo cuando hay historia.
+  const wpts = sorted.filter((w) => w.waistCm != null)
+    .map((w) => ({ date: w.date, v: Number(w.waistCm) }));
+  const waist = wpts.length >= 2
+    ? trendOf(wpts, { key: 'waistCm', label: 'Cintura', unit: 'cm' }, { better: 'down', eps: 0.5 })
+    : null;
+
   if (!fat && !muscle && !visceral) return null;
 
   // Recomposición: la grasa bajó (más allá del ruido) sin perder músculo.
   const recomp = !!(fat && fat.deltaArc < -0.2 && muscle && muscle.deltaArc >= -0.2);
 
-  return { fat, muscle, visceral, recomp };
+  return { fat, muscle, visceral, waist, recomp };
 }
 
 export function interpretTrend(data, targets) {

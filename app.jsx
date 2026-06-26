@@ -980,7 +980,7 @@ function BentoTodayHero({ totals, targets, streak, onStreakClick, weightSeries, 
                 <span style={{ width: 6, height: 6, borderRadius: 99, background: 'var(--bento-pos)', flexShrink: 0 }} />
                 <span className="text-xs font-medium" style={{ color: 'var(--bento-pos)' }}>Recomposición</span>
                 <span className="bento-mono text-xs" style={{ color: 'var(--bento-muted)', fontVariantNumeric: 'tabular-nums' }}>
-                  grasa {comp.fat.deltaArc}{comp.fat.unit} · músculo +{comp.muscle.deltaArc}
+                  grasa {comp.fat.deltaArc}{comp.fat.unit} · músculo {Math.abs(comp.muscle.deltaArc) < 0.2 ? 'intacto' : `${comp.muscle.deltaArc > 0 ? '+' : ''}${comp.muscle.deltaArc}`}
                 </span>
               </div>
             )}
@@ -1014,6 +1014,17 @@ function BentoTodayHero({ totals, targets, streak, onStreakClick, weightSeries, 
                   <div style={{ height: 4, background: 'var(--bento-surface)', borderRadius: 99, marginTop: 6 }}>
                     <div style={{ height: '100%', width: `${done * 100}%`, background: viscColor(last), borderRadius: 99 }} />
                   </div>
+                  {comp.waist && comp.waist.deltaArc !== 0 && (
+                    <div className="flex justify-between items-baseline mt-2">
+                      <span className="text-xs font-medium" style={{ color: 'var(--bento-muted)' }}>
+                        Cintura <span style={{ color: 'var(--bento-faint)' }}>· confirma el avance</span>
+                      </span>
+                      <span className="text-xs bento-mono" style={{ fontVariantNumeric: 'tabular-nums' }}>
+                        <span style={{ color: 'var(--bento-ink)' }}>{comp.waist.last} cm</span>
+                        <span style={{ marginLeft: 6, color: statusColor(comp.waist.status) }}>{comp.waist.deltaArc > 0 ? '+' : ''}{comp.waist.deltaArc}</span>
+                      </span>
+                    </div>
+                  )}
                 </div>
               );
             })()}

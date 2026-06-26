@@ -8,11 +8,11 @@ import assert from 'node:assert/strict';
 import { computeCompositionFocus, VISCERAL_GOAL } from '../src/analytics.mjs';
 
 // Captura de Hugo: visceral pegada en índices enteros (16→13) mientras la grasa y el
-// peso bajan de forma continua.
+// peso bajan de forma continua. La cintura (proxy de visceral) baja mucho más.
 const SAMPLE = [
-  { date: '2026-04-01', weightKg: 108.0, bodyFatPct: 34.0, skeletalMuscleKg: 39.0, visceralFat: 16 },
-  { date: '2026-05-01', weightKg: 105.0, bodyFatPct: 32.5, skeletalMuscleKg: 39.8, visceralFat: 14 },
-  { date: '2026-06-26', weightKg: 102.0, bodyFatPct: 31.3, skeletalMuscleKg: 40.1, visceralFat: 13 },
+  { date: '2026-04-01', weightKg: 108.0, bodyFatPct: 34.0, skeletalMuscleKg: 39.0, visceralFat: 16, waistCm: 110.4 },
+  { date: '2026-05-01', weightKg: 105.0, bodyFatPct: 32.5, skeletalMuscleKg: 39.8, visceralFat: 14, waistCm: 106.8 },
+  { date: '2026-06-26', weightKg: 102.0, bodyFatPct: 31.3, skeletalMuscleKg: 40.1, visceralFat: 13, waistCm: 103.4 },
 ];
 
 test('null sin datos', () => {
@@ -84,6 +84,29 @@ test('visceral: arco largo + distancia a la meta', () => {
   assert.equal(f.visceral.toGoal, 3); // 13 - 10
   assert.equal(f.visceral.reached, false);
   assert.equal(f.visceral.deltaArc, -3);
+});
+
+test('cintura: trend con ≥2 puntos, bajar = mejora', () => {
+  const f = computeCompositionFocus(SAMPLE, 'lose');
+  assert.ok(f.waist);
+  assert.equal(f.waist.key, 'waistCm');
+  assert.equal(f.waist.unit, 'cm');
+  assert.equal(f.waist.last, 103.4);
+  assert.equal(f.waist.deltaArc, -7);
+  assert.equal(f.waist.status, 'mejora');
+});
+
+test('cintura: null con <2 puntos o sin dato', () => {
+  const oneWaist = [
+    { date: '2026-05-01', weightKg: 105, bodyFatPct: 32, waistCm: 105 },
+    { date: '2026-06-01', weightKg: 103, bodyFatPct: 31 },
+  ];
+  assert.equal(computeCompositionFocus(oneWaist, 'lose').waist, null);
+  const noWaist = [
+    { date: '2026-05-01', weightKg: 105, bodyFatPct: 32 },
+    { date: '2026-06-01', weightKg: 103, bodyFatPct: 31 },
+  ];
+  assert.equal(computeCompositionFocus(noWaist, 'lose').waist, null);
 });
 
 test('visceral alcanzada cuando ≤ meta', () => {
