@@ -802,6 +802,27 @@ export function computeProactiveInsights(state, dateKey, targets, options = {}) 
     }
   }
 
+  // 7. Cierre del día: por la tarde, ANTES de la cena y si no te pasaste, proyecta cuánto falta
+  // para la meta y si la cena del plan lo cubre. Forward-looking (planificar el resto del día),
+  // distinto de los nudges urgentes de la noche.
+  // "Comida" es más estricto que slotDone (que cuenta la mera selección del banco): la cena pendiente
+  // es la elegida (proteinId) que todavía NO marcaste/registraste/saltaste.
+  const cenaEaten = eaten.cena || logged.has('cena') || skipped.has('cena');
+  const cenaPend = !cenaEaten && day.proteinId ? proteinBank.find((p) => p.id === day.proteinId) : null;
+  const kRem = Math.round(totals.kcalRemaining);
+  const pRem = Math.round(totals.proteinRemaining);
+  const beforeCena = cenaMin == null ? hour < 20 : mins < cenaMin;
+  if (totals.eatenAny && hour >= 14 && beforeCena && totals.kcal <= T.kcalRed && (pRem >= 15 || kRem >= 200)) {
+    let detail = `Quedan ${Math.max(0, kRem)} kcal de margen y ${Math.max(0, pRem)} g de proteína para la meta.`;
+    if (cenaPend) {
+      const dk = Math.round(Number(cenaPend.kcal) || 0);
+      const dp = Math.round(Number(cenaPend.protein) || 0);
+      const after = pRem - dp;
+      detail += ` Tu cena del plan (${cenaPend.name}) aporta ~${dk} kcal/${dp} g → ${after <= 5 ? 'cierras la proteína' : `aún faltarían ${Math.round(after)} g`}.`;
+    }
+    push('info', '🎯', 'Cómo cerrar el día', detail);
+  }
+
   return out
     .sort((a, b) => INSIGHT_RANK[a.severity] - INSIGHT_RANK[b.severity])
     .slice(0, 5);
