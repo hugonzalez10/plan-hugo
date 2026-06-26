@@ -7,7 +7,7 @@
 import { todayKey, daysBetween, shiftDate } from './dates.mjs';
 import { weightSeries, trendWeightAt, linRegSlopePerDay, WEEKLY_LOSS } from './energy.mjs';
 import { calcTargets, KCAL_PER_KG_FAT, DEFAULT_TARGETS } from './nutrition.mjs';
-import { computeDayTotals } from './meals.mjs';
+import { computeDayTotals, extraPlanSlot } from './meals.mjs';
 import { normalizeName } from './util.mjs';
 import { slugifyExercise } from './parsing.mjs';
 
@@ -680,7 +680,11 @@ const INSIGHT_RANK = { urgent: 0, warn: 1, info: 2, good: 3 };
 // Puro y testeable: la hora y la fecha de referencia entran por `options` (sin tocar el reloj).
 export function computeProactiveInsights(state, dateKey, targets, options = {}) {
   const refDate = options.refDate || dateKey || todayKey();
-  const hour = Number.isFinite(options.hour) ? options.hour : new Date().getHours();
+  // Hora del día en minutos desde medianoche. Acepta nowMinutes, o hour(+minute), o el reloj.
+  const mins = Number.isFinite(options.nowMinutes) ? options.nowMinutes
+    : Number.isFinite(options.hour) ? options.hour * 60 + (Number(options.minute) || 0)
+    : (() => { const d = new Date(); return d.getHours() * 60 + d.getMinutes(); })();
+  const hour = Math.floor(mins / 60);
   const T = targets || DEFAULT_TARGETS;
   const days = state?.days || {};
   const day = days[dateKey] || {};
@@ -693,6 +697,25 @@ export function computeProactiveInsights(state, dateKey, targets, options = {}) 
   const push = (severity, icon, title, detail, action) =>
     out.push({ id: title, severity, icon, title, detail, action: action || { kind: 'none' } });
 
+  // --- Horarios del usuario (Ajustes → notificaciones) para nudges puntuales por comida ---
+  const notif = state?.settings?.notifications || {};
+  const parseHM = (s) => { const m = /^(\d{1,2}):(\d{2})$/.exec(String(s || '')); return m ? (+m[1]) * 60 + (+m[2]) : null; };
+  const fmtHM = (t) => `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`;
+  const cenaMin = parseHM(notif.cena);
+  // ¿Está cubierta la sección? eaten flag, registro del chat (logged), marcada como saltada, o el
+  // banco/extra de esa colación/cena (hasSnack*/hasDinner).
+  const eaten = day.eaten || {};
+  const skipped = new Set(Array.isArray(day.skipped) ? day.skipped : []);
+  const logged = new Set();
+  for (const x of (day.extras || [])) { const s = extraPlanSlot(x); if (s) logged.add(s); }
+  const slotDone = (slot) => {
+    if (skipped.has(slot) || logged.has(slot) || eaten[slot]) return true;
+    if (slot === 'colacion1') return totals.hasSnack1;
+    if (slot === 'colacion2') return totals.hasSnack2;
+    if (slot === 'cena') return totals.hasDinner;
+    return false;
+  };
+
   // 1. Ajuste de plan (pérdida muy rápida/lenta): ya es determinista.
   const adj = computePlanAdjustment(state, refDate);
   if (adj) {
@@ -702,11 +725,34 @@ export function computeProactiveInsights(state, dateKey, targets, options = {}) 
       adj.message);
   }
 
-  // 2. Proteína: brecha grande y ya de noche → urgente; media a la tarde → aviso.
+  // 2. Comida puntual atrasada: la más temprana cuya hora (de tus Ajustes) ya pasó con margen y que
+  // no registraste/marcaste/saltaste. Nudge personal en vez de un umbral de hora genérico.
+  const SLOT_LABEL = { desayuno: 'desayuno', colacion1: 'colación 1', almuerzo: 'almuerzo', colacion2: 'colación 2', cena: 'cena' };
+  const MEAL_SCHEDULE = [
+    ['desayuno', notif.desayuno],
+    ['colacion1', notif.colacion1],
+    ['almuerzo', notif.almuerzo],
+    ['colacion2', notif.colacion2],
+    ['cena', notif.cena],
+  ];
+  const GRACE_MIN = 75; // margen tras la hora pautada antes de avisar
+  for (const [slot, time] of MEAL_SCHEDULE) {
+    const t = parseHM(time);
+    if (t == null) continue;
+    if (mins > t + GRACE_MIN && !slotDone(slot)) {
+      push('warn', '🍽️', `Pasó tu hora de ${SLOT_LABEL[slot]}`,
+        `La tenías ~${fmtHM(t)} y no la registraste. Anótala o márcala para no perder el hilo del día.`,
+        { kind: 'substitution', label: 'Ver opciones' });
+      break; // solo la más temprana, no spamear
+    }
+  }
+
+  // 3. Proteína: brecha grande pasada tu hora de cena → urgente; media a la tarde → aviso.
+  const lateForProtein = cenaMin != null ? mins >= cenaMin : hour >= 19;
   const protGap = Math.round(totals.proteinRemaining);
-  if (protGap >= 25 && hour >= 19) {
+  if (protGap >= 25 && lateForProtein) {
     push('urgent', '🥩', `Faltan ${protGap} g de proteína`,
-      `Son las ${hour} h y vas ${Math.round(totals.protein)}/${T.proteinMin} g. Mete una fuente proteica ya (atún, claras, yogur proteico).`,
+      `Son las ${fmtHM(mins)} y vas ${Math.round(totals.protein)}/${T.proteinMin} g. Mete una fuente proteica ya (atún, claras, yogur proteico).`,
       { kind: 'substitution', label: 'Ver opciones' });
   } else if (protGap >= 40 && hour >= 16) {
     push('warn', '🥩', `Vas corto de proteína (${protGap} g)`,
@@ -756,7 +802,9 @@ export function computeProactiveInsights(state, dateKey, targets, options = {}) 
     }
   }
 
-  return out.sort((a, b) => INSIGHT_RANK[a.severity] - INSIGHT_RANK[b.severity]);
+  return out
+    .sort((a, b) => INSIGHT_RANK[a.severity] - INSIGHT_RANK[b.severity])
+    .slice(0, 5);
 }
 
 export function computeComparison(state, dateKey, targets) {

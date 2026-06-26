@@ -4,7 +4,7 @@
  * NO interceptamos llamadas a api.anthropic.com.
  */
 
-const CACHE_NAME = 'plan-hugo-v73-coach-insights-proactivos';
+const CACHE_NAME = 'plan-hugo-v74-coach-schedule-aware';
 const CORE_URLS = [
   './index.html',
   './app.js',
