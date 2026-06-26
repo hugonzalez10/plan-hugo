@@ -36,6 +36,7 @@ import {
 } from './src/fields.mjs';
 import {
   gistCreate, gistPush, gistPull, sanitizeStateForUpload, syncSig, applyRemoteState, hashSig,
+  mergeRemoteState, isPlausibleState,
   withBridgeToken, fetchBridge, postBridgeDelete, mergeBridge,
 } from './src/sync.mjs';
 import {
@@ -136,7 +137,21 @@ function useGistAutoSync(state, setState) {
       try {
         const meta = await gistPull(pat, gistId);
         const cloudAdvanced = lastRemoteUpdatedAt && new Date(meta.updatedAt) > new Date(lastRemoteUpdatedAt);
-        if (cloudAdvanced) { setRaw('conflict'); return; } // la nube cambió en otro equipo → no pisar; avisar para pull manual
+        if (cloudAdvanced) {
+          // La nube avanzó en otro equipo Y hay cambios locales sin subir = conflicto real. En vez de
+          // pisar (o quedarse pegajoso en 'conflict' pidiendo pull manual destructivo) mergeamos
+          // remoto⊕local por id/fecha y re-empujamos el resultado: ningún registro de ningún lado se
+          // pierde. Solo si el merge no es plausible o el push falla queda 'conflict' como fallback.
+          if (!isPlausibleState(meta.state)) { setRaw('conflict'); return; }
+          const merged = mergeRemoteState(state, meta.state, meta.updatedAt);
+          const { updatedAt: mergedAt } = await gistPush(pat, gistId, merged);
+          setState((prev) => {
+            const m = mergeRemoteState(prev, meta.state, meta.updatedAt);
+            return { ...m, settings: { ...m.settings, lastPushedSig: syncSig(m), lastRemoteUpdatedAt: mergedAt, lastSyncAt: new Date().toISOString() } };
+          });
+          setRaw('ok');
+          return;
+        }
         const { updatedAt } = await gistPush(pat, gistId, state);
         setState((prev) => ({
           ...prev,

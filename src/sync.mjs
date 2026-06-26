@@ -155,6 +155,90 @@ export function applyRemoteState(prev, remote, updatedAt) {
   return merged;
 }
 
+// --- Merge 3-way local⊕remoto (sin pérdida) ---------------------------------------------------
+// applyRemoteState PISA lo local con el remoto: correcto solo cuando el equipo está limpio (no hay
+// nada local que perder). Ante CONFLICTO real (editaste local Y la nube avanzó en otro equipo) hace
+// falta unir, no reemplazar. mergeRemoteState une por id/fecha: conserva los registros de AMBOS
+// lados. Es pura y testeable (ver tests/gist-merge.test.mjs).
+
+// Unión por clave: conserva todos los de `local` y agrega de `remote` los que no estén ya. Las
+// entradas sin clave utilizable (k == null) se conservan siempre — preferimos un duplicado raro a
+// perder un registro. `local` gana ante colisión (es el dispositivo actual).
+function unionBy(local, remote, keyFn) {
+  const out = Array.isArray(local) ? [...local] : [];
+  const seen = new Set();
+  for (const x of out) { const k = keyFn(x); if (k != null) seen.add(k); }
+  for (const x of (Array.isArray(remote) ? remote : [])) {
+    const k = keyFn(x);
+    if (k != null && seen.has(k)) continue;
+    if (k != null) seen.add(k);
+    out.push(x);
+  }
+  return out;
+}
+
+const weightKey = (w) => (w == null ? null
+  : w.id != null ? 'id:' + w.id
+  : w.date != null ? 'dt:' + w.date + '|' + (w.weightKg ?? '') : null);
+
+// Sirve para bancos (objetos con id/name) y para favorites (ids sueltos string/number).
+const bankKey = (x) => (x == null ? null
+  : typeof x !== 'object' ? 'v:' + String(x)
+  : x.id != null ? 'id:' + x.id
+  : x.name ? 'nm:' + normalizeName(x.name) : null);
+
+const idKey = (e) => (e && e.id != null ? e.id : null);
+
+// Mergea un día presente en ambos lados: las COLECCIONES (extras/exercise/water.log) se unen para no
+// perder ningún registro; los ESCALARES (eaten/snackId/notes…) prefieren el local. Las marcas
+// (skipped/nudgesDismissed) se unen como conjunto.
+export function mergeDay(a, b) {
+  if (!a) return b;
+  if (!b) return a;
+  const extras = dedupeDayExtras([...(Array.isArray(a.extras) ? a.extras : []), ...(Array.isArray(b.extras) ? b.extras : [])]);
+  const exercise = unionBy(a.exercise, b.exercise, idKey);
+  const aw = a.water && typeof a.water === 'object' ? a.water : { ml: 0 };
+  const bw = b.water && typeof b.water === 'object' ? b.water : { ml: 0 };
+  const log = unionBy(aw.log, bw.log, idKey);
+  const water = log.length
+    ? { ...bw, ...aw, log, ml: log.reduce((s, e) => s + (Number(e?.ml) || 0), 0) }
+    : { ...bw, ...aw, ml: Math.max(Number(aw.ml) || 0, Number(bw.ml) || 0) };
+  const eaten = { ...(b.eaten || {}), ...(a.eaten || {}) };
+  const asArr = (v) => (Array.isArray(v) ? v : []);
+  const skipped = [...new Set([...asArr(a.skipped), ...asArr(b.skipped)])];
+  const nudgesDismissed = [...new Set([...asArr(a.nudgesDismissed), ...asArr(b.nudgesDismissed)])];
+  return { ...b, ...a, extras, exercise, water, eaten, skipped, nudgesDismissed };
+}
+
+export function mergeRemoteState(prev, remote, updatedAt) {
+  if (!isPlausibleState(remote)) return prev;            // Gist corrupto → no tocar lo local
+  if (!prev || typeof prev !== 'object') return applyRemoteState(prev, remote, updatedAt);
+  const merged = { ...remote, ...prev };                  // base: lo local gana en escalares de tope
+  // days: unión por fecha; los días en ambos lados se mergean campo a campo.
+  const localDays = prev.days && typeof prev.days === 'object' ? prev.days : {};
+  const remoteDays = remote.days && typeof remote.days === 'object' ? remote.days : {};
+  const days = {};
+  for (const k of new Set([...Object.keys(localDays), ...Object.keys(remoteDays)])) {
+    days[k] = mergeDay(localDays[k], remoteDays[k]);
+  }
+  merged.days = days;
+  merged.weights = unionBy(prev.weights, remote.weights, weightKey);
+  merged.energy = unionBy(prev.energy, remote.energy, (e) => (e && e.date != null ? 'dt:' + e.date : null));
+  for (const bank of ['snackBank', 'proteinBank', 'dessertBank', 'recipeBank', 'rules', 'favorites']) {
+    merged[bank] = unionBy(prev[bank], remote[bank], bankKey);
+  }
+  // settings/secretos/bridge: preservar lo local sensible (PAT, tokens) y refijar la base del sync.
+  merged.settings = {
+    ...(remote.settings || {}),
+    ...(prev.settings || {}),
+    lastRemoteUpdatedAt: updatedAt,
+    lastSyncAt: new Date().toISOString(),
+  };
+  merged.bridge = prev.bridge || remote.bridge;
+  merged.settings.lastPushedSig = syncSig(merged);
+  return merged;
+}
+
 export function hashSig(obj) {
   const str = JSON.stringify(obj);
   let h = 0;
