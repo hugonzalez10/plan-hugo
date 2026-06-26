@@ -28,6 +28,7 @@ import {
   computeAdaptiveTDEE, buildEnergySeries, computePlanAdjustment, dayMetsTarget,
   computeTrendAnalysis, computeEvolution, interpretTrend, TREND_MIN_DAYS, TREND_WINDOW_DAYS,
   computeExerciseStats, computeRoutineExerciseProgress, computeStreak, computeComparison, computeRecents,
+  computeProactiveInsights,
 } from './src/analytics.mjs';
 import { uuid, normalizeName, getDeviceId } from './src/util.mjs';
 import {
@@ -2374,6 +2375,41 @@ function MealPhotoModal({ state, setState, dateKey, onClose }) {
   );
 }
 
+const INSIGHT_STYLE = {
+  urgent: 'bg-rose-50 dark:bg-rose-900/20 border-rose-200 dark:border-rose-800',
+  warn: 'bg-amber-50 dark:bg-amber-900/20 border-amber-200 dark:border-amber-800',
+  info: 'bg-sky-50 dark:bg-sky-900/20 border-sky-200 dark:border-sky-800',
+  good: 'bg-emerald-50 dark:bg-emerald-900/20 border-emerald-200 dark:border-emerald-800',
+};
+
+// Tarjetas de insights proactivos deterministas (computeProactiveInsights). `readOnly` oculta los
+// botones de acción (para vistas que no tienen cómo ejecutarlos). En el Coach van interactivas.
+function ProactiveInsights({ insights, onAction, readOnly }) {
+  if (!insights || insights.length === 0) return null;
+  const actionable = (a) => a && (a.kind === 'water250' || a.kind === 'water500' || a.kind === 'substitution');
+  return (
+    <div className="space-y-2">
+      {insights.map((i, idx) => (
+        <div key={idx} className={`rounded-xl border p-3 ${INSIGHT_STYLE[i.severity] || INSIGHT_STYLE.info}`}>
+          <div className="flex items-start gap-2">
+            <span className="text-base leading-none">{i.icon}</span>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-semibold text-gray-900 dark:text-gray-100">{i.title}</p>
+              {i.detail && <p className="text-xs text-gray-600 dark:text-gray-300 mt-0.5 leading-snug">{i.detail}</p>}
+              {!readOnly && actionable(i.action) && (
+                <button onClick={() => onAction && onAction(i.action)}
+                  className="mt-2 px-3 py-1 rounded-full bg-emerald-500 text-white text-xs font-semibold hover:bg-emerald-600">
+                  {i.action.label}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function CoachModal({ state, setState, dateKey, targets, onClose, onOpenSubstitution }) {
   const day = state.days[dateKey] || {};
   const totals = useMemo(
@@ -2382,6 +2418,12 @@ function CoachModal({ state, setState, dateKey, targets, onClose, onOpenSubstitu
   );
   const T = targets || DEFAULT_TARGETS;
   const apiKey = state.settings?.anthropicApiKey;
+
+  // Señales deterministas (sin IA): se muestran siempre y fundamentan el prompt del coach.
+  const insights = useMemo(
+    () => computeProactiveInsights(state, dateKey, T, { hour: new Date().getHours() }),
+    [state.days, state.weights, state.snackBank, state.proteinBank, state.dessertBank, dateKey, T]
+  );
 
   const sig = hashSig({
     kcal: totals.kcal,
@@ -2434,7 +2476,7 @@ ESTADO AHORA:
 - Agua: ${totals.waterMl} / ${T.waterTarget} ml
 - Ejercicio quemado hoy: ${Math.round(totals.kcalBurned)} kcal (SOLO informativo — NO lo restes de las calorías; el TDEE y la meta ya incorporan la actividad)${actividadLinea}
 - Comidas sin marcar todavía: ${slotsPendientes.length ? slotsPendientes.join(', ') : 'ninguna'}
-
+${insights.length ? `\nSEÑALES DETECTADAS (deterministas, úsalas como base y NO las contradigas):\n${insights.map((i) => `- [${i.severity}] ${i.title}: ${i.detail}`).join('\n')}\n` : ''}
 Devuelve SOLO JSON, sin markdown, así:
 {
   "headline": "1 línea con titular accionable (máx 80 chars)",
@@ -2510,6 +2552,10 @@ Reglas:
           <button onClick={onClose} className="w-8 h-8 rounded-full bg-gray-100 dark:bg-gray-800 text-sm">✕</button>
         </div>
 
+        {insights.length > 0 && (
+          <ProactiveInsights insights={insights} onAction={handleMicroAction} />
+        )}
+
         {loading && (
           <div className="text-center py-8 text-sm text-gray-500 dark:text-gray-400">
             Pensando…
@@ -2518,7 +2564,7 @@ Reglas:
 
         {!apiKey && (
           <p className="text-xs text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/30 p-2 rounded-lg">
-            ⚠️ Configura tu API key en ⚙️ Ajustes primero.
+            ⚠️ El coach con IA necesita tu API key en ⚙️ Ajustes. {insights.length ? 'Las señales de arriba funcionan sin ella.' : ''}
           </p>
         )}
 
@@ -4540,12 +4586,25 @@ Reglas:
   const confidenceColor = response?.confidence === 'alta' ? 'green' : response?.confidence === 'media' ? 'amber' : 'red';
   const insightTones = ['var(--bento-warm)', 'var(--bento-pos)', 'var(--bento-blue)', 'var(--bento-yellow)', 'var(--bento-lilac)'];
 
+  // Señales proactivas de HOY (deterministas, sin IA): se muestran arriba, no requieren el análisis.
+  const todayInsights = useMemo(
+    () => computeProactiveInsights(state, todayKey(), targets, { hour: new Date().getHours() }),
+    [state.days, state.weights, state.snackBank, state.proteinBank, state.dessertBank, targets]
+  );
+
   return (
     <div className="px-4 py-4 space-y-4">
       <div className="px-1">
         <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2"><span>🧠</span>Insights</h1>
         <p className="text-sm" style={{ color: 'var(--bento-faint)' }}>Patrones de las últimas 4 semanas</p>
       </div>
+
+      {todayInsights.length > 0 && (
+        <div className="space-y-2">
+          <div className="bento-label px-1">Hoy</div>
+          <ProactiveInsights insights={todayInsights} readOnly />
+        </div>
+      )}
 
       {/* 3 stats */}
       <div className="grid grid-cols-3 gap-2.5">
