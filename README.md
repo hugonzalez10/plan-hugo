@@ -62,6 +62,15 @@ aparece en `skills/food-tracker/SKILL.md` (`FILE_ID`) avisa de la desincronizaci
    `app.js` ya compilado.
 2. Abre la URL en Safari → Compartir → "Agregar a inicio" para instalarla como PWA.
 
+## Desarrollo desde la web (Claude Code)
+
+Además del Mac, el repo se puede trabajar desde **Claude Code en la web**: corre en un
+contenedor efímero en la nube que clona el repo fresco, sin depender de que el Mac esté
+prendido (incluso desde el teléfono). El flujo es el mismo de siempre — editar `src/*.mjs`
+o `app.jsx`, correr `npm test`, compilar y empujar a una rama — pero **todo lo no commiteado
+se pierde** al reciclarse el contenedor, así que cada tanda de trabajo se cierra con
+commit + push.
+
 ## Persistencia y respaldo
 
 Datos en `localStorage` (clave `plan-hugo-v3`), con copia de respaldo rotatoria

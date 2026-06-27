@@ -7,8 +7,9 @@
 import { todayKey, daysBetween, shiftDate } from './dates.mjs';
 import { weightSeries, trendWeightAt, linRegSlopePerDay, WEEKLY_LOSS } from './energy.mjs';
 import { calcTargets, KCAL_PER_KG_FAT, DEFAULT_TARGETS } from './nutrition.mjs';
-import { computeDayTotals } from './meals.mjs';
+import { computeDayTotals, extraPlanSlot } from './meals.mjs';
 import { normalizeName } from './util.mjs';
+import { slugifyExercise } from './parsing.mjs';
 
 // TDEE de referencia fijo: TMB medida 1878 × ~1.5 factor actividad. Constante a propósito —
 // estimarlo sobre ventanas cortas (peso × Δpeso × kcal de pocos días) es ruido, no señal.
@@ -336,6 +337,103 @@ export function computeEvolution(weights, goal) {
   return { metrics, count: sorted.length, firstDate: firstW.date, lastDate: lastW.date, spanDays, recomp };
 }
 
+// Meta de grasa visceral (índice). Bajo este valor = zona buena.
+export const VISCERAL_GOAL = 10;
+
+// Indicadores de grasa "reales" en kg, por prioridad. Si la balanza no exporta
+// ninguno, derivamos la grasa total (peso × %grasa/100).
+const FAT_PRIORITY = [
+  { key: 'fatKg',             label: 'Grasa',            unit: 'kg' },
+  { key: 'subcutaneousFatKg', label: 'Grasa subcutánea', unit: 'kg' },
+];
+
+// Trayectoria de una serie de puntos {date, v} YA ordenada por fecha: primer→último
+// valor, delta de arco largo, ritmo semanal y estado con zona muerta `eps`. Mismo
+// criterio que computeEvolution, pero sirve también para métricas derivadas (no
+// almacenadas, como la grasa total estimada) que aquel no contempla.
+function trendOf(pts, meta, { better, eps }) {
+  const first = pts[0].v;
+  const last = pts[pts.length - 1].v;
+  const deltaArc = Number((last - first).toFixed(2));
+  const d1 = new Date(pts[0].date + 'T12:00:00');
+  const d2 = new Date(pts[pts.length - 1].date + 'T12:00:00');
+  const days = Math.max(1, Math.round((d2 - d1) / 86400000));
+  const weekly = Number(((deltaArc / days) * 7).toFixed(2));
+  let status;
+  if (Math.abs(deltaArc) < (eps || 0.2)) status = 'estable';
+  else if (better === 'down') status = deltaArc < 0 ? 'mejora' : 'empeora';
+  else status = deltaArc > 0 ? 'mejora' : 'empeora';
+  return {
+    key: meta.key, label: meta.label, unit: meta.unit, derived: !!meta.derived,
+    better, first, last, deltaArc, days, weekly, status, values: pts.map((p) => p.v),
+  };
+}
+
+// Foco de composición para la tarjeta de inicio.
+//
+// La grasa visceral es un índice ENTERO que casi no se mueve entre escaneos, y el
+// delta scan-to-scan que se mostraba era ~0 (desmotivante). Acá elegimos un
+// indicador de grasa CONTINUO (cambia en cada medición), mostramos su trayectoria
+// de largo plazo (primer→último escaneo, no vs el anterior) y la historia de
+// recomposición: si el peso queda fijo pero sube el músculo, la grasa bajó
+// (balance de masa). La grasa derivada (peso × %grasa) captura eso aunque la
+// balanza no entregue grasa en kg.
+//
+// `goal === 'gain'` invierte la dirección deseada de la grasa (fase de volumen).
+export function computeCompositionFocus(weights, goal) {
+  const sorted = (weights || []).filter((w) => w.weightKg != null)
+    .slice().sort((a, b) => a.date.localeCompare(b.date));
+  if (sorted.length < 1) return null;
+
+  const fatBetter = goal === 'gain' ? 'up' : 'down';
+
+  // Indicador de grasa: el de mayor prioridad con ≥2 puntos (para tener trayectoria);
+  // si ninguno tiene historia, el de mayor prioridad con ≥1 (headline estático).
+  const cands = [];
+  for (const src of FAT_PRIORITY) {
+    const pts = sorted.filter((w) => w[src.key] != null)
+      .map((w) => ({ date: w.date, v: Number(w[src.key]) }));
+    if (pts.length) cands.push({ src, pts });
+  }
+  const dpts = sorted.filter((w) => w.bodyFatPct != null)
+    .map((w) => ({ date: w.date, v: Math.round((w.weightKg * w.bodyFatPct / 100) * 10) / 10 }));
+  if (dpts.length) cands.push({ src: { key: 'fatMassKg', label: 'Grasa (est.)', unit: 'kg', derived: true }, pts: dpts });
+  const fatCand = cands.find((c) => c.pts.length >= 2) || cands[0] || null;
+  const fat = fatCand ? trendOf(fatCand.pts, fatCand.src, { better: fatBetter, eps: 0.2 }) : null;
+
+  // Músculo esquelético (sube = mejor).
+  const mpts = sorted.filter((w) => w.skeletalMuscleKg != null)
+    .map((w) => ({ date: w.date, v: Number(w.skeletalMuscleKg) }));
+  const muscle = mpts.length >= 1
+    ? trendOf(mpts, { key: 'skeletalMuscleKg', label: 'Músculo esq.', unit: 'kg' }, { better: 'up', eps: 0.2 })
+    : null;
+
+  // Grasa visceral: arco largo + distancia a la meta (sigue siendo el objetivo #1).
+  const vpts = sorted.filter((w) => w.visceralFat != null)
+    .map((w) => ({ date: w.date, v: Number(w.visceralFat) }));
+  let visceral = null;
+  if (vpts.length >= 1) {
+    const t = trendOf(vpts, { key: 'visceralFat', label: 'Grasa visceral', unit: '' }, { better: 'down', eps: 0.5 });
+    const toGoal = Math.max(0, Math.round((t.last - VISCERAL_GOAL) * 10) / 10);
+    visceral = { ...t, goal: VISCERAL_GOAL, toGoal, reached: t.last <= VISCERAL_GOAL };
+  }
+
+  // Cintura: mejor proxy real de grasa abdominal/visceral, y se mueve mucho más que
+  // el índice visceral entero. Acompaña a la meta de fondo cuando hay historia.
+  const wpts = sorted.filter((w) => w.waistCm != null)
+    .map((w) => ({ date: w.date, v: Number(w.waistCm) }));
+  const waist = wpts.length >= 2
+    ? trendOf(wpts, { key: 'waistCm', label: 'Cintura', unit: 'cm' }, { better: 'down', eps: 0.5 })
+    : null;
+
+  if (!fat && !muscle && !visceral) return null;
+
+  // Recomposición: la grasa bajó (más allá del ruido) sin perder músculo.
+  const recomp = !!(fat && fat.deltaArc < -0.2 && muscle && muscle.deltaArc >= -0.2);
+
+  return { fat, muscle, visceral, waist, recomp };
+}
+
 export function interpretTrend(data, targets) {
   if (!data) return null;
   const T = targets || DEFAULT_TARGETS;
@@ -423,20 +521,62 @@ export function computeExerciseStats(days, refDate, weeks = 8) {
     });
   }
 
-  // Volumen por grupo muscular (sets como proxy; 1 por ejercicio si no hay sets) + top ejercicios
+  // Tonelaje semanal (carga total kg/sem) + tendencia por regresión sobre las semanas con datos.
+  // weekBuckets ya trae volumeKg por semana; la pendiente es el indicador de progresión en fuerza.
+  const tonnageWeeks = weekBuckets.map((b) => ({ label: b.label, volumeKg: Math.round(b.volumeKg) }));
+  const tonnagePts = tonnageWeeks.map((b, i) => ({ x: i, y: b.volumeKg })).filter((p) => p.y > 0);
+  let tonnageSlope = null, tonnagePctPerWeek = null;
+  if (tonnagePts.length >= 2) {
+    const n = tonnagePts.length;
+    const sx = tonnagePts.reduce((a, p) => a + p.x, 0);
+    const sy = tonnagePts.reduce((a, p) => a + p.y, 0);
+    const sxx = tonnagePts.reduce((a, p) => a + p.x * p.x, 0);
+    const sxy = tonnagePts.reduce((a, p) => a + p.x * p.y, 0);
+    const denom = n * sxx - sx * sx;
+    if (denom !== 0) {
+      tonnageSlope = (n * sxy - sx * sy) / denom; // kg por semana
+      const mean = sy / n;
+      if (mean > 0) tonnagePctPerWeek = (tonnageSlope / mean) * 100;
+    }
+  }
+  const tonnage = {
+    weeks: tonnageWeeks,
+    slopePerWeek: tonnageSlope != null ? Math.round(tonnageSlope) : null,
+    pctPerWeek: tonnagePctPerWeek != null ? Number(tonnagePctPerWeek.toFixed(1)) : null,
+    current: tonnageWeeks.length ? tonnageWeeks[tonnageWeeks.length - 1].volumeKg : 0,
+    weeksWithData: tonnagePts.length,
+  };
+
+  // Esfuerzo medio (RPE + FC) en la ventana, con tendencia primera-mitad vs segunda-mitad.
+  const asc = inWindow.slice().reverse(); // ventana en orden cronológico
+  const halfDelta = (arr) => {
+    if (arr.length < 4) return null;
+    const mid = Math.floor(arr.length / 2);
+    const mean = (xs) => xs.reduce((s, x) => s + x, 0) / xs.length;
+    return mean(arr.slice(mid)) - mean(arr.slice(0, mid));
+  };
+  const rpeVals = asc.map((s) => s.rpe).filter((v) => v != null && v > 0);
+  const hrVals = asc.map((s) => s.avgHr).filter((v) => v != null && v > 0);
+  const mean = (xs) => xs.reduce((s, x) => s + x, 0) / xs.length;
+  const effort = {
+    avgRpe: rpeVals.length ? Number(mean(rpeVals).toFixed(1)) : null,
+    avgHr: hrVals.length ? Math.round(mean(hrVals)) : null,
+    rpeTrend: rpeVals.length >= 4 ? Number(halfDelta(rpeVals).toFixed(1)) : null,
+    hrTrend: hrVals.length >= 4 ? Math.round(halfDelta(hrVals)) : null,
+    nRpe: rpeVals.length,
+    nHr: hrVals.length,
+  };
+
+  // Volumen por grupo muscular (sets como proxy; 1 por ejercicio si no hay sets)
   const muscleSets = {};
-  const exNameCount = {};
   for (const s of inWindow) {
     for (const e of s.exercises) {
       const m = (e.muscle || 'otros').toLowerCase();
       const sets = Number(e.sets) > 0 ? Number(e.sets) : 1;
       muscleSets[m] = (muscleSets[m] || 0) + sets;
-      const nm = (e.name || '').trim();
-      if (nm) exNameCount[nm] = (exNameCount[nm] || 0) + 1;
     }
   }
   const muscleVolume = Object.entries(muscleSets).map(([muscle, sets]) => ({ muscle, sets })).sort((a, b) => b.sets - a.sets);
-  const topExercises = Object.entries(exNameCount).map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count).slice(0, 6);
   const detailSessions = sessions.filter((s) => s.exercises.length > 0).length;
 
   // Progresión / récords por ejercicio (solo los que cargan peso/volumen, no movilidad pura).
@@ -453,6 +593,8 @@ export function computeExerciseStats(days, refDate, weeks = 8) {
         weightKg: e.weightKg ?? null,
         oneRepMaxKg: e.oneRepMaxKg ?? null,
         volumeKg: e.volumeKg ?? null,
+        reps: e.reps ?? null,
+        sets: e.sets ?? null,
         quality: e.quality ?? null,
       });
     }
@@ -475,13 +617,169 @@ export function computeExerciseStats(days, refDate, weeks = 8) {
     daysSinceLast,
     lastDate,
     weekBuckets,
+    tonnage,
+    effort,
     muscleVolume,
-    topExercises,
     detailSessions,
     byExercise,
     weeks,
     sessions,
   };
+}
+
+// Diccionario de sinónimos: la rutina usa español limpio ("sentadilla", "peso muerto", "remo",
+// "jalón") y Speediance registra otra jerga para el MISMO movimiento ("squat", "deadlift", "fila",
+// "lat pulldown"). Canonicaliza ambos lados a un vocabulario común antes de comparar. Orden
+// importa: las frases largas primero (p.ej. "lat pulldown" antes que "pulldown").
+const EX_SYNONYMS = [
+  ['lat pulldown', 'jalon'], ['pulldown', 'jalon'],
+  ['squat', 'sentadilla'], ['deadlift', 'peso muerto'],
+  ['fila', 'remo'], ['prensa', 'press'], ['barbell', 'barra'],
+  ['manija', 'mango'], ['incline', 'inclinado'], ['aumento', 'elevacion'],
+];
+// Alias explícitos por slug de ejercicio de la rutina, para los cruces que el sinónimo no alcanza
+// (jerga Speediance idiosincrática). Regex sobre el nombre normalizado (minúsculas, sin tildes).
+const ROUTINE_EX_ALIASES = {
+  'sentadilla-con-barra': [/\bsquat con barra\b(?!.*(split|dividid|bulgaro|overhead|caja|cremallera))/],
+  'peso-muerto-rumano-bisagra-de-cadera-isquiotibiales-y-gluteos': [/rumano deadlift|deadlift.*rumano|levantamiento.*rumano/],
+  'peso-muerto-rumano': [/rumano deadlift|deadlift.*rumano|levantamiento.*rumano/],
+  'peso-muerto-piernas-rigidas': [/barrena deadlift|piernas? rigida|rigida.*deadlift/],
+  'split-squat-con-doble-mango-una-pierna-adelante': [/split squat|squat split|bulgaro/],
+  'empuje-de-cadera-con-barra-hip-thrust': [/manchon de cadera|empujada de cadera|empuje de cadera|puente.*barra|hip thrust/],
+  'press-de-banca-con-barra-empuje-horizontal-de-pecho': [/pres.?a de banca con barra|press de banca/],
+  'press-de-hombro-de-pie-con-barra-al-frente': [/press de hombro de pie con barra|prensa de hombro con barra de pie|prensa de hombro de.*pie/],
+  'press-de-hombro-de-pie': [/press de hombro de pie con barra|prensa de hombro con barra de pie|prensa de hombro de.*pie/],
+  'press-de-pecho-inclinado-con-doble-mango': [/prensa de pecho.*incline|prensa de pecho inclinad|incline de doble manija/],
+  'elevaciones-laterales-de-hombro-con-doble-mango': [/elevacion lateral de doble|elevacion lateral doble|aumento lateral/],
+  'extension-de-triceps-con-doble-mango': [/triceps de pie.*extension|extension de triceps con|prensa de banco de triceps/],
+  'remo-con-barra-de-pie-traccion-horizontal': [/barbell repartido por la fila|fila de barbell de pie|fila de barbell sellada/],
+  'remo-con-barra-de-pie': [/barbell repartido por la fila|fila de barbell de pie|fila de barbell sellada|fila de barbell/],
+  'jalon-al-pecho-con-barra-traccion-vertical': [/lat pulldown|pulsacion de lat/],
+  'remo-a-un-brazo-de-pie': [/fila alterna de pie|fila alterna sellada|encorvado de un solo brazo|fila de un solo brazo/],
+  'remo-con-doble-manija-de-pie': [/fila de doble manija de pie|fila de doble manija$|fila de agarre neutral de doble mango/],
+  'curl-de-biceps-con-barra-de-pie': [/curl para biceps con barra de pie|curl de biceps.*con barra de pie|curl con barra/],
+  'curl-de-biceps-en-polea-con-doble-asa': [/curl de biceps en polea alta|encogimiento de biceps en polea alta/],
+};
+const _normEx = (s) => (s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
+const _canonEx = (s) => { let n = _normEx(s); for (const [a, b] of EX_SYNONYMS) n = n.split(a).join(b); return n; };
+
+// Cruza los récords/progresión (stats.byExercise, por nombre libre Speediance) con la rutina
+// vigente (routine.days[].exercises[]). Para CADA ejercicio de la rutina junta TODAS las apariciones
+// registradas que le corresponden (slug exacto → alias → sinónimo-canónico → subconjunto de tokens),
+// fusiona su historial y devuelve récords + entries. Cada registro Speediance se asigna a UN solo
+// ejercicio de la rutina (no se reparte). `others` = lo que no calza con la rutina. Puro, sin React.
+export function computeRoutineExerciseProgress(stats, routine, refDate = todayKey()) {
+  const today = refDate || todayKey();
+  const byExercise = Array.isArray(stats?.byExercise) ? stats.byExercise : [];
+  const reg = byExercise.map((x) => ({
+    x, slug: slugifyExercise(x.name), cslug: _canonEx(x.name).replace(/\s+/g, '-'),
+    n: _normEx(x.name), used: false,
+  }));
+  // Peso de TRABAJO primero (lo que muestra el historial); el 1RM estimado de Speediance es
+  // esporádico y mezclaría escalas en el Δ/sparkline. Cae a 1RM solo si no hay peso.
+  const valOf = (e) => (e.weightKg ?? e.oneRepMaxKg ?? null);
+
+  // Devuelve TODAS las entradas reg (no usadas) que corresponden a este ejercicio de la rutina,
+  // marcándolas como usadas. Prioriza alias/slug/sinónimo; cae a subconjunto de tokens canónicos.
+  const matchesFor = (rslug, rname) => {
+    const rc = _canonEx(rname).replace(/\s+/g, '-');
+    const pats = ROUTINE_EX_ALIASES[rslug] || [];
+    const pool = reg.filter((r) => !r.used);
+    let ms = pool.filter((r) => r.slug === rslug || r.cslug === rc || pats.some((p) => p.test(r.n)));
+    if (!ms.length) {
+      const rtoks = new Set(rc.split('-').filter(Boolean));
+      ms = pool.filter((r) => {
+        const t = new Set(r.cslug.split('-').filter(Boolean));
+        if (!t.size) return false;
+        return [...rtoks].every((x) => t.has(x)) || [...t].every((x) => rtoks.has(x));
+      });
+    }
+    ms.forEach((m) => { m.used = true; });
+    return ms;
+  };
+
+  // Fusiona varias entradas reg en un "base" tipo byExercise (historial unión + récords recomputados).
+  const mergeMatches = (ms) => {
+    if (!ms.length) return null;
+    const entries = ms.flatMap((m) => m.x.entries || [])
+      .slice().sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+    const best = (k) => { const v = entries.map((e) => e[k]).filter((x) => x != null); return v.length ? Math.max(...v) : null; };
+    return {
+      name: ms[0].x.name, muscle: ms.map((m) => m.x.muscle).find(Boolean) || null,
+      entries, sessions: entries.length,
+      bestRm: best('oneRepMaxKg'), bestWeight: best('weightKg'), bestVolume: best('volumeKg'),
+    };
+  };
+
+  const enrich = (base, name, slug) => {
+    if (!base) {
+      return {
+        slug, name, muscle: null, data: false, entries: [], spark: [],
+        current: null, first: null, delta: null, lastDate: null, daysSince: null,
+        trainedThisWeek: false, stagnant: false, suggestNextKg: null,
+        bestRm: null, bestWeight: null, bestVolume: null, sessions: 0,
+      };
+    }
+    const entries = base.entries || [];
+    const vals = entries.map(valOf).filter((v) => v != null);
+    const first = vals.length ? vals[0] : null;
+    const current = vals.length ? vals[vals.length - 1] : null;
+    const delta = first != null && current != null ? Math.round((current - first) * 10) / 10 : null;
+    const lastDate = entries.length ? entries[entries.length - 1].date : null;
+    const daysSince = lastDate ? daysBetween(lastDate, today) : null;
+    const trainedThisWeek = daysSince != null && daysSince <= 7;
+    // Meseta: el máximo de las últimas 3 apariciones no supera el de las previas (necesita ≥4).
+    let stagnant = false;
+    if (vals.length >= 4) {
+      const maxRecent = Math.max(...vals.slice(-3));
+      const maxEarlier = Math.max(...vals.slice(0, -3));
+      stagnant = maxRecent <= maxEarlier;
+    }
+    // Sobrecarga progresiva: sobre el peso (o 1RM) — si la última sesión igualó/superó la previa,
+    // sugerir +2.5 kg; si bajó, mantener. Heurística, etiquetada como sugerencia en la UI.
+    let suggestNextKg = null, suggestUp = false;
+    const wVals = entries.map((e) => e.weightKg ?? e.oneRepMaxKg).filter((v) => v != null);
+    if (wVals.length) {
+      const lastW = wVals[wVals.length - 1];
+      const prevW = wVals.length >= 2 ? wVals[wVals.length - 2] : null;
+      suggestUp = (prevW == null || lastW >= prevW);
+      suggestNextKg = suggestUp ? Math.round((lastW + 2.5) * 10) / 10 : lastW;
+    }
+    return {
+      slug, name, muscle: base.muscle || null, data: true, entries, spark: vals,
+      current, first, delta, lastDate, daysSince, trainedThisWeek, stagnant, suggestNextKg, suggestUp,
+      bestRm: base.bestRm ?? null, bestWeight: base.bestWeight ?? null, bestVolume: base.bestVolume ?? null,
+      sessions: base.sessions ?? entries.length,
+    };
+  };
+
+  // Lista única de ejercicios de la rutina (por slug), en orden de la rutina.
+  const uniq = [];
+  const seenSlugs = new Set();
+  const days = Array.isArray(routine?.days) ? routine.days : [];
+  for (const d of days) {
+    for (const ex of (Array.isArray(d?.exercises) ? d.exercises : [])) {
+      const name = (ex?.name || '').trim();
+      const slug = ex?.slug || slugifyExercise(name);
+      if (!name || !slug || seenSlugs.has(slug)) continue;
+      seenSlugs.add(slug);
+      uniq.push({ name, slug, ctoks: new Set(_canonEx(name).split(/\s+/).filter(Boolean)) });
+    }
+  }
+  // Dedup por MOVIMIENTO entre días (p.ej. "Peso muerto rumano (bisagra…)" del Día 1 y "Peso muerto
+  // rumano" del Día 5 son el mismo ejercicio): si los tokens canónicos de uno están contenidos en
+  // los de otro ya conservado, se omite (se queda el primero en orden de rutina, normalmente el más
+  // descriptivo). Así no salen filas duplicadas/vacías.
+  const kept = [];
+  for (const e of uniq) {
+    const dup = kept.find((k) => [...e.ctoks].every((t) => k.ctoks.has(t)) || [...k.ctoks].every((t) => e.ctoks.has(t)));
+    if (!dup) kept.push(e);
+  }
+  const routineExs = kept.map((e) => enrich(mergeMatches(matchesFor(e.slug, e.name)), e.name, e.slug));
+
+  const others = reg.filter((r) => !r.used).map((r) => r.x);
+  const hasRoutine = routineExs.length > 0;
+  return { hasRoutine, routine: routineExs, others };
 }
 
 export function computeStreak(days, snackBank, proteinBank, targets, refDate, dessertBank, customAntojoItems) {
@@ -532,6 +830,164 @@ export function computeStreak(days, snackBank, proteinBank, targets, refDate, de
     todayMet: dayMetsTarget(todayTotals, targets),
     todayHasData: !!todayTotals.eatenAny,
   };
+}
+
+// Orden de prioridad para rankear las tarjetas (urgent primero).
+const INSIGHT_RANK = { urgent: 0, warn: 1, info: 2, good: 3 };
+
+// Motor de insights proactivos DETERMINISTA (sin IA): compone las señales que ya calculamos
+// (ajuste de plan, racha) con chequeos del día (brecha de proteína/agua/exceso según la hora) en
+// una lista rankeada de tarjetas accionables. Funciona offline y sin API key, y alimenta tanto el
+// panel del Coach como su prompt (para que la IA hable de números REALES, no de generalidades).
+// Puro y testeable: la hora y la fecha de referencia entran por `options` (sin tocar el reloj).
+export function computeProactiveInsights(state, dateKey, targets, options = {}) {
+  const refDate = options.refDate || dateKey || todayKey();
+  // Hora del día en minutos desde medianoche. Acepta nowMinutes, o hour(+minute), o el reloj.
+  const mins = Number.isFinite(options.nowMinutes) ? options.nowMinutes
+    : Number.isFinite(options.hour) ? options.hour * 60 + (Number(options.minute) || 0)
+    : (() => { const d = new Date(); return d.getHours() * 60 + d.getMinutes(); })();
+  const hour = Math.floor(mins / 60);
+  const T = targets || DEFAULT_TARGETS;
+  const days = state?.days || {};
+  const day = days[dateKey] || {};
+  const snackBank = state?.snackBank || [];
+  const proteinBank = state?.proteinBank || [];
+  const dessertBank = state?.dessertBank || [];
+  const customAntojo = state?.antojoCustomItems || [];
+  const totals = computeDayTotals(day, snackBank, proteinBank, T, dessertBank, customAntojo);
+  const out = [];
+  const push = (severity, icon, title, detail, action) =>
+    out.push({ id: title, severity, icon, title, detail, action: action || { kind: 'none' } });
+
+  // --- Horarios del usuario (Ajustes → notificaciones) para nudges puntuales por comida ---
+  const notif = state?.settings?.notifications || {};
+  const parseHM = (s) => { const m = /^(\d{1,2}):(\d{2})$/.exec(String(s || '')); return m ? (+m[1]) * 60 + (+m[2]) : null; };
+  const fmtHM = (t) => `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`;
+  const cenaMin = parseHM(notif.cena);
+  // ¿Está cubierta la sección? eaten flag, registro del chat (logged), marcada como saltada, o el
+  // banco/extra de esa colación/cena (hasSnack*/hasDinner).
+  const eaten = day.eaten || {};
+  const skipped = new Set(Array.isArray(day.skipped) ? day.skipped : []);
+  const logged = new Set();
+  for (const x of (day.extras || [])) { const s = extraPlanSlot(x); if (s) logged.add(s); }
+  const slotDone = (slot) => {
+    if (skipped.has(slot) || logged.has(slot) || eaten[slot]) return true;
+    if (slot === 'colacion1') return totals.hasSnack1;
+    if (slot === 'colacion2') return totals.hasSnack2;
+    if (slot === 'cena') return totals.hasDinner;
+    return false;
+  };
+
+  // 1. Ajuste de plan (pérdida muy rápida/lenta): ya es determinista.
+  const adj = computePlanAdjustment(state, refDate);
+  if (adj) {
+    push(adj.kind === 'too_fast' ? 'warn' : 'info',
+      adj.kind === 'too_fast' ? '🐇' : '🐢',
+      adj.kind === 'too_fast' ? 'Bajando muy rápido' : 'Ritmo lento',
+      adj.message);
+  }
+
+  // 2. Comida puntual atrasada: la más temprana cuya hora (de tus Ajustes) ya pasó con margen y que
+  // no registraste/marcaste/saltaste. Nudge personal en vez de un umbral de hora genérico.
+  const SLOT_LABEL = { desayuno: 'desayuno', colacion1: 'colación 1', almuerzo: 'almuerzo', colacion2: 'colación 2', cena: 'cena' };
+  const MEAL_SCHEDULE = [
+    ['desayuno', notif.desayuno],
+    ['colacion1', notif.colacion1],
+    ['almuerzo', notif.almuerzo],
+    ['colacion2', notif.colacion2],
+    ['cena', notif.cena],
+  ];
+  const GRACE_MIN = 75; // margen tras la hora pautada antes de avisar
+  for (const [slot, time] of MEAL_SCHEDULE) {
+    const t = parseHM(time);
+    if (t == null) continue;
+    if (mins > t + GRACE_MIN && !slotDone(slot)) {
+      push('warn', '🍽️', `Pasó tu hora de ${SLOT_LABEL[slot]}`,
+        `La tenías ~${fmtHM(t)} y no la registraste. Anótala o márcala para no perder el hilo del día.`,
+        { kind: 'substitution', label: 'Ver opciones' });
+      break; // solo la más temprana, no spamear
+    }
+  }
+
+  // 3. Proteína: brecha grande pasada tu hora de cena → urgente; media a la tarde → aviso.
+  const lateForProtein = cenaMin != null ? mins >= cenaMin : hour >= 19;
+  const protGap = Math.round(totals.proteinRemaining);
+  if (protGap >= 25 && lateForProtein) {
+    push('urgent', '🥩', `Faltan ${protGap} g de proteína`,
+      `Son las ${fmtHM(mins)} y vas ${Math.round(totals.protein)}/${T.proteinMin} g. Mete una fuente proteica ya (atún, claras, yogur proteico).`,
+      { kind: 'substitution', label: 'Ver opciones' });
+  } else if (protGap >= 40 && hour >= 16) {
+    push('warn', '🥩', `Vas corto de proteína (${protGap} g)`,
+      `${Math.round(totals.protein)}/${T.proteinMin} g a media tarde. Prioriza proteína en lo que queda del día.`,
+      { kind: 'substitution', label: 'Ver opciones' });
+  }
+
+  // 3. Agua: lejos de la meta entrada la tarde/noche.
+  const waterGap = Math.round(totals.waterRemaining);
+  if (T.waterTarget > 0 && waterGap >= 750 && hour >= 17) {
+    push('warn', '💧', `Faltan ${waterGap} ml de agua`,
+      `${totals.waterMl}/${T.waterTarget} ml. Un par de vasos ahora y llegas.`,
+      { kind: 'water500', label: '+500 ml' });
+  }
+
+  // 4. Exceso de calorías sobre el umbral rojo.
+  if (totals.eatenAny && T.kcalRed && totals.kcal > T.kcalRed) {
+    const over = Math.round(totals.kcal - T.kcalMax);
+    push('warn', '⚠️', `${over} kcal sobre la meta`,
+      `Vas ${Math.round(totals.kcal)} kcal (meta ${T.kcalMax}). Mañana retoma; no compenses saltándote comidas.`);
+  }
+
+  // 5. Racha: viva pero hoy sin cumplir y se hace tarde → en juego; cumplida y larga → felicitar.
+  // Ojo: streak.current se corta HOY si hoy no está cumplido, así que el "en juego" mira la racha
+  // hasta AYER (prev) para saber cuántos días se arriesgan.
+  const streak = computeStreak(days, snackBank, proteinBank, T, refDate, dessertBank, customAntojo);
+  if (!streak.todayMet && hour >= 18) {
+    const prev = computeStreak(days, snackBank, proteinBank, T, shiftDate(refDate, -1), dessertBank, customAntojo);
+    if (prev.current > 0) {
+      push('warn', '🔥', `Tu racha de ${prev.current} días está en juego`,
+        'Completa kcal y proteína del día para no cortarla.');
+    }
+  } else if (streak.todayMet && streak.current >= 3) {
+    push('good', '🔥', `Racha de ${streak.current} días`, 'Día cumplido. Sigue así.');
+  }
+
+  // 6. Peso desactualizado: el pacing y el TDEE adaptativo se vuelven ruido sin pesajes recientes.
+  const lastW = (state?.weights || [])
+    .filter((w) => w && w.weightKg != null && w.date)
+    .map((w) => w.date).sort().pop();
+  if (lastW) {
+    const stale = daysBetween(lastW, refDate);
+    if (stale >= 10) {
+      push('info', '⚖️', `${stale} días sin pesarte`,
+        'El pacing y el TDEE adaptativo se desactualizan. Registra un peso cuando puedas.',
+        { kind: 'logWeight', label: 'Registrar peso' });
+    }
+  }
+
+  // 7. Cierre del día: por la tarde, ANTES de la cena y si no te pasaste, proyecta cuánto falta
+  // para la meta y si la cena del plan lo cubre. Forward-looking (planificar el resto del día),
+  // distinto de los nudges urgentes de la noche.
+  // "Comida" es más estricto que slotDone (que cuenta la mera selección del banco): la cena pendiente
+  // es la elegida (proteinId) que todavía NO marcaste/registraste/saltaste.
+  const cenaEaten = eaten.cena || logged.has('cena') || skipped.has('cena');
+  const cenaPend = !cenaEaten && day.proteinId ? proteinBank.find((p) => p.id === day.proteinId) : null;
+  const kRem = Math.round(totals.kcalRemaining);
+  const pRem = Math.round(totals.proteinRemaining);
+  const beforeCena = cenaMin == null ? hour < 20 : mins < cenaMin;
+  if (totals.eatenAny && hour >= 14 && beforeCena && totals.kcal <= T.kcalRed && (pRem >= 15 || kRem >= 200)) {
+    let detail = `Quedan ${Math.max(0, kRem)} kcal de margen y ${Math.max(0, pRem)} g de proteína para la meta.`;
+    if (cenaPend) {
+      const dk = Math.round(Number(cenaPend.kcal) || 0);
+      const dp = Math.round(Number(cenaPend.protein) || 0);
+      const after = pRem - dp;
+      detail += ` Tu cena del plan (${cenaPend.name}) aporta ~${dk} kcal/${dp} g → ${after <= 5 ? 'cierras la proteína' : `aún faltarían ${Math.round(after)} g`}.`;
+    }
+    push('info', '🎯', 'Cómo cerrar el día', detail);
+  }
+
+  return out
+    .sort((a, b) => INSIGHT_RANK[a.severity] - INSIGHT_RANK[b.severity])
+    .slice(0, 5);
 }
 
 export function computeComparison(state, dateKey, targets) {

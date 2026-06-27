@@ -27,7 +27,8 @@ import { evaluateRule, getRulesStatus, evaluateAllRules } from './src/rules.mjs'
 import {
   computeAdaptiveTDEE, buildEnergySeries, computePlanAdjustment, dayMetsTarget,
   computeTrendAnalysis, computeEvolution, interpretTrend, TREND_MIN_DAYS, TREND_WINDOW_DAYS,
-  computeExerciseStats, computeStreak, computeComparison, computeRecents,
+  computeExerciseStats, computeRoutineExerciseProgress, computeStreak, computeComparison, computeRecents,
+  computeProactiveInsights, computeCompositionFocus,
 } from './src/analytics.mjs';
 import { uuid, normalizeName, getDeviceId } from './src/util.mjs';
 import {
@@ -40,6 +41,7 @@ import {
 } from './src/fields.mjs';
 import {
   gistCreate, gistPush, gistPull, sanitizeStateForUpload, syncSig, applyRemoteState, hashSig,
+  mergeRemoteState, isPlausibleState,
   withBridgeToken, fetchBridge, postBridgeDelete, mergeBridge, bridgeVersionDrift,
 } from './src/sync.mjs';
 import {
@@ -140,7 +142,21 @@ function useGistAutoSync(state, setState) {
       try {
         const meta = await gistPull(pat, gistId);
         const cloudAdvanced = lastRemoteUpdatedAt && new Date(meta.updatedAt) > new Date(lastRemoteUpdatedAt);
-        if (cloudAdvanced) { setRaw('conflict'); return; } // la nube cambió en otro equipo → no pisar; avisar para pull manual
+        if (cloudAdvanced) {
+          // La nube avanzó en otro equipo Y hay cambios locales sin subir = conflicto real. En vez de
+          // pisar (o quedarse pegajoso en 'conflict' pidiendo pull manual destructivo) mergeamos
+          // remoto⊕local por id/fecha y re-empujamos el resultado: ningún registro de ningún lado se
+          // pierde. Solo si el merge no es plausible o el push falla queda 'conflict' como fallback.
+          if (!isPlausibleState(meta.state)) { setRaw('conflict'); return; }
+          const merged = mergeRemoteState(state, meta.state, meta.updatedAt);
+          const { updatedAt: mergedAt } = await gistPush(pat, gistId, merged);
+          setState((prev) => {
+            const m = mergeRemoteState(prev, meta.state, meta.updatedAt);
+            return { ...m, settings: { ...m.settings, lastPushedSig: syncSig(m), lastRemoteUpdatedAt: mergedAt, lastSyncAt: new Date().toISOString() } };
+          });
+          setRaw('ok');
+          return;
+        }
         const { updatedAt } = await gistPush(pat, gistId, state);
         setState((prev) => ({
           ...prev,
@@ -820,6 +836,45 @@ function BentoTodayHero({ totals, targets, streak, onStreakClick, weightSeries, 
     chips.push({ k, label: ['D','L','M','M','J','V','S'][dow], met, isToday: i === 0 });
   }
 
+  // Composición: indicador de grasa CONTINUO (se mueve cada escaneo) con su trayectoria
+  // de largo plazo + lente de recomposición. La grasa visceral (índice entero) queda como
+  // meta de fondo con su arco, en vez del número congelado scan-to-scan. Ver
+  // computeCompositionFocus en src/analytics.mjs.
+  const comp = computeCompositionFocus(state?.weights || [], state?.userProfile?.goal);
+  const lastCompDate = (state?.weights || [])
+    .filter((w) => w.visceralFat != null || w.skeletalMuscleKg != null || w.bodyFatPct != null)
+    .map((w) => w.date).sort().pop();
+  // Color por estado de la métrica de grasa (mejora = verde, empeora = cálido, estable = tenue).
+  const statusColor = (s) => s === 'mejora' ? 'var(--bento-pos)' : s === 'empeora' ? 'var(--bento-warm)' : 'var(--bento-muted)';
+  // Color del índice visceral por rangos clínicos (mantiene la semántica previa).
+  const viscColor = (v) => v == null ? 'var(--bento-faint)' : v < 10 ? 'var(--bento-pos)' : v <= 12 ? 'var(--bento-yellow)' : 'var(--bento-warm)';
+
+  // Pacing a la meta: ¿el ritmo real de pérdida alcanza para llegar al peso objetivo en la fecha límite?
+  const GOAL_DEADLINE = '2026-11-27';
+  const goalKg = state?.userProfile?.goalWeightKg || 90;
+  let pacing = null;
+  const trend = computeTrendAnalysis(state?.weights || [], state?.days || {}, state?.snackBank || [], state?.proteinBank || [], T, state?.dessertBank || [], state?.antojoCustomItems || []);
+  if (trend && trend.lossPctPerWeek != null && trend.last?.weightKg != null) {
+    const curKg = trend.last.weightKg;
+    const kgToGo = curKg - goalKg;
+    const realRate = (trend.lossPctPerWeek / 100) * curKg; // kg/sem (+ = bajando)
+    const nowMs = new Date(todayK + 'T12:00:00').getTime();
+    const weeksToDeadline = (new Date(GOAL_DEADLINE + 'T12:00:00').getTime() - nowMs) / (7 * 86400000);
+    if (kgToGo <= 0.2) {
+      pacing = { tone: 'pos', text: `meta ${goalKg} kg alcanzada` };
+    } else if (realRate <= 0.02 || weeksToDeadline <= 0) {
+      pacing = { tone: 'warm', text: `a ${goalKg} kg · sin avance` };
+    } else {
+      const etaWeeks = kgToGo / realRate;
+      const eta = new Date(nowMs + etaWeeks * 7 * 86400000);
+      const meses = ['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic'];
+      const slack = weeksToDeadline - etaWeeks; // + = llega antes del 27-nov
+      const tone = slack >= 0 ? 'pos' : (slack >= -4 ? 'yellow' : 'warm');
+      const verdict = slack >= 0 ? `en fecha · ~${eta.getDate()} ${meses[eta.getMonth()]}` : `atrasado ${Math.ceil(-slack)} sem`;
+      pacing = { tone, text: `a ${goalKg} kg · ${verdict}` };
+    }
+  }
+
   return (
     <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))' }}>
       {/* Energía */}
@@ -903,6 +958,12 @@ function BentoTodayHero({ totals, targets, streak, onStreakClick, weightSeries, 
         {lastWeight ? (
           <>
             <div className="text-3xl font-bold" style={{ letterSpacing: '-0.04em', fontVariantNumeric: 'tabular-nums', lineHeight: 1 }}>{lastWeight.weightKg}<span className="text-xs font-normal" style={{ color: 'var(--bento-faint)' }}> kg</span></div>
+            {pacing && (
+              <div className="mt-2" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ width: 7, height: 7, borderRadius: 99, background: `var(--bento-${pacing.tone})`, flexShrink: 0 }} />
+                <span className="bento-mono" style={{ fontSize: 10, color: 'var(--bento-muted)' }}>{pacing.text}</span>
+              </div>
+            )}
             {path && (
               <svg viewBox="0 0 100 30" preserveAspectRatio="none" style={{ width: '100%', height: 56, marginTop: 12 }}>
                 <path d={path + ` L100,30 L0,30 Z`} fill="var(--bento-pos)" opacity="0.13" />
@@ -915,6 +976,92 @@ function BentoTodayHero({ totals, targets, streak, onStreakClick, weightSeries, 
           </>
         ) : (
           <div className="text-sm py-3" style={{ color: 'var(--bento-faint)' }}>Sin mediciones aún.</div>
+        )}
+      </div>
+
+      {/* Composición — grasa continua (se mueve cada escaneo) + recomposición; visceral = meta de fondo */}
+      <div className="bento-card" style={{ minWidth: 0 }}>
+        <div className="flex justify-between items-center mb-3">
+          <span className="text-sm font-semibold" style={{ letterSpacing: '-0.01em' }}>Composición</span>
+          {lastCompDate && <span className="bento-label">{lastCompDate.slice(5)}</span>}
+        </div>
+        {comp ? (
+          <>
+            {comp.fat && (
+              <div className="flex items-end justify-between gap-2">
+                <div style={{ minWidth: 0 }}>
+                  <div className="bento-label">{comp.fat.label}</div>
+                  <div className="font-bold" style={{ fontSize: 30, letterSpacing: '-0.04em', fontVariantNumeric: 'tabular-nums', lineHeight: 1, color: statusColor(comp.fat.status) }}>
+                    {comp.fat.last}<span className="text-xs font-normal" style={{ color: 'var(--bento-faint)' }}> {comp.fat.unit}</span>
+                  </div>
+                  {comp.fat.deltaArc !== 0 && (
+                    <div className="bento-mono text-xs mt-1" style={{ color: statusColor(comp.fat.status), fontVariantNumeric: 'tabular-nums' }}>
+                      {comp.fat.deltaArc > 0 ? '+' : ''}{comp.fat.deltaArc} {comp.fat.unit}
+                      <span style={{ color: 'var(--bento-faint)' }}> · desde {comp.fat.first}</span>
+                    </div>
+                  )}
+                </div>
+                {comp.fat.values.length > 1 && (
+                  <Sparkline values={comp.fat.values} color={statusColor(comp.fat.status)} width={76} height={30} />
+                )}
+              </div>
+            )}
+            {comp.recomp && (
+              <div className="mt-3" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '3px 8px', borderRadius: 99, background: 'var(--bento-surface)' }}>
+                <span style={{ width: 6, height: 6, borderRadius: 99, background: 'var(--bento-pos)', flexShrink: 0 }} />
+                <span className="text-xs font-medium" style={{ color: 'var(--bento-pos)' }}>Recomposición</span>
+                <span className="bento-mono text-xs" style={{ color: 'var(--bento-muted)', fontVariantNumeric: 'tabular-nums' }}>
+                  grasa {comp.fat.deltaArc}{comp.fat.unit} · músculo {Math.abs(comp.muscle.deltaArc) < 0.2 ? 'intacto' : `${comp.muscle.deltaArc > 0 ? '+' : ''}${comp.muscle.deltaArc}`}
+                </span>
+              </div>
+            )}
+            {comp.muscle && (
+              <div className="mt-3 flex justify-between items-baseline">
+                <span className="text-xs font-medium" style={{ color: 'var(--bento-muted)' }}>{comp.muscle.label}</span>
+                <span className="text-xs bento-mono" style={{ fontVariantNumeric: 'tabular-nums' }}>
+                  <span style={{ color: 'var(--bento-ink)' }}>{comp.muscle.last} kg</span>
+                  {comp.muscle.deltaArc !== 0 && (
+                    <span style={{ marginLeft: 6, color: statusColor(comp.muscle.status) }}>{comp.muscle.deltaArc > 0 ? '+' : ''}{comp.muscle.deltaArc}</span>
+                  )}
+                </span>
+              </div>
+            )}
+            {comp.visceral && (() => {
+              const { first, last, goal, toGoal, reached } = comp.visceral;
+              const span = first - goal;
+              const done = reached ? 1 : span > 0 ? Math.min(1, Math.max(0, (first - last) / span)) : 0;
+              return (
+                <div className="mt-3 pt-3" style={{ borderTop: '1px solid var(--bento-hairline)' }}>
+                  <div className="flex justify-between items-baseline">
+                    <span className="text-xs font-medium" style={{ color: 'var(--bento-muted)' }}>
+                      Grasa visceral <span style={{ color: 'var(--bento-faint)' }}>· meta &lt;{goal}</span>
+                    </span>
+                    <span className="text-xs bento-mono" style={{ fontVariantNumeric: 'tabular-nums' }}>
+                      <span style={{ color: viscColor(last) }}>{last}</span>
+                      {first !== last && <span style={{ color: 'var(--bento-faint)' }}> · desde {first}</span>}
+                      {!reached && <span style={{ color: 'var(--bento-faint)' }}> · faltan {toGoal}</span>}
+                    </span>
+                  </div>
+                  <div style={{ height: 4, background: 'var(--bento-surface)', borderRadius: 99, marginTop: 6 }}>
+                    <div style={{ height: '100%', width: `${done * 100}%`, background: viscColor(last), borderRadius: 99 }} />
+                  </div>
+                  {comp.waist && comp.waist.deltaArc !== 0 && (
+                    <div className="flex justify-between items-baseline mt-2">
+                      <span className="text-xs font-medium" style={{ color: 'var(--bento-muted)' }}>
+                        Cintura <span style={{ color: 'var(--bento-faint)' }}>· confirma el avance</span>
+                      </span>
+                      <span className="text-xs bento-mono" style={{ fontVariantNumeric: 'tabular-nums' }}>
+                        <span style={{ color: 'var(--bento-ink)' }}>{comp.waist.last} cm</span>
+                        <span style={{ marginLeft: 6, color: statusColor(comp.waist.status) }}>{comp.waist.deltaArc > 0 ? '+' : ''}{comp.waist.deltaArc}</span>
+                      </span>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+          </>
+        ) : (
+          <div className="text-sm py-3" style={{ color: 'var(--bento-faint)' }}>Sin escaneo de composición aún.</div>
         )}
       </div>
 
@@ -2447,6 +2594,41 @@ function MealPhotoModal({ state, setState, dateKey, onClose }) {
   );
 }
 
+const INSIGHT_STYLE = {
+  urgent: 'bg-rose-50 dark:bg-rose-900/20 border-rose-200 dark:border-rose-800',
+  warn: 'bg-amber-50 dark:bg-amber-900/20 border-amber-200 dark:border-amber-800',
+  info: 'bg-sky-50 dark:bg-sky-900/20 border-sky-200 dark:border-sky-800',
+  good: 'bg-emerald-50 dark:bg-emerald-900/20 border-emerald-200 dark:border-emerald-800',
+};
+
+// Tarjetas de insights proactivos deterministas (computeProactiveInsights). `readOnly` oculta los
+// botones de acción (para vistas que no tienen cómo ejecutarlos). En el Coach van interactivas.
+function ProactiveInsights({ insights, onAction, readOnly }) {
+  if (!insights || insights.length === 0) return null;
+  const actionable = (a) => a && (a.kind === 'water250' || a.kind === 'water500' || a.kind === 'substitution');
+  return (
+    <div className="space-y-2">
+      {insights.map((i, idx) => (
+        <div key={idx} className={`rounded-xl border p-3 ${INSIGHT_STYLE[i.severity] || INSIGHT_STYLE.info}`}>
+          <div className="flex items-start gap-2">
+            <span className="text-base leading-none">{i.icon}</span>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-semibold text-gray-900 dark:text-gray-100">{i.title}</p>
+              {i.detail && <p className="text-xs text-gray-600 dark:text-gray-300 mt-0.5 leading-snug">{i.detail}</p>}
+              {!readOnly && actionable(i.action) && (
+                <button onClick={() => onAction && onAction(i.action)}
+                  className="mt-2 px-3 py-1 rounded-full bg-emerald-500 text-white text-xs font-semibold hover:bg-emerald-600">
+                  {i.action.label}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function CoachModal({ state, setState, dateKey, targets, onClose, onOpenSubstitution }) {
   const day = state.days[dateKey] || {};
   const totals = useMemo(
@@ -2455,6 +2637,12 @@ function CoachModal({ state, setState, dateKey, targets, onClose, onOpenSubstitu
   );
   const T = targets || DEFAULT_TARGETS;
   const apiKey = state.settings?.anthropicApiKey;
+
+  // Señales deterministas (sin IA): se muestran siempre y fundamentan el prompt del coach.
+  const insights = useMemo(
+    () => { const n = new Date(); return computeProactiveInsights(state, dateKey, T, { nowMinutes: n.getHours() * 60 + n.getMinutes() }); },
+    [state.days, state.weights, state.snackBank, state.proteinBank, state.dessertBank, state.settings, dateKey, T]
+  );
 
   const sig = hashSig({
     kcal: totals.kcal,
@@ -2507,7 +2695,7 @@ ESTADO AHORA:
 - Agua: ${totals.waterMl} / ${T.waterTarget} ml
 - Ejercicio quemado hoy: ${Math.round(totals.kcalBurned)} kcal (SOLO informativo — NO lo restes de las calorías; el TDEE y la meta ya incorporan la actividad)${actividadLinea}
 - Comidas sin marcar todavía: ${slotsPendientes.length ? slotsPendientes.join(', ') : 'ninguna'}
-
+${insights.length ? `\nSEÑALES DETECTADAS (deterministas, úsalas como base y NO las contradigas):\n${insights.map((i) => `- [${i.severity}] ${i.title}: ${i.detail}`).join('\n')}\n` : ''}
 Devuelve SOLO JSON, sin markdown, así:
 {
   "headline": "1 línea con titular accionable (máx 80 chars)",
@@ -2583,6 +2771,10 @@ Reglas:
           <button onClick={onClose} className="w-8 h-8 rounded-full bg-gray-100 dark:bg-gray-800 text-sm">✕</button>
         </div>
 
+        {insights.length > 0 && (
+          <ProactiveInsights insights={insights} onAction={handleMicroAction} />
+        )}
+
         {loading && (
           <div className="text-center py-8 text-sm text-gray-500 dark:text-gray-400">
             Pensando…
@@ -2591,7 +2783,7 @@ Reglas:
 
         {!apiKey && (
           <p className="text-xs text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/30 p-2 rounded-lg">
-            ⚠️ Configura tu API key en ⚙️ Ajustes primero.
+            ⚠️ El coach con IA necesita tu API key en ⚙️ Ajustes. {insights.length ? 'Las señales de arriba funcionan sin ella.' : ''}
           </p>
         )}
 
@@ -4625,12 +4817,25 @@ Reglas:
   const confidenceColor = response?.confidence === 'alta' ? 'green' : response?.confidence === 'media' ? 'amber' : 'red';
   const insightTones = ['var(--bento-warm)', 'var(--bento-pos)', 'var(--bento-blue)', 'var(--bento-yellow)', 'var(--bento-lilac)'];
 
+  // Señales proactivas de HOY (deterministas, sin IA): se muestran arriba, no requieren el análisis.
+  const todayInsights = useMemo(
+    () => { const n = new Date(); return computeProactiveInsights(state, todayKey(), targets, { nowMinutes: n.getHours() * 60 + n.getMinutes() }); },
+    [state.days, state.weights, state.snackBank, state.proteinBank, state.dessertBank, state.settings, targets]
+  );
+
   return (
     <div className="px-4 py-4 space-y-4">
       <div className="px-1">
         <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2"><span>🧠</span>Insights</h1>
         <p className="text-sm" style={{ color: 'var(--bento-faint)' }}>Patrones de las últimas 4 semanas</p>
       </div>
+
+      {todayInsights.length > 0 && (
+        <div className="space-y-2">
+          <div className="bento-label px-1">Hoy</div>
+          <ProactiveInsights insights={todayInsights} readOnly />
+        </div>
+      )}
 
       {/* 3 stats */}
       <div className="grid grid-cols-3 gap-2.5">
@@ -5592,6 +5797,32 @@ function HealthMetricDetail({ metric, series, onClose }) {
   );
 }
 
+// Sparkline SVG liviano (línea, sin librería): normaliza la serie a un viewBox fijo. Si hay un
+// solo punto dibuja una marca; vacío no renderiza nada.
+function Sparkline({ values, color = 'var(--bento-blue)', width = 96, height = 28 }) {
+  const vals = (values || []).filter((v) => v != null);
+  if (vals.length < 1) return null;
+  const min = Math.min(...vals), max = Math.max(...vals);
+  const span = max - min || 1;
+  const pad = 3;
+  const x = (i) => vals.length === 1 ? width / 2 : pad + (i * (width - pad * 2)) / (vals.length - 1);
+  const y = (v) => height - pad - ((v - min) / span) * (height - pad * 2);
+  if (vals.length === 1) {
+    return (
+      <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} style={{ overflow: 'visible' }}>
+        <circle cx={x(0)} cy={y(vals[0])} r={2.5} fill={color} />
+      </svg>
+    );
+  }
+  const pts = vals.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+  return (
+    <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} style={{ overflow: 'visible' }}>
+      <polyline points={pts} fill="none" stroke={color} strokeWidth="1.75" strokeLinejoin="round" strokeLinecap="round" />
+      <circle cx={x(vals.length - 1)} cy={y(vals[vals.length - 1])} r={2.5} fill={color} />
+    </svg>
+  );
+}
+
 function ExercisesView({ state, setState, targets }) {
   const apiKey = state.settings?.anthropicApiKey;
   const [capturing, setCapturing] = useState(false);
@@ -5599,44 +5830,14 @@ function ExercisesView({ state, setState, targets }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [response, setResponse] = useState(cached?.response || null);
-  const [progEx, setProgEx] = useState('');             // ejercicio elegido para la progresión
   const [historyOpen, setHistoryOpen] = useState(false);
   const [csvFrom, setCsvFrom] = useState('');           // '' = sin límite inferior (todo)
   const [csvTo, setCsvTo] = useState(todayKey());
 
   const stats = useMemo(() => computeExerciseStats(state.days || {}, todayKey(), 8), [state.days]);
 
-  // Series de fuerza (sección lifts del bridge) agrupadas por fecha→ejercicio, con PR (mejor peso)
-  // por ejercicio. Solo lectura; el dato llega a day.lifts[] vía mergeBridge.
-  const liftStats = useMemo(() => {
-    const all = [];
-    for (const [dk, day] of Object.entries(state.days || {})) {
-      const ls = Array.isArray(day?.lifts) ? day.lifts : [];
-      for (const l of ls) all.push({ ...l, date: l.date || dk });
-    }
-    if (!all.length) return null;
-    const prByEx = {};
-    for (const l of all) {
-      const w = Number(l.weightKg);
-      if (!Number.isFinite(w)) continue;
-      const k = String(l.exercise || '').toLowerCase().trim();
-      if (!prByEx[k] || w > prByEx[k]) prByEx[k] = w;
-    }
-    const byDate = {};
-    for (const l of all) {
-      (byDate[l.date] ||= {});
-      (byDate[l.date][l.exercise || 'Ejercicio'] ||= []).push(l);
-    }
-    const dates = Object.keys(byDate).sort((a, b) => (a < b ? 1 : -1)).slice(0, 8); // 8 sesiones recientes
-    const groups = dates.map((d) => ({
-      date: d,
-      exercises: Object.entries(byDate[d]).map(([ex, sets]) => ({
-        exercise: ex,
-        sets: sets.slice().sort((a, b) => (a.setNumber ?? 0) - (b.setNumber ?? 0)),
-      })),
-    }));
-    return { groups, prByEx, total: all.length };
-  }, [state.days]);
+  // Récords y progresión acotados a la rutina vigente (cruce por slug; "otros" = lo no-rutina).
+  const routineProg = useMemo(() => computeRoutineExerciseProgress(stats, state.routine, todayKey()), [stats, state.routine]);
 
   const trainingHistory = useMemo(() => {
     const start = shiftDate(todayKey(), -55);
@@ -5853,6 +6054,7 @@ Reglas:
   }
   const maxWeekSessions = Math.max(1, ...stats.weekBuckets.map((w) => w.sessions));
   const maxMuscle = Math.max(1, ...stats.muscleVolume.map((m) => m.sets));
+  const maxTonnage = Math.max(1, ...stats.tonnage.weeks.map((w) => w.volumeKg));
   const confColor = response?.confidence === 'alta' ? 'green' : response?.confidence === 'media' ? 'amber' : 'red';
   // Color por grupo muscular (variante B): piernas→ink, espalda→blue, pecho/brazos→warm,
   // core→yellow, movilidad→lilac, glúteos/hombros→pos. Las claves vienen en minúscula.
@@ -5940,37 +6142,91 @@ Reglas:
             </div>
           </div>
 
-          {/* Volumen por grupo · Ejercicios frecuentes */}
-          {(stats.muscleVolume.length > 0 || stats.topExercises.length > 0) && (
-            <div className={`items-start ${stats.muscleVolume.length > 0 && stats.topExercises.length > 0 ? 'bento-grid2 is-b' : 'bento-grid2'}`}>
-              {stats.muscleVolume.length > 0 && (
-                <div className="bento-card">
-                  <div className="bento-label" style={{ marginBottom: 16 }}>Volumen por grupo muscular · series ({stats.weeks} sem)</div>
-                  <div className="flex flex-col gap-3">
-                    {stats.muscleVolume.map((m) => (
-                      <div key={m.muscle} className="grid items-center gap-3" style={{ gridTemplateColumns: '84px 1fr 40px' }}>
-                        <div className="capitalize" style={{ fontSize: 12, color: 'var(--bento-muted)' }}>{m.muscle}</div>
-                        <div style={{ height: 6, borderRadius: 99, background: 'var(--bento-surface)', overflow: 'hidden' }}>
-                          <div style={{ height: '100%', borderRadius: 99, width: `${(m.sets / maxMuscle) * 100}%`, background: muscleColorVar(m.muscle) }} />
+          {/* Tonelaje semanal (tendencia de carga) · Esfuerzo medio (RPE + FC) */}
+          {(stats.tonnage.weeksWithData >= 1 || stats.effort.avgRpe != null || stats.effort.avgHr != null) && (
+            <div className="bento-grid2 is-a items-start">
+              <div className="bento-card">
+                <div className="flex items-baseline justify-between gap-2" style={{ marginBottom: 14 }}>
+                  <div className="bento-label">Tonelaje semanal · carga kg/sem</div>
+                  {stats.tonnage.pctPerWeek != null && (
+                    <span className="bento-mono" style={{ fontSize: 12, fontWeight: 600, color: stats.tonnage.pctPerWeek > 0 ? 'var(--bento-pos)' : stats.tonnage.pctPerWeek < 0 ? 'var(--bento-warm)' : 'var(--bento-faint)' }}>
+                      {stats.tonnage.pctPerWeek > 0 ? '↑' : stats.tonnage.pctPerWeek < 0 ? '↓' : ''} {stats.tonnage.pctPerWeek > 0 ? '+' : ''}{stats.tonnage.pctPerWeek}%/sem
+                    </span>
+                  )}
+                </div>
+                {stats.tonnage.weeksWithData >= 1 ? (
+                  <>
+                    <div className="flex items-end gap-2.5" style={{ height: 96 }}>
+                      {stats.tonnage.weeks.map((w, i) => (
+                        <div key={i} className="flex-1 flex flex-col items-center gap-1.5">
+                          <div style={{ width: '100%', maxWidth: 54, height: `${Math.max(3, (w.volumeKg / maxTonnage) * 72)}px`, background: w.volumeKg > 0 ? 'var(--bento-blue)' : 'var(--bento-surface)', borderRadius: 4 }} title={`${w.volumeKg.toLocaleString('es-CL')} kg`} />
+                          <div className="bento-mono" style={{ fontSize: 9, color: 'var(--bento-faint)' }}>{w.label}</div>
                         </div>
-                        <div className="bento-mono" style={{ fontSize: 12, textAlign: 'right', fontWeight: 600 }}>{m.sets}</div>
-                      </div>
-                    ))}
+                      ))}
+                    </div>
+                    <div style={{ fontSize: 11, color: 'var(--bento-muted)', marginTop: 10 }}>
+                      Esta semana <span className="bento-mono" style={{ fontWeight: 600, color: 'var(--bento-ink)' }}>{stats.tonnage.current.toLocaleString('es-CL')} kg</span>
+                      {stats.tonnage.slopePerWeek != null && stats.tonnage.slopePerWeek !== 0 && <> · {stats.tonnage.slopePerWeek > 0 ? '+' : ''}{stats.tonnage.slopePerWeek.toLocaleString('es-CL')} kg/sem de tendencia</>}
+                    </div>
+                  </>
+                ) : (
+                  <p style={{ fontSize: 11, color: 'var(--bento-faint)' }}>Sin volumen de carga aún. Sube capturas con kg×reps para ver la tendencia de tonelaje.</p>
+                )}
+              </div>
+              <div className="bento-card">
+                <div className="bento-label" style={{ marginBottom: 16 }}>Esfuerzo medio · últimas {stats.weeks} sem</div>
+                {(stats.effort.avgRpe != null || stats.effort.avgHr != null) ? (
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <div className="bento-label" style={{ fontSize: 9, marginBottom: 4 }}>RPE medio</div>
+                      {stats.effort.avgRpe != null ? (
+                        <>
+                          <div className="bento-num" style={{ fontSize: 26 }}>{stats.effort.avgRpe}<span style={{ fontSize: 13, color: 'var(--bento-faint)', fontWeight: 400 }}>/10</span></div>
+                          {stats.effort.rpeTrend != null && stats.effort.rpeTrend !== 0 && (
+                            <div className="bento-mono" style={{ fontSize: 11, color: stats.effort.rpeTrend > 0 ? 'var(--bento-warm)' : 'var(--bento-pos)' }}>{stats.effort.rpeTrend > 0 ? '↑ +' : '↓ '}{stats.effort.rpeTrend} vs antes</div>
+                          )}
+                          <div style={{ fontSize: 9, color: 'var(--bento-faint)', marginTop: 2 }}>{stats.effort.nRpe} sesiones</div>
+                        </>
+                      ) : <div style={{ fontSize: 12, color: 'var(--bento-faint)' }}>—</div>}
+                    </div>
+                    <div>
+                      <div className="bento-label" style={{ fontSize: 9, marginBottom: 4 }}>FC media</div>
+                      {stats.effort.avgHr != null ? (
+                        <>
+                          <div className="bento-num" style={{ fontSize: 26 }}>{stats.effort.avgHr}<span style={{ fontSize: 13, color: 'var(--bento-faint)', fontWeight: 400 }}> lpm</span></div>
+                          {stats.effort.hrTrend != null && stats.effort.hrTrend !== 0 && (
+                            <div className="bento-mono" style={{ fontSize: 11, color: stats.effort.hrTrend > 0 ? 'var(--bento-warm)' : 'var(--bento-pos)' }}>{stats.effort.hrTrend > 0 ? '↑ +' : '↓ '}{stats.effort.hrTrend} vs antes</div>
+                          )}
+                          <div style={{ fontSize: 9, color: 'var(--bento-faint)', marginTop: 2 }}>{stats.effort.nHr} sesiones</div>
+                        </>
+                      ) : <div style={{ fontSize: 12, color: 'var(--bento-faint)' }}>—</div>}
+                    </div>
                   </div>
-                </div>
-              )}
-              {stats.topExercises.length > 0 && (
-                <div className="bento-card">
-                  <div className="bento-label" style={{ marginBottom: 14 }}>Ejercicios más frecuentes</div>
-                  <div className="flex flex-wrap gap-2">
-                    {stats.topExercises.map((e) => (
-                      <span key={e.name} className="inline-flex items-center gap-1.5" style={{ padding: '6px 10px', borderRadius: 8, background: 'var(--bento-surface)', fontSize: 12 }}>
-                        {emojiForExercise(e.name)} {e.name} <span className="bento-mono" style={{ color: 'var(--bento-faint)' }}>×{e.count}</span>
-                      </span>
-                    ))}
+                ) : (
+                  <p style={{ fontSize: 11, color: 'var(--bento-faint)' }}>Sin datos de RPE/FC. Importa HeartWatch o registra entrenos con pulso para verlo.</p>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Volumen por grupo muscular */}
+          {stats.muscleVolume.length > 0 && (
+            <div className="bento-card">
+              <div className="bento-label" style={{ marginBottom: 16 }}>Volumen por grupo muscular · series/sem ({stats.weeks} sem)</div>
+              <div className="flex flex-col gap-3">
+                {stats.muscleVolume.map((m) => {
+                  const perWeek = m.sets / stats.weeks;
+                  return (
+                  <div key={m.muscle} className="grid items-center gap-3" style={{ gridTemplateColumns: '84px 1fr 44px' }}>
+                    <div className="capitalize" style={{ fontSize: 12, color: 'var(--bento-muted)' }}>{m.muscle}</div>
+                    <div style={{ height: 6, borderRadius: 99, background: 'var(--bento-surface)', overflow: 'hidden' }} title={`${m.sets} series en ${stats.weeks} sem`}>
+                      <div style={{ height: '100%', borderRadius: 99, width: `${(m.sets / maxMuscle) * 100}%`, background: muscleColorVar(m.muscle) }} />
+                    </div>
+                    <div className="bento-mono" style={{ fontSize: 12, textAlign: 'right', fontWeight: 600 }}>{perWeek.toFixed(1)}</div>
                   </div>
-                </div>
-              )}
+                  );
+                })}
+              </div>
             </div>
           )}
 
@@ -5980,74 +6236,130 @@ Reglas:
             </p>
           )}
 
-          {/* Récords (PRs) · grilla 2 columnas */}
-          {stats.byExercise.length > 0 && (
+          {/* Aviso de mesetas · ejercicios de la rutina sin progreso reciente */}
+          {routineProg.hasRoutine && (() => {
+            const stuck = routineProg.routine.filter((x) => x.data && x.stagnant);
+            if (!stuck.length) return null;
+            return (
+              <div className="bento-card" style={{ borderLeft: '3px solid var(--bento-warm)' }}>
+                <div className="bento-label" style={{ marginBottom: 8, color: 'var(--bento-warm)' }}>⚠️ Posible meseta · {stuck.length} ejercicio{stuck.length > 1 ? 's' : ''}</div>
+                <div className="flex flex-col gap-2">
+                  {stuck.map((x) => (
+                    <div key={x.slug} className="flex items-center justify-between gap-2" style={{ fontSize: 12 }}>
+                      <span className="flex items-center gap-1.5 min-w-0"><span className="shrink-0">{emojiForExercise(x.name)}</span><span className="truncate">{x.name}</span></span>
+                      <span className="bento-mono shrink-0" style={{ color: 'var(--bento-faint)', fontSize: 11 }}>{x.current != null ? `${x.current} kg` : ''}{x.daysSince != null ? ` · hace ${x.daysSince}d` : ''}</span>
+                    </div>
+                  ))}
+                </div>
+                <p style={{ fontSize: 11, color: 'var(--bento-muted)', marginTop: 10 }}>Sin récord en las últimas sesiones. Considera un deload, subir reps antes que peso, o cambiar la variante.</p>
+              </div>
+            );
+          })()}
+
+          {/* Adherencia a la rutina · esta semana */}
+          {routineProg.hasRoutine && (() => {
+            const r = routineProg.routine;
+            const done = r.filter((x) => x.trainedThisWeek).length;
+            return (
+              <div className="bento-card space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="bento-label">🎯 Adherencia a la rutina · esta semana</div>
+                  <div className="bento-mono" style={{ fontSize: 12, fontWeight: 600 }}>{done}/{r.length}</div>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {r.map((x) => {
+                    const label = x.trainedThisWeek ? '✓' : (x.daysSince != null ? `${x.daysSince}d` : '—');
+                    return (
+                      <span key={x.slug} title={x.daysSince != null ? `Última hace ${x.daysSince} días` : 'Sin registro'}
+                        className="inline-flex items-center gap-1.5" style={{
+                          padding: '5px 9px', borderRadius: 8, fontSize: 12,
+                          background: x.trainedThisWeek ? 'rgba(122,154,120,0.16)' : 'var(--bento-surface)',
+                          color: x.trainedThisWeek ? 'var(--bento-pos)' : 'var(--bento-faint)',
+                          border: x.trainedThisWeek ? '1px solid var(--bento-pos)' : '1px solid var(--bento-hairline)',
+                        }}>
+                        {emojiForExercise(x.name)} <span className="truncate" style={{ maxWidth: 140 }}>{x.name}</span>
+                        <span className="bento-mono" style={{ fontSize: 10 }}>{label}</span>
+                      </span>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* Récords + historial por ejercicio · SOLO ejercicios de la rutina (expandible) */}
+          {routineProg.hasRoutine ? (
+            <div className="bento-card space-y-1">
+              <div className="bento-label" style={{ marginBottom: 4 }}>🏋️ Récords e historial · ejercicios de la rutina</div>
+              <div style={{ fontSize: 10.5, color: 'var(--bento-faint)', marginBottom: 6 }}>Toca un ejercicio para ver su historial · ↑ = sugerencia de carga próxima</div>
+              {routineProg.routine.map((it) => {
+                const noData = it.entries.length < 1;
+                const primVal = it.bestWeight != null ? it.bestWeight : it.bestRm;
+                const head = (
+                  <div className="flex items-center gap-3" style={{ padding: '8px 0' }}>
+                    <div className="min-w-0" style={{ flex: '1 1 0' }}>
+                      <div className="flex items-center gap-1.5" style={{ fontSize: 12.5, fontWeight: 600 }}>
+                        <span>{emojiForExercise(it.name)}</span><span className="truncate">{it.name}</span>
+                        {it.stagnant && <span title="Sin progreso en las últimas sesiones" style={{ fontSize: 9, padding: '1px 6px', borderRadius: 6, background: 'rgba(205,122,85,0.14)', color: 'var(--bento-warm)' }}>meseta</span>}
+                      </div>
+                      <div style={{ fontSize: 10.5, color: 'var(--bento-faint)', marginTop: 2 }}>
+                        {noData ? 'sin datos aún' : (
+                          <>
+                            <b style={{ color: 'var(--bento-ink)' }}>PR {primVal} kg</b>
+                            {it.bestVolume != null ? <span> · vol {Math.round(it.bestVolume)}</span> : null}
+                            {it.delta != null && it.delta !== 0 ? <span style={{ color: it.delta >= 0 ? 'var(--bento-pos)' : 'var(--bento-warm)' }}> · {it.delta >= 0 ? '+' : ''}{it.delta}</span> : null}
+                            {it.suggestNextKg != null ? (it.suggestUp
+                              ? <span style={{ color: 'var(--bento-blue)' }}> · ↑ ~{it.suggestNextKg}kg</span>
+                              : <span style={{ color: 'var(--bento-faint)' }}> · → mantén {it.suggestNextKg}kg</span>) : null}
+                          </>
+                        )}
+                      </div>
+                    </div>
+                    {!noData && it.spark.length >= 1 && <div className="shrink-0"><Sparkline values={it.spark} color={it.stagnant ? 'var(--bento-warm)' : 'var(--bento-blue)'} /></div>}
+                  </div>
+                );
+                if (noData) {
+                  return <div key={it.slug} style={{ borderTop: '1px solid var(--bento-hairline)', opacity: 0.55 }}>{head}</div>;
+                }
+                return (
+                  <details key={it.slug} style={{ borderTop: '1px solid var(--bento-hairline)' }}>
+                    <summary style={{ listStyle: 'none', cursor: 'pointer' }}>{head}</summary>
+                    <div style={{ padding: '2px 0 10px 26px' }}>
+                      {it.entries.slice().reverse().map((e, i) => (
+                        <div key={i} className="bento-mono flex items-center justify-between" style={{ fontSize: 11, padding: '3px 0', color: 'var(--bento-muted)' }}>
+                          <span style={{ color: 'var(--bento-faint)' }}>{new Date(e.date + 'T12:00:00').toLocaleDateString('es-CL', { day: '2-digit', month: 'short' })}</span>
+                          <span style={{ flex: 1, textAlign: 'right' }}>
+                            {e.weightKg != null ? `${e.weightKg}kg` : (e.oneRepMaxKg != null ? `1RM ${e.oneRepMaxKg}` : '—')}
+                            {e.reps != null ? ` ×${e.reps}` : ''}
+                            {e.volumeKg != null ? ` · ${Math.round(e.volumeKg)} vol` : ''}
+                            {e.quality ? ` · ${e.quality}` : ''}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                );
+              })}
+            </div>
+          ) : stats.byExercise.length > 0 ? (
             <div className="bento-card">
-              <div className="bento-label" style={{ marginBottom: 14 }}>🏆 Récords por ejercicio</div>
+              <div className="bento-label" style={{ marginBottom: 6 }}>🏆 Récords por ejercicio</div>
+              <div style={{ fontSize: 11, color: 'var(--bento-faint)', marginBottom: 12 }}>Carga tu rutina en la pestaña Rutina para ver acá los PR e historial de tus ejercicios.</div>
               <div className="bento-grid2 is-eq">
                 {stats.byExercise.slice(0, 6).map((x) => {
-                  const primLabel = x.bestRm != null ? '1RM' : 'Peso';
                   const primVal = x.bestRm != null ? x.bestRm : x.bestWeight;
                   return (
                     <div key={x.name} style={{ padding: '12px 14px', border: '1px solid var(--bento-hairline)', borderRadius: 10 }}>
-                      <div className="flex items-center gap-1.5" style={{ fontSize: 12.5, fontWeight: 600, lineHeight: 1.3 }}>
+                      <div className="flex items-center gap-1.5" style={{ fontSize: 12.5, fontWeight: 600 }}>
                         <span>{emojiForExercise(x.name)}</span><span className="truncate">{x.name}</span>
                       </div>
-                      <div className="flex gap-4" style={{ marginTop: 8 }}>
-                        {primVal != null && (
-                          <div>
-                            <div className="bento-label" style={{ fontSize: 9 }}>{primLabel}</div>
-                            <div className="bento-num" style={{ fontSize: 18 }}>{primVal}<span style={{ fontSize: 10, color: 'var(--bento-faint)' }}> kg</span></div>
-                          </div>
-                        )}
-                        {x.bestVolume != null && (
-                          <div>
-                            <div className="bento-label" style={{ fontSize: 9 }}>Volumen</div>
-                            <div className="bento-num" style={{ fontSize: 18 }}>{Math.round(x.bestVolume)}</div>
-                          </div>
-                        )}
-                      </div>
+                      <div className="bento-num" style={{ fontSize: 18, marginTop: 8 }}>{primVal ?? '—'}<span style={{ fontSize: 10, color: 'var(--bento-faint)' }}> kg</span></div>
                     </div>
                   );
                 })}
               </div>
             </div>
-          )}
-
-          {/* Progresión por ejercicio (interactivo) */}
-          {stats.byExercise.length > 0 && (() => {
-            const sel = stats.byExercise.find((x) => x.name === progEx) || stats.byExercise[0];
-            const valOf = (e) => (e.oneRepMaxKg ?? e.weightKg ?? null);
-            const vals = sel.entries.map(valOf).filter((v) => v != null);
-            const maxV = vals.length ? Math.max(...vals) : 1;
-            const first = vals.length ? vals[0] : null;
-            const last = vals.length ? vals[vals.length - 1] : null;
-            const delta = first != null && last != null ? last - first : null;
-            return (
-              <div className="bento-card space-y-2">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="bento-label shrink-0">📈 Progresión</div>
-                  <select value={sel.name} onChange={(e) => setProgEx(e.target.value)}
-                    className="text-xs rounded-lg px-2 py-1 max-w-[62%] truncate"
-                    style={{ border: '1px solid var(--bento-hairline)', background: 'var(--bento-surface)', color: 'var(--bento-ink)' }}>
-                    {stats.byExercise.map((x) => <option key={x.name} value={x.name}>{x.name}</option>)}
-                  </select>
-                </div>
-                <div style={{ fontSize: 11, color: 'var(--bento-faint)' }}>
-                  1RM / peso máx por sesión · {sel.entries.length} registros
-                  {delta != null ? <span style={{ color: delta >= 0 ? 'var(--bento-pos)' : 'var(--bento-warm)' }}> · {first}→{last} kg ({delta >= 0 ? '+' : ''}{delta})</span> : null}
-                </div>
-                <div className="flex items-end gap-1.5" style={{ height: 80 }}>
-                  {sel.entries.map((e, i) => { const v = valOf(e); return (
-                    <div key={i} className="flex-1 flex flex-col items-center gap-1" title={`${e.date}: ${v ?? '—'} kg`}>
-                      <div style={{ width: '100%', borderRadius: '4px 4px 0 0', background: 'var(--bento-blue)', height: `${v != null ? Math.max(4, (v / maxV) * 64) : 2}px` }} />
-                      <div className="bento-mono" style={{ fontSize: 8, color: 'var(--bento-faint)' }}>{e.date.slice(5)}</div>
-                    </div>
-                  ); })}
-                </div>
-              </div>
-            );
-          })()}
+          ) : null}
 
           {/* Historial de sesiones (ver/editar/borrar) */}
           <div className="bento-card space-y-2">
@@ -6090,55 +6402,6 @@ Reglas:
               </div>
             )}
           </div>
-
-          {/* Series de fuerza (lifts) — set a set, con PRs */}
-          {liftStats && (
-            <div className="bento-card space-y-3">
-              <div className="bento-label">🏋️ Series de fuerza ({liftStats.total})</div>
-              <div className="space-y-3">
-                {liftStats.groups.map((g) => (
-                  <div key={g.date}>
-                    <div className="bento-mono" style={{ fontSize: 10, color: 'var(--bento-faint)', marginBottom: 4 }}>
-                      {new Date(g.date + 'T12:00:00').toLocaleDateString('es-CL', { weekday: 'short', day: 'numeric', month: 'short' })}
-                    </div>
-                    <div className="space-y-1.5">
-                      {g.exercises.map((ex) => {
-                        const prW = liftStats.prByEx[String(ex.exercise).toLowerCase().trim()];
-                        return (
-                          <div key={ex.exercise} style={{ padding: '8px 12px', border: '1px solid var(--bento-hairline)', borderRadius: 10 }}>
-                            <div className="flex items-center gap-1.5" style={{ fontSize: 12.5, fontWeight: 600 }}>
-                              <span>{emojiForExercise(ex.exercise)}</span>
-                              <span className="truncate">{ex.exercise}</span>
-                              {ex.sets.some((s) => s.bilateralFlag) && (
-                                <span title="Fuerza bilateral desigual" style={{ fontSize: 11, color: 'var(--bento-warm)' }}>⚖️</span>
-                              )}
-                              {prW != null && (
-                                <span className="bento-mono" style={{ fontSize: 9, marginLeft: 'auto', color: 'var(--bento-faint)' }}>PR {prW}kg</span>
-                              )}
-                            </div>
-                            <div className="flex flex-wrap gap-1.5" style={{ marginTop: 6 }}>
-                              {ex.sets.map((s, i) => (
-                                <span key={s.id || i} className="bento-mono"
-                                  title={`Serie ${s.setNumber ?? i + 1}${s.rpe != null ? ` · RPE ${s.rpe}` : ''}${s.isPR ? ' · PR' : ''}`}
-                                  style={{
-                                    fontSize: 11, padding: '2px 7px', borderRadius: 8,
-                                    background: s.isPR ? 'rgba(122,154,120,0.16)' : 'var(--bento-surface)',
-                                    color: s.isPR ? 'var(--bento-pos)' : 'var(--bento-ink)',
-                                    border: s.isPR ? '1px solid var(--bento-pos)' : '1px solid var(--bento-hairline)',
-                                  }}>
-                                  {s.isPR ? '⭐ ' : ''}{s.weightKg != null ? s.weightKg : '—'}kg×{s.reps != null ? s.reps : '—'}{s.rpe != null ? ` @${s.rpe}` : ''}
-                                </span>
-                              ))}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
 
           {/* Exportar CSV */}
           <div className="bento-card space-y-3">

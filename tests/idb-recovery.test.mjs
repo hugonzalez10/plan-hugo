@@ -17,6 +17,17 @@ test('datos locales buenos (sin __freshStart) → NO rescata aunque haya espejo'
   assert.equal(recoverFromMirror(local, J({ ...buildSeed(), userProfile: { age: 99 } })), null);
 });
 
+test('localStorage corrupto (__corruptionDetected) + espejo con datos → rescata', () => {
+  // El store primario quedó ilegible pero el espejo IndexedDB está bueno: hay que recuperarlo,
+  // antes este caso devolvía null y se perdía todo aunque el mirror estuviera intacto.
+  const local = { __corruptionDetected: true, days: {} };
+  const mirror = { ...buildSeed(), userProfile: { age: 36 }, days: { '2026-06-10': {} } };
+  const r = recoverFromMirror(local, J(mirror));
+  assert.ok(r);
+  assert.equal(r.userProfile.age, 36);
+  assert.equal(r.__corruptionDetected, undefined); // el rescatado no arrastra el marcador
+});
+
 test('arranque vacío + espejo con perfil → rescata el espejo', () => {
   const local = { __freshStart: true, days: {} };
   const mirror = { ...buildSeed(), userProfile: { age: 36 }, days: { '2026-06-10': {} } };
