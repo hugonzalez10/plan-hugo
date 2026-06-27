@@ -116,6 +116,7 @@ export function syncSig(state) {
     snackBank: state.snackBank ?? [], proteinBank: state.proteinBank ?? [],
     dessertBank: state.dessertBank ?? [], rules: state.rules ?? [],
     recipeBank: state.recipeBank ?? [], days: state.days ?? {},
+    foods: state.foods ?? [],
     weights, theme: state.theme ?? null,
   };
   const s = JSON.stringify(slice);
@@ -130,7 +131,7 @@ export function syncSig(state) {
 export function isPlausibleState(s) {
   if (!s || typeof s !== 'object') return false;
   if (s.days != null && (typeof s.days !== 'object' || Array.isArray(s.days))) return false;
-  for (const k of ['weights', 'snackBank', 'proteinBank', 'dessertBank']) {
+  for (const k of ['weights', 'snackBank', 'proteinBank', 'dessertBank', 'foods']) {
     if (s[k] != null && !Array.isArray(s[k])) return false;
   }
   return true;

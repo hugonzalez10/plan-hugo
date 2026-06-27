@@ -88,6 +88,71 @@ export const SEED_RECIPES = [
   { name: 'Pavo molido 140g + zapallo italiano + arroz', occasion: 'cena', totals: { kcal: 420, protein: 36, carbs: 45, fat: 8, fiber: 5 } },
 ];
 
+// — Biblioteca de alimentos integrales (state.foods, Fase C). Macros POR 100 g de fuente dura
+//   (USDA / tabla de composición chilena); pesos cocidos donde aplica (carnes, cereales, legumbres
+//   = porción que Hugo realmente sirve). Cierra el punto débil de la IA en comida casera/integral:
+//   en vez de adivinar el plato, se elige el alimento y se escala por gramos. defaultPortionG = la
+//   porción típica. Respeta restricciones: sin nueces. El merge foodsVersion los carga una sola vez
+//   sin resucitar lo que Hugo borre (ver migrateState). Cada item: { name, per100, defaultPortionG, tags? }.
+export const SEED_FOODS = [
+  // Proteínas animales (cocidas / porción comestible)
+  { name: 'Pechuga de pollo cocida', per100: { kcal: 165, protein: 31, carbs: 0, fat: 3.6, fiber: 0 }, defaultPortionG: 150 },
+  { name: 'Muslo de pollo cocido', per100: { kcal: 209, protein: 26, carbs: 0, fat: 11, fiber: 0 }, defaultPortionG: 150 },
+  { name: 'Posta / filete vacuno magro cocido', per100: { kcal: 217, protein: 30, carbs: 0, fat: 10, fiber: 0 }, defaultPortionG: 130 },
+  { name: 'Carne molida 5% grasa cocida', per100: { kcal: 164, protein: 26, carbs: 0, fat: 6, fiber: 0 }, defaultPortionG: 130 },
+  { name: 'Lomo de cerdo cocido', per100: { kcal: 175, protein: 28, carbs: 0, fat: 6, fiber: 0 }, defaultPortionG: 130 },
+  { name: 'Pavo molido cocido', per100: { kcal: 203, protein: 27, carbs: 0, fat: 10, fiber: 0 }, defaultPortionG: 140 },
+  { name: 'Salmón cocido', per100: { kcal: 208, protein: 22, carbs: 0, fat: 13, fiber: 0 }, defaultPortionG: 150 },
+  { name: 'Merluza cocida', per100: { kcal: 90, protein: 18, carbs: 0, fat: 1.5, fiber: 0 }, defaultPortionG: 180 },
+  { name: 'Reineta cocida', per100: { kcal: 110, protein: 23, carbs: 0, fat: 2, fiber: 0 }, defaultPortionG: 180 },
+  { name: 'Atún en agua escurrido', per100: { kcal: 116, protein: 26, carbs: 0, fat: 1, fiber: 0 }, defaultPortionG: 120, tags: ['portable', 'sin-refrigeración'] },
+  { name: 'Huevo entero', per100: { kcal: 143, protein: 13, carbs: 1.1, fat: 9.5, fiber: 0 }, defaultPortionG: 100 },
+  { name: 'Clara de huevo', per100: { kcal: 52, protein: 11, carbs: 0.7, fat: 0.2, fiber: 0 }, defaultPortionG: 120 },
+  // Lácteos
+  { name: 'Yogur griego natural 0%', per100: { kcal: 59, protein: 10, carbs: 3.6, fat: 0.4, fiber: 0 }, defaultPortionG: 170 },
+  { name: 'Yogur natural', per100: { kcal: 61, protein: 3.5, carbs: 4.7, fat: 3.3, fiber: 0 }, defaultPortionG: 125 },
+  { name: 'Quesillo (queso fresco)', per100: { kcal: 98, protein: 11, carbs: 3, fat: 4, fiber: 0 }, defaultPortionG: 80 },
+  { name: 'Leche descremada', per100: { kcal: 35, protein: 3.4, carbs: 5, fat: 0.1, fiber: 0 }, defaultPortionG: 200 },
+  { name: 'Queso gauda', per100: { kcal: 356, protein: 25, carbs: 2, fat: 27, fiber: 0 }, defaultPortionG: 30 },
+  // Cereales y panes (cocidos / tal como se sirven)
+  { name: 'Arroz blanco cocido', per100: { kcal: 130, protein: 2.7, carbs: 28, fat: 0.3, fiber: 0.4 }, defaultPortionG: 150 },
+  { name: 'Arroz integral cocido', per100: { kcal: 123, protein: 2.7, carbs: 25.6, fat: 1, fiber: 1.6 }, defaultPortionG: 150 },
+  { name: 'Quinoa cocida', per100: { kcal: 120, protein: 4.4, carbs: 21, fat: 1.9, fiber: 2.8 }, defaultPortionG: 150 },
+  { name: 'Avena en hojuelas (cruda)', per100: { kcal: 389, protein: 17, carbs: 66, fat: 7, fiber: 10 }, defaultPortionG: 60 },
+  { name: 'Fideos cocidos', per100: { kcal: 158, protein: 6, carbs: 31, fat: 0.9, fiber: 1.8 }, defaultPortionG: 180 },
+  { name: 'Pan integral', per100: { kcal: 247, protein: 13, carbs: 41, fat: 3.4, fiber: 7 }, defaultPortionG: 60 },
+  { name: 'Pan blanco (marraqueta / hallulla)', per100: { kcal: 270, protein: 9, carbs: 53, fat: 1.5, fiber: 2.5 }, defaultPortionG: 100 },
+  { name: 'Papa cocida', per100: { kcal: 87, protein: 1.9, carbs: 20, fat: 0.1, fiber: 1.8 }, defaultPortionG: 200 },
+  { name: 'Camote cocido', per100: { kcal: 90, protein: 2, carbs: 21, fat: 0.1, fiber: 3.3 }, defaultPortionG: 150 },
+  // Legumbres (cocidas)
+  { name: 'Lentejas cocidas', per100: { kcal: 116, protein: 9, carbs: 20, fat: 0.4, fiber: 7.9 }, defaultPortionG: 200 },
+  { name: 'Garbanzos cocidos', per100: { kcal: 164, protein: 8.9, carbs: 27, fat: 2.6, fiber: 7.6 }, defaultPortionG: 180 },
+  { name: 'Porotos cocidos', per100: { kcal: 127, protein: 8.7, carbs: 23, fat: 0.5, fiber: 6.4 }, defaultPortionG: 200 },
+  { name: 'Choclo', per100: { kcal: 96, protein: 3.4, carbs: 21, fat: 1.5, fiber: 2.4 }, defaultPortionG: 150 },
+  // Grasas y semillas
+  { name: 'Palta', per100: { kcal: 160, protein: 2, carbs: 9, fat: 15, fiber: 7 }, defaultPortionG: 50 },
+  { name: 'Aceite de oliva', per100: { kcal: 884, protein: 0, carbs: 0, fat: 100, fiber: 0 }, defaultPortionG: 10 },
+  { name: 'Almendras', per100: { kcal: 579, protein: 21, carbs: 22, fat: 50, fiber: 12.5 }, defaultPortionG: 30, tags: ['portable', 'sin-refrigeración'] },
+  { name: 'Mantequilla de maní', per100: { kcal: 588, protein: 25, carbs: 20, fat: 50, fiber: 6 }, defaultPortionG: 20 },
+  { name: 'Chía', per100: { kcal: 486, protein: 17, carbs: 42, fat: 31, fiber: 34 }, defaultPortionG: 15 },
+  // Verduras
+  { name: 'Brócoli', per100: { kcal: 34, protein: 2.8, carbs: 7, fat: 0.4, fiber: 2.6 }, defaultPortionG: 150 },
+  { name: 'Tomate', per100: { kcal: 18, protein: 0.9, carbs: 3.9, fat: 0.2, fiber: 1.2 }, defaultPortionG: 120 },
+  { name: 'Lechuga', per100: { kcal: 15, protein: 1.4, carbs: 2.9, fat: 0.2, fiber: 1.3 }, defaultPortionG: 80 },
+  { name: 'Zanahoria', per100: { kcal: 41, protein: 0.9, carbs: 10, fat: 0.2, fiber: 2.8 }, defaultPortionG: 80 },
+  { name: 'Zapallo italiano', per100: { kcal: 17, protein: 1.2, carbs: 3.1, fat: 0.3, fiber: 1 }, defaultPortionG: 150 },
+  { name: 'Espinaca', per100: { kcal: 23, protein: 2.9, carbs: 3.6, fat: 0.4, fiber: 2.2 }, defaultPortionG: 80 },
+  { name: 'Champiñón', per100: { kcal: 22, protein: 3.1, carbs: 3.3, fat: 0.3, fiber: 1 }, defaultPortionG: 100 },
+  // Frutas
+  { name: 'Manzana', per100: { kcal: 52, protein: 0.3, carbs: 14, fat: 0.2, fiber: 2.4 }, defaultPortionG: 180, tags: ['portable'] },
+  { name: 'Plátano', per100: { kcal: 89, protein: 1.1, carbs: 23, fat: 0.3, fiber: 2.6 }, defaultPortionG: 120, tags: ['portable'] },
+  { name: 'Naranja', per100: { kcal: 47, protein: 0.9, carbs: 12, fat: 0.1, fiber: 2.4 }, defaultPortionG: 150, tags: ['portable'] },
+  { name: 'Frutilla', per100: { kcal: 32, protein: 0.7, carbs: 7.7, fat: 0.3, fiber: 2 }, defaultPortionG: 150 },
+  { name: 'Arándano', per100: { kcal: 57, protein: 0.7, carbs: 14, fat: 0.3, fiber: 2.4 }, defaultPortionG: 100 },
+  { name: 'Pera', per100: { kcal: 57, protein: 0.4, carbs: 15, fat: 0.1, fiber: 3.1 }, defaultPortionG: 180, tags: ['portable'] },
+  { name: 'Uva', per100: { kcal: 69, protein: 0.7, carbs: 18, fat: 0.2, fiber: 0.9 }, defaultPortionG: 120 },
+];
+
 export const SEED_RULES = [
   {
     id: 'rule-kcap-2000',
@@ -132,9 +197,13 @@ export function buildSeed() {
     weights: [],
     recipeBank: SEED_RECIPES.map((r) => ({ ...r, id: uuid(), builtin: true, createdAt: null })),
     favorites: [],
+    foods: SEED_FOODS.map((f) => ({
+      ...f, id: uuid(), key: normalizeName(f.name), source: 'seed', builtin: true, usageCount: 0, lastUsedAt: null,
+    })),
     routine: null,
     exercise_videos: {},
     arsenalVersion: 3,
+    foodsVersion: 1,
     bridge: { lastSyncAt: null, importedIds: [], pushedIds: [], removedBridgeIds: [] },
     aiCache: { coach: {}, weekly: {}, patterns: null, lastSubstitution: null, health: null },
   };
