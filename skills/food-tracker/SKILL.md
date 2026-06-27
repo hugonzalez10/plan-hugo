@@ -2,20 +2,16 @@
 name: food-tracker
 description: >
   Registra alimentación, peso, ejercicio y agua diarios del Dr. Hugo González con
-  fotos o texto, estima calorías/macros/composición con visión IA, y escribe un
-  JSON depurado en Google Drive (plan-hugo-bridge.json) para que la app "Plan
-  Hugo" lo consuma directo sin llamar a la API. USAR SIEMPRE que Hugo mande una
-  foto de comida, una captura de báscula/composición corporal (peso, % grasa,
-  músculo), o una captura de entrenamiento (Apple Fitness, Strava, etc.), o diga
-  "comí X", "registra esto", "anota esta comida", "cuántas calorías tiene esto",
-  "pésame esto", "registra mi peso", "anota este entrenamiento", "registra este
-  ejercicio", "registra X de agua", "agrega X de agua", "añade X litros/lt",
-  "suma X de agua", "tomé X vasos", "anota un vaso de agua",
-  "me tomé una botella/un litro", o cualquier variación de registro de comida,
-  peso, actividad o agua/hidratación. **agregar/añadir/sumar son sinónimos de
-  registrar** (ej. "agrega 1.5lt de agua" = registrar 1500 ml de agua); cualquiera
-  de esos verbos sobre comida/peso/ejercicio/agua DEBE activar la skill.
-  También activar con "cómo voy hoy", "cuánto llevo", "resumen del día".
+  fotos o texto, estima calorías/macros/composición con visión IA y escribe el JSON
+  del bridge para que la app "Plan Hugo" lo consuma sin llamar a la API. USAR SIEMPRE
+  que Hugo mande una foto de comida, una captura de báscula/composición (peso, %
+  grasa, músculo) o de entrenamiento (Apple Fitness, Strava), o diga "comí X",
+  "registra/anota esto", "cuántas calorías tiene esto", "pésame esto", "registra mi
+  peso", "anota este entrenamiento/ejercicio", "registra/agrega/añade/suma X de agua",
+  "tomé X vasos", "me tomé una botella/un litro", o cualquier variación de registro de
+  comida, peso, actividad o agua. agregar/añadir/sumar = registrar (ej. "agrega 1.5lt
+  de agua" = 1500 ml). También activar con "cómo voy hoy", "cuánto llevo", "resumen
+  del día".
 ---
 
 # Food Tracker — Plan Hugo
@@ -89,31 +85,34 @@ contenido (ventana ~5 min), poda entradas con `date` de más de 10 días y actua
 
 ## Metas diarias (para el feedback de comida)
 
-> **La meta diaria es PROGRAMABLE, no la hardcodees.** La app calcula la meta con
-> Mifflin-St Jeor (TMB × factor de actividad − déficit) desde el perfil de Hugo y la
-> empuja al bridge. Para el feedback, **lee la meta real**: GET `BRIDGE_URL?config=1&k=$BRIDGE_TOKEN`
-> → `{ ok, config:{ kcalTarget, kcalDeficit, goal, weightKg, …, targets:{ kcalMax,
-> proteinMin, carbsTarget, fatTarget, fiberTarget, waterTarget, bmr, tdee } } }`.
-> Usa `config.targets` para los objetivos (`kcalMax` = meta de calorías,
-> `proteinMin`, etc.). El comando "cómo voy hoy" (`?totals=`) ya trae `targets`
-> propios cuando hay snapshot del día — esos mandan.
-
-Si el bridge aún no tiene `config` (perfil sin sincronizar), usa estos valores de
-respaldo:
+> **METAS CONGELADAS — fuente única.** Estos valores son fijos por decisión de Hugo
+> (recomposición con fecha límite), NO se recalculan con Mifflin ni se ajustan a diario:
 
 | Macro | Meta | Límite |
 |-------|------|--------|
-| Calorías | 2.092 kcal | máx 2.092 |
-| Proteína | 200 g | mínimo innegociable |
-| Carbohidratos | 209 g | máx 220 |
-| Grasas | 70 g | — |
+| Calorías | 2.000 kcal | máx 2.000 |
+| Proteína | 190 g | mínimo innegociable |
+| Carbohidratos | 200 g | máx 200 |
+| Grasas | 67 g | — |
 | Fibra | 30 g | mínimo |
 | Agua | 3.675 ml | mínimo |
 | Creatina | 5 g/día | — |
 
-Proteína 200 g = piso innegociable (~2.2-2.4 g/kg de peso objetivo 90 kg): en déficit
+Proteína 190 g = piso innegociable (~2.1 g/kg de peso objetivo 90 kg): en déficit
 marcado preserva masa magra y maximiza pérdida de grasa (Longland 2016). Grasa visceral
-índice 15 → **prioridad #1**, marcador crítico. Penalizar carbos simples y grasa saturada.
+→ **prioridad #1**, marcador crítico. Penalizar carbos simples y grasa saturada.
+
+> **Qué pasa con `config` / `?totals=` `targets`.** Para el feedback puedes leer
+> `BRIDGE_URL?config=1&k=$BRIDGE_TOKEN` → `config.targets:{ kcalMax, proteinMin,
+> carbsTarget, fatTarget, fiberTarget, waterTarget }`, pero **la tabla congelada manda
+> sobre `config`**, no al revés. La app aún calcula su meta con Mifflin-St Jeor, así que
+> `config` puede devolver números viejos (p. ej. 2.092 kcal / 200 g): si `config.targets`
+> **difiere** de la tabla congelada, **usa la tabla congelada** y avísale a Hugo en una
+> línea ("⚠️ el perfil de la app dice X, las metas congeladas son Y — conviene
+> actualizar el perfil para que cuadren"). El objetivo es UNA sola verdad: cuando el
+> perfil de la app se actualice a los valores congelados, `config` y la tabla coincidirán
+> y desaparece el aviso. Los `targets` que vienen en el snapshot de `?totals=` se usan
+> solo si **coinciden** con los congelados; si no, congelados.
 
 ### Distribución proteica intradía (Schoenfeld & Aragon 2018)
 
@@ -143,9 +142,20 @@ Antes de procesar, decide qué es:
   clasificable por hora.
 - **Peso / composición** → captura de báscula o app de composición corporal
   (Withings, Speediance, etc.): peso, % grasa, músculo, IMC, etc. → sección `weights`.
-- **Ejercicio** → captura de entrenamiento (Apple Fitness, Strava, anillos):
-  duración, kcal, FC. → sección `workouts`. **Si una sola foto trae varios
-  entrenamientos (p.ej. bici + fuerza), registra UNA entrada por cada uno.**
+- **Ejercicio** → captura de entrenamiento. → sección `workouts`.
+  **AUTORIDAD DE KCAL = Apple Watch.** Cuando la misma sesión aparece en varios
+  dispositivos (Apple Watch + Speediance + Concept2), las kcal NO se suman: es la misma
+  actividad medida en paralelo. Registra UNA vez con las kcal del Watch (si hay "activas"
+  y "totales" en el Watch, usa las TOTALES); descarta las kcal de Speediance/Concept2 para
+  esa sesión. Solo registra entradas separadas cuando son actividades realmente distintas
+  y NO solapadas en el tiempo (p. ej. bloque de fuerza en la mañana + bici de cierre
+  después): ahí sí van dos workouts, cada uno con su dato de Watch.
+  **Bloques DENTRO de la sesión de fuerza van fusionados, no como workout aparte:** remo
+  aeróbico de calentamiento, caminatas de descanso entre series, "X55 / movimiento libre".
+  Su quema ya está contenida en las kcal del Watch del bloque de fuerza.
+  **Antes de escribir, resuelve los solapamientos con Hugo** (qué dato de kcal usar, si un
+  bloque es parte de la fuerza o sesión aparte) y **verifica el bridge**
+  (`?totals=` o GET `section=workouts&date=`) para no duplicar.
 - **Agua / hidratación** → "registra X de agua", "tomé X vasos/botellas", "X ml de
   agua", "me tomé un litro", "anota un vaso de agua" → sección `water`. Convierte a
   **ml**: vaso ≈ 250 ml, botella ≈ 500 ml, litro/jarro = 1000 ml. Si la cantidad es
@@ -465,6 +475,10 @@ Barra de 10 bloques. Los totales vienen **directos en la respuesta del registro*
 bridge. Si por alguna razón la respuesta no trajo `totals`, recién ahí
 `curl -sL "$BRIDGE_URL?totals=<hoy>&k=$BRIDGE_TOKEN"`.
 
+**`[alerta si corresponde]`** = la señal MÁS severa de las reglas de "Insights proactivos"
+que solo dependen de `totals` + la hora (proteína 🥩, agua 💧, exceso ⚠️, cierre 🎯). Una
+sola línea, accionable. Las demás (racha, comida atrasada, peso) quedan para "cómo voy".
+
 ### Peso
 ```
 ⚖️ Peso registrado: [weightKg] kg[, % grasa X, músculo Y]
@@ -492,8 +506,9 @@ Usa el `waterMl` que devuelve la respuesta del registro (o `?totals=`); no recal
 > voy hoy"**, **"cuánto llevo"**, **"resumen del día"** o equivalente, **renderiza un
 > dashboard HTML interactivo inline** (la herramienta de visualización inline, **NO un
 > archivo**, NO `create_file`) con datos REALES del bridge, en bloques **A → B → C → D
-> → E** en ese orden. El resto de la skill (registro de comida/peso/workouts/agua) NO
-> cambia.
+> → E** en ese orden, y debajo (en el texto del chat) el **Bloque F — Señales de hoy**
+> (ver "Insights proactivos", más abajo). El resto de la skill (registro de
+> comida/peso/workouts/agua) NO cambia.
 
 ### Paso D1 — Traer TODA la data en una sola llamada
 
@@ -538,10 +553,11 @@ PY
 
 El objeto resultante trae todo lo que necesitan los 5 bloques. Notas de la data real
 (no asumir limpia):
-- **`source`**: `"app"`/`"app+meals"` = el número real de la app (kcal ya neto de
-  ejercicio); `"bridge"` = la app no sincronizó hoy → es parcial, avísale a Hugo en el
-  texto del chat ("abre la app un segundo para el total completo"). Renderiza el
-  dashboard igual con lo que haya.
+- **`source`**: `"app"`/`"app+meals"` = el número real de la app (kcal **brutas
+  comidas**, NO neto de ejercicio: las kcal de entreno nunca se restan del presupuesto —
+  el déficit ya vive en la meta congelada de 2.000 kcal); `"bridge"` = la app no
+  sincronizó hoy → es parcial, avísale a Hugo en el texto del chat ("abre la app un
+  segundo para el total completo"). Renderiza el dashboard igual con lo que haya.
 - **`targets` cambia por día.** En el Bloque E usa los `targets` que devuelve CADA día
   en `trend[].targets` (no los de hoy para todos). Si un día no trae `targets`, usa los
   de hoy como respaldo.
@@ -673,10 +689,144 @@ camino normal y preferido es el dashboard.
 
 ---
 
-## Check-in semanal (lunes) — tasa de pérdida, NO déficit fijo
+## Insights proactivos (deterministas, SIN API)
+
+> **Esto reemplaza al "Coach" de la app** (que gasta la API key de Anthropic). Son reglas
+> **aritméticas, sin IA**: las aplicas tú sobre los datos que YA bajó el gatherer del Paso
+> D1 (`now`, `totals`, `targets`, `remaining`, `eaten`, `mealsToday`, `weights`, `trend`).
+> Espejan la función `computeProactiveInsights` de la app (`src/analytics.mjs`) — si cambian
+> los umbrales allá, actualízalos aquí. Salida: **lista corta rankeada de tarjetas**, máx 5,
+> ordenadas por severidad. Si ninguna regla dispara, no muestres nada (no inventes).
+
+**Dónde se usan:**
+- En **"cómo voy hoy"**: agrégalas como **Bloque F** (texto del chat, debajo del dashboard),
+  arriba la más severa.
+- En el **feedback post-comida** (Paso 5): si la respuesta del registro trae `totals`,
+  puedes evaluar las reglas que solo dependen de `totals`/hora (proteína, agua, exceso,
+  cierre) y mostrar **la más severa** como `[alerta si corresponde]`. Las que necesitan
+  `trend`/`weights`/`mealsToday` (racha, comida atrasada, peso) van solo en "cómo voy".
+
+**Umbrales derivados** (de las metas congeladas: kcalMax 2000, proteinMin 190):
+- `kcalMin = round(kcalMax × 0.92)` ≈ 1840 · `kcalRed = round(kcalMax × 1.08)` ≈ 2160
+- `proteinYellow = round(proteinMin × 0.87)` ≈ 165
+- `mins(now)` = hora→minutos desde medianoche (p. ej. "19:30" → 1170).
+- **Horario de comidas** (default, ya en Paso D1): desayuno 08:00, colación 1 11:00,
+  almuerzo 13:30, colación 2 18:00, cena 20:30. `cenaMin` = 1230.
+- **Slot cubierto** = existe una comida con ese `mealSlot` en `mealsToday` (ojo: `eaten` del
+  gatherer son NOMBRES de comidas, no slots — no lo uses para esto). Margen de gracia 75 min.
+
+**Severidad** (orden de la lista): 🔴 urgente → 🟠 aviso → 🔵 info → 🟢 bien.
+
+**Reglas** (evalúa todas; emite las que cumplan, ordena, corta a 5):
+
+| # | Disparo | Tarjeta |
+|---|---------|---------|
+| 1 🍽️ | La comida **más temprana** cuya hora pautada + 75 min < `mins(now)` y cuyo slot NO está cubierto | 🟠 "Pasó tu hora de {comida} (~HH:MM) y no la registraste." (solo UNA, la más temprana) |
+| 2 🥩 | `protGap = proteinMin − protein` ≥ 25 **y** `mins(now) ≥ cenaMin` | 🔴 "Faltan {protGap} g de proteína — son las {now}, mete una fuente ya (atún, claras, yogur proteico)." |
+| 2b 🥩 | `protGap ≥ 40` **y** `hora ≥ 16` (y NO se cumplió 2) | 🟠 "Vas corto de proteína ({protGap} g) — priorízala en lo que queda del día." |
+| 3 💧 | `waterGap = waterTarget − waterMl` ≥ 750 **y** `hora ≥ 17` | 🟠 "Faltan {waterGap} ml de agua — un par de vasos ahora y llegas." |
+| 4 ⚠️ | `kcalIn > kcalRed` | 🟠 "{kcalIn − kcalMax} kcal sobre la meta — mañana retoma; no compenses saltándote comidas." |
+| 5 🔥 | Racha previa (días consecutivos **antes de hoy** en `trend` que cumplieron) ≥ 1, **hoy NO cumplido**, `hora ≥ 18` | 🟠 "Tu racha de {N} días está en juego — cierra kcal y proteína del día." |
+| 6 ⚖️ | Días desde el último `weights[].date` ≥ 10 | 🔵 "{N} días sin pesarte — el pacing y el TDEE se desactualizan, registra un peso." |
+| 7 🎯 | `14 ≤ hora` **y** `mins(now) < cenaMin` **y** `kcalIn ≤ kcalRed` **y** (`protGap ≥ 15` o `kcalMax − kcalIn ≥ 200`) | 🔵 "Cómo cerrar el día — quedan {max(0, kcalMax−kcalIn)} kcal de margen y {max(0, protGap)} g de proteína; una cena con ~{min(protGap, proteinMin)} g te deja en línea." |
+| 8 🟢 | Hoy cumplido (kcalIn∈[kcalMin, kcalRed] y protein ≥ proteinYellow) **y** racha (incl. hoy) ≥ 3 | 🟢 "Racha de {N} días — día cumplido, sigue así." |
+
+**"Cumplió" un día** (para 5 y 8) = `kcalIn` de ese día ∈ [`kcalMin`, `kcalRed`] **y**
+`protein ≥ proteinYellow`, usando los `totals`/`targets` de ESE día (en `trend[i]`).
+
+**Formato de salida** (Bloque F, en el chat):
+```
+Señales de hoy
+🔴 Faltan 45 g de proteína — son las 21:10, mete una fuente ya (atún, claras, yogur proteico).
+🟠 Pasó tu hora de cena (~20:30) y no la registraste.
+🔵 12 días sin pesarte — el pacing se desactualiza, registra un peso.
+```
+No repitas lo que ya dijo el dashboard; estas son **acciones**, cortas y accionables. Si
+quieres, cierra ofreciendo "¿te receto algo?" cuando haya 🥩/🎯 (enlaza con "qué como").
+
+---
+
+## Recetar comida — "qué como" / "qué me falta" / "qué ceno"
+
+Cuando Hugo pregunta **qué comer** (no registrar): "qué como ahora", "qué ceno", "qué me
+falta", "qué colación llevo", "dame algo de mi arsenal", o cuando en "cómo voy" quede
+proteína/kcal por cerrar y haga sentido proponer. Esto **prescribe**, no registra.
+
+Lógica:
+1. Trae los totales del día (`?totals=`) y, con las metas congeladas, calcula lo que
+   **falta**: `kcalFalta = 2000 − kcalIn`, `protFalta = 190 − protein`, idem carbos/grasa/fibra.
+2. Mira la hora (`now`) y la toma que toca (tabla de slots) o la que Hugo nombre.
+3. Propón **2-3 opciones del arsenal** que cierren el hueco, priorizando EN ESTE ORDEN:
+   - **Proteína primero** si `protFalta > 20 g` (piso innegociable de 190 g).
+   - **Caber sin pasar 2000**, dejando preferible **200-400 kcal de colchón** (no rellenar
+     al ras: el riesgo de Hugo es subingerir de día y atracar de noche, no pasarse).
+   - **No repetir** lo que ya comió hoy ni la toma anterior.
+   - Toma correcta: colaciones → preferir `portable`/`sin-refrigeración`.
+   - Reglas de la semana: **máx 3 dulces/sem, máx 1 delivery/sem, sin extras pasando 2000**.
+4. Cada opción: **nombre + (kcal / P) + 1 línea de por qué cuadra**. Tuteo chileno, sin relleno.
+5. Si ya cerró proteína y queda poco margen y es tarde (`≥21:00`): no empujes comida —
+   sugiere agua si falta y listo.
+
+**Restricciones DURAS (nunca las rompas):**
+- **JAMÁS nueces / almendras / frutos secos.**
+- **Yogur griego siempre mezclado** (berries / whey / chía), nunca "solo".
+- No repetir el mismo alimento en el día.
+- El ejercicio **NO abre margen** para comer más.
+
+### Arsenal de referencia (staples de Hugo)
+
+> Snapshot del banco (fuente viva = pestaña **Banco** de la app / `src/seed.mjs`). Macros por
+> porción: **kcal · P · C · G** (g). Úsalo para componer; si Hugo nombra algo que no está, estímalo.
+
+**Colaciones / proteína portable** (desayuno, colacion1, colacion2):
+| Alimento | kcal | P | C | G |
+|----------|------|---|---|---|
+| ISO 100 whey (1 scoop) | 110 | 25 | 2 | 1 |
+| Yogur griego 0% 200g + frambuesa + whey + chía | 250 | 35 | 20 | 5 |
+| Charqui 40g | 130 | 25 | 2 | 3 |
+| Colún Protein (botella) | 160 | 18 | 18 | 2 |
+| Loncoleche/Yogurt Protein Colún | 100-160 | 11-18 | 12-20 | 1-3 |
+| Atún en lata solo / + 4 galletas de arroz | 120 / 280 | 26 / 25 | 0 / 30 | 1 / 6 |
+| 2 huevos duros (+ 1 yogurt Colún) | 180 / 270 | 13 / 24 | 1 / 10 | 12 / 14 |
+| 100g pavo en láminas + 1 fruta | 230 | 22 | 22 | 4 |
+| Quesillo/Requesón 100-150g + galletas/fruta | 185-190 | 14-20 | 18-20 | 4-6 |
+| Avena 60g + scoop proteína | 350 | 32 | 42 | 6 |
+| Batido proteína + leche descremada + plátano | 280 | 32 | 30 | 4 |
+| 4 claras revueltas + champiñón | 95 | 15 | 2 | 2 |
+| Quest Bar | 200 | 21 | 22 | 8 |
+
+**Almuerzos / cenas (recetas completas):**
+| Plato | Ocasión | kcal | P | C | G |
+|-------|---------|------|---|---|---|
+| Pollo 150g + arroz integral + ensalada | almuerzo | 505 | 43 | 48 | 12 |
+| Posta 120g + puré de coliflor + verduras | almuerzo | 330 | 36 | 18 | 13 |
+| Lentejas guisadas + carne molida magra | almuerzo | 380 | 36 | 42 | 9 |
+| Salmón 150g + quinoa + brócoli | cena | 550 | 43 | 40 | 22 |
+| Merluza 180g al horno + papas + ensalada | cena | 320 | 37 | 30 | 6 |
+| Pavo molido 140g + zapallo italiano + arroz | cena | 420 | 36 | 45 | 8 |
+| (proteína sola: pollo/salmón/posta/atún 2 latas) | cena | 240-280 | 32-52 | 0 | 2-16 |
+
+**Postres (almuerzo/cena, ojo regla de 3 dulces/sem):**
+| Postre | kcal | P | C | G |
+|--------|------|---|---|---|
+| Jalea protein / Brownie proteico casero | 60 / 118 | 10 / 11 | 4 / 8 | 0 / 5 |
+| Fruta (manzana/pera/plátano/uvas/berries) | 65-105 | 0-2 | 15-27 | 0-1 |
+| Yogurt Colún light / Gelatina light | 70 / 10 | 6 / 1 | 9 / 0 | 1 / 0 |
+| Chocolate amargo 70% (20g) | 120 | 1 | 9 | 8 |
+| Helado bajo cal (1 bola) | 90 | 3 | 14 | 2 |
+
+---
+
+## Check-in semanal (lunes) — tasa de pérdida + pacing a la meta + recomposición
 
 El criterio de progreso ya **no es el déficit calórico fijo** sino la **tasa de pérdida
-semanal** expresada como % del peso corporal/semana (Garthe 2011).
+semanal** expresada como % del peso corporal/semana (Garthe 2011), **leída contra la
+meta-fecha** y **vigilando que no se pierda músculo** (esto es recomposición, no solo
+adelgazar).
+
+> **META CENTRAL (constante del proyecto):** llegar a **90.0 kg el 27-nov-2026**,
+> bajando grasa visceral de índice 15 → **<10** y preservando masa muscular esquelética
+> (base ~40 kg). Peso de partida de referencia ~102–105 kg, grasa corporal 33.5% → 22–24%.
 
 En el check-in del lunes (o si Hugo pregunta "cómo voy esta semana", "cómo viene el peso"):
 
@@ -685,6 +835,8 @@ En el check-in del lunes (o si Hugo pregunta "cómo voy esta semana", "cómo vie
    registros de cada semana lunes-domingo para suavizar el ruido diario).
 3. Exprésalo como **Δ% = (pesoPrevProm − pesoActProm) / pesoPrevProm × 100** (positivo = pérdida).
 
+### A — Tasa semanal (Garthe)
+
 | Tasa | Lectura | Acción |
 |------|---------|--------|
 | **0.5-0.7 %/sem** (~0.55-0.75 kg) | Ritmo óptimo: preserva/aumenta masa magra | Mantener |
@@ -692,8 +844,136 @@ En el check-in del lunes (o si Hugo pregunta "cómo voy esta semana", "cómo vie
 | **<0.4 %/sem por 2 semanas** | Pérdida estancada | Sugerir **extender la duración del cardio** (NO agregar días ni recortar más calorías) |
 
 Base: Garthe 2011 — 0.7 %/sem preserva/aumenta LBM; 1.4 %/sem la deja plana con igual
-pérdida de grasa. **Ignora el TDEE dinámico si hay <14 días de data.** La grasa visceral
-sigue siendo la **prioridad #1**.
+pérdida de grasa. **Ignora el TDEE dinámico si hay <14 días de data.**
+
+### B — Pacing a la meta-fecha (¿llegas a 90 kg el 27-nov-2026?)
+
+No basta con "bajas a buen ritmo": hay que saber si ese ritmo **alcanza para la fecha**.
+Deriva hoy con `TZ=America/Santiago date +%F` y calcula:
+
+- **`semanasRestantes`** = días entre hoy y 2026-11-27, ÷ 7.
+- **`kgFaltantes`** = pesoActProm − 90.0.
+- **`ritmoRequerido` (kg/sem)** = `kgFaltantes / semanasRestantes`; pásalo a %/sem
+  dividiendo por pesoActProm × 100.
+- **`ETAproyectada`** = hoy + (`kgFaltantes / ritmoRealKgSem`) semanas, usando el ritmo
+  real de las últimas ~3-4 semanas (no el de una sola, muy ruidoso).
+
+Lectura:
+- Si **`ritmoReal ≥ ritmoRequerido`** → "vas en fecha o adelantado" (di la ETA). Si además
+  el ritmo real supera 0.8 %/sem, prioriza la regla de Garthe (bajar ritmo) sobre apurar:
+  **no se sacrifica músculo por llegar antes**.
+- Si **`ritmoReal < ritmoRequerido`** pero dentro de la banda 0.5-0.7 % → "vas bien de
+  salud pero **apretado de fecha**"; la palanca es **extender duración del cardio (Día 3
+  Z2 primero)**, NO recortar más kcal (las metas están congeladas).
+- Si **`ritmoReal` te deja ETA después del 27-nov** → dilo sin adornos, con cuántas
+  semanas de atraso, y la corrección concreta.
+
+> Referencia (recalcula siempre con datos reales): de ~103 → 90 kg en ~22 semanas ≈
+> **0.59 kg/sem (~0.57 %/sem)** — cae justo en la banda Garthe, o sea el plan llega
+> *ajustado*, sin colchón. Cualquier semana <0.4 % hay que recuperarla con cardio, no
+> con hambre.
+
+### C — Lente de recomposición (que el peso que baja sea grasa, no músculo)
+
+Bajar peso "perfecto" perdiendo músculo es un fracaso de recomposición. Con la sección
+`weights` (campos `skeletalMuscleKg`, `fatFreeMassKg`, `ffmi`, `bodyFatPct`):
+
+- **Masa muscular esquelética** (base ~40 kg): compara el último valor vs el de hace
+  ~2-4 semanas. Si **baja > ~0.5 kg sostenido mientras bajas peso → 🔴 bandera roja**,
+  aunque la tasa de peso sea "óptima": señal de que falta proteína/estímulo de fuerza, no
+  de que sobra comida. Acción: revisar adherencia a proteína (190 g y distribución) y a
+  los anclas de fuerza — **nunca** recortar kcal como respuesta.
+- **FFMI / masa libre de grasa**: debe mantenerse o subir levemente. Si cae junto al peso,
+  refuerza el diagnóstico de pérdida de magra.
+- **% grasa**: en recomposición correcta **baja más rápido que el peso** (pierdes grasa,
+  retienes magra). Si el peso baja pero el % grasa no se mueve, es señal de pérdida de
+  magra → mismo aviso.
+
+La **grasa visceral sigue siendo la prioridad #1**; su tendencia detallada va en el
+**check de composición cada 4 días** (sección siguiente), no aquí.
+
+---
+
+## Check de composición completa (cada 4 días) — grasa visceral al frente
+
+Distinto del check-in semanal de peso: cada **4 días** Hugo hace un escaneo Speediance
+completo (no solo peso). Aquí el foco es la **trayectoria de composición**, con la
+**grasa visceral como marcador #1** (índice 15 → objetivo **<10**).
+
+**Cuándo:** cuando Hugo mande una captura de composición completa (varias pantallas
+Speediance), o pida "check de composición", "cómo va la composición", "cómo va la
+visceral", o hayan pasado ~4 días desde el último escaneo completo (si lo notas, ofrécelo
+en una línea: "van 4 días, ¿hacemos el check de composición?").
+
+**Cómo:**
+1. Registra el peso/composición como siempre (Paso 3 → `weights`, **todas** las claves
+   legibles).
+2. Lee el histórico: `curl -sL "$BRIDGE_URL?k=$BRIDGE_TOKEN"` → `weights`, y toma los
+   escaneos con `visceralFat` presente (los completos).
+3. Reporta cada marcador **con su tendencia vs el escaneo anterior, vs basal y vs target**:
+
+| Marcador | Basal | Objetivo | Qué mostrar |
+|----------|-------|----------|-------------|
+| **Grasa visceral (índice)** | 15 | **<10** | valor actual + Δ vs anterior + cuánto falta a <10. **Es el #1, va primero, siempre.** |
+| % grasa corporal | 33.5% | 22–24% | valor + Δ + tramo restante |
+| Masa muscular esquelética | ~40 kg | preservar/subir | valor + Δ; si baja → 🔴 (ver lente de recomposición) |
+| Cintura (waistCm) | — | ↓ sostenido | valor + Δ; proxy directo de visceral |
+| Peso | ~102–105 | 90.0 | valor + Δ; cruza con el pacing del check-in semanal |
+| FFMI | — | mantener/↑ | valor + Δ |
+
+4. **Lectura honesta, sin consuelo:**
+   - Si la **visceral baja** → refuérzalo, es la métrica que más importa.
+   - Si la visceral **se estanca o sube** mientras el peso baja → 🔴 prioridad: revisar
+     carbos simples / grasa saturada / alcohol y, sobre todo, **el cardio Zona 2 (Día 3)**,
+     que es la palanca #1 contra visceral. NO recortar kcal (congeladas).
+   - Si **peso baja pero músculo también** → bandera de recomposición (mismo criterio que
+     la sección anterior).
+5. Cierra con **una** acción concreta para los próximos 4 días (no una lista).
+
+> La visceral y la cintura con tendencia, y la proyección a 90 kg, **viven acá** (y en el
+> check-in semanal), **no** en el dashboard diario "cómo voy hoy" — ese es solo del día.
+
+---
+
+## Reporte semanal narrado (lunes) — LA salida unificada
+
+Los lunes (o si Hugo pide "reporte de la semana", "resumen semanal", "cómo viene la
+semana"), entrega **UN solo mensaje narrado**, sin consuelo, que junta las **4 dimensiones**
+en un veredicto. El check-in de peso y el check de composición aportan los números; aquí se
+**orquestan** con entreno y nutrición. No es una tabla: es un parte de situación corto.
+
+### Datos (un par de curls al bridge)
+- `curl -sL "$BRIDGE_URL?k=$BRIDGE_TOKEN"` → JSON completo. Filtra a la **semana
+  lunes-domingo** que cierra: `weights`, `workouts`, `meals`.
+- Hoy con `TZ=America/Santiago date +%F`; deriva el lunes y el domingo de la semana evaluada.
+
+### Estructura del mensaje (en este orden)
+1. **Veredicto (1 línea, primero):** ¿la semana sumó a la meta del 27-nov-2026? → "en
+   fecha" / "atrasado N sem" / "semana perdida, hay que recuperar".
+2. **Peso & pacing** (usa el check-in semanal A+B): tasa %/sem (Garthe, banda 0.5-0.7) +
+   **ETA a 90 kg vs 27-nov**. Una línea con el número, no la tabla completa.
+3. **Composición** (si hubo escaneo esta semana, usa el check de composición): **visceral
+   Δ hacia <10 primero**, luego músculo esq. y %grasa. Si NO hubo escaneo, dilo: "sin
+   escaneo esta semana → toca uno".
+4. **Entreno** (de `workouts` de la semana):
+   - **Nº de sesiones vs 5** (cuenta entrenos distintos).
+   - **¿Día 3 (Cardio Z2) hecho?** Si falta, es la **alerta #1** de la semana (palanca
+     anti-visceral; no se sacrifica).
+   - **Tren inferior vs superior:** suma volumen/series por grupo (`exercises[].muscle`);
+     avisa si piernas/glúteos quedaron bajo cuota.
+   - **Progresión en anclas:** ¿subió carga/reps vs la semana previa o se estancó? (variar
+     ejercicios sin progresar = error, márcalo).
+5. **Nutrición** (de `meals` de la semana):
+   - **Días que cumplieron** kcal ≤ 2.000 **y** proteína ≥ 190 (cuéntalos, ej. "4/7").
+   - **Proteína promedio/día** y si hubo días con **distribución subóptima** (<4 tomas ≥36 g).
+   - **Reglas:** dulces y delivery usados vs tope (máx 3 / máx 1 por semana).
+6. **Una sola acción** para la semana que entra (NO una lista): la palanca de mayor retorno
+   según lo de arriba — casi siempre **cerrar el Día 3 Z2**, subir proteína los días que
+   faltó, o extender el cardio si el pacing va atrasado. **Nunca** recortar kcal (congeladas).
+
+Tono: directo, chileno (tuteo), sin relleno ni consuelo, números redondeados. Si una
+dimensión no tiene data (semana sin pesajes, sin escaneo, sin entrenos registrados), **dilo
+explícito** en vez de inventar.
 
 ---
 
@@ -722,14 +1002,14 @@ fuera de plan va a `extra` → "EXTRAS DEL DÍA".)
 
 ## Alertas automáticas (comida)
 
-- `protein < 50% de 200 g` → "⚠️ Proteína crítica — necesitas Xg más"
-- `kcal > 2092` → "🔴 Techo calórico superado"
-- `hora > 20:00 y protein < 80% de 200 g` → "Cierra el día con proteína: yogur griego, claras, whey"
+- `protein < 50% de 190 g` → "⚠️ Proteína crítica — necesitas Xg más"
+- `kcal > 2000` → "🔴 Techo calórico superado"
+- `hora > 20:00 y protein < 80% de 190 g` → "Cierra el día con proteína: yogur griego, claras, whey"
 - **Distribución:** `<4 tomas de ≥36 g` o `brecha >5 h entre tomas` → "⚠️ Distribución
   subóptima — reparte la proteína en ≥4 tomas de ≥36 g" (aunque el total se cumpla).
 - **Día con `workouts`:** si no hay toma proteica después de las 21:00 → "Suma una toma
   pre-sueño de 30-40 g (caseína/proteína lenta)".
-- `sat_fat_warning: true` → recordar grasa visceral índice 15 (prioridad #1)
+- `sat_fat_warning: true` → recordar grasa visceral (prioridad #1)
 - `gi: "alto"` → mencionar impacto en insulinoresistencia visceral
 
 ---
@@ -739,3 +1019,59 @@ fuera de plan va a `extra` → "EXTRAS DEL DÍA".)
 - Nunca dar consuelo. Dar corrección concreta.
 - Si se pasó en calorías: indicar qué omitir en la próxima comida.
 - Si falta proteína: indicar fuente concreta (no genérico).
+
+---
+
+## Análisis y scoring de entrenamientos (Speediance)
+
+Cuando Hugo sube capturas de un entreno y pide analizar/evaluar (no solo registrar):
+
+> **Principios del Pilar 2 (corrigen los errores de junio 2026, aplícalos al evaluar):**
+> - **Progresión, no variedad.** El objetivo es subir carga/reps en los **ejercicios
+>   ancla**, no cambiar de ejercicios cada semana. Rotar movimientos sin progresar = error.
+> - **Sesiones de fuerza de 45–55 min** (ni exprés ni eternas).
+> - **Tren inferior prioritario** (piernas/glúteos venían sub-trabajados).
+> - **Día 3 (Cardio Zona 2 puro) es intocable**: es la palanca #1 contra grasa visceral.
+>   Saltarlo es el desvío más caro de la semana.
+> - 5 días/semana con progresión doble sistemática.
+
+1. **Lee `Rutina_Speediance_Hugo.docx` en `/mnt/project/` PRIMERO** e identifica qué día
+   de la rutina corresponde según la fecha (Día 1 Pierna / Día 2 Empuje / Día 3 Cardio Z2 /
+   Día 4 Tracción / Día 5 Pierna-Full).
+2. **Nunca pre-califiques** antes de confirmar los detalles reales de la sesión con Hugo.
+3. **Nota numérica 0-10** por sesión y por día completo, con feedback crítico honesto, sin
+   consuelo. Evalúa contra la rutina del proyecto:
+   - **Progresión doble en los anclas (lo que más pesa en la nota):** compara las cargas
+     de los ejercicios ancla vs la(s) sesión(es) previa(s) del mismo día (usa `lifts` y/o
+     `workouts.exercises[]` del historial: `curl -sL "$BRIDGE_URL?k=$BRIDGE_TOKEN"`). Subir
+     carga manteniendo reps, o subir reps a igual carga = **bien**; mismas cargas semana a
+     semana = **estancado, bájale la nota**; cambiar de ejercicio en vez de progresar =
+     **error de "variedad sobre progresión", señálalo explícito**. Marca `isPR` en los
+     `lifts` de los anclas cuando corresponda.
+   - **Tren inferior:** verifica que piernas/glúteos reciban su volumen; si la sesión
+     debía ser de pierna y quedó corta o liviana, márcalo (es el grupo que venía flojo).
+   - **Duración 45–55 min:** marca como desvío si la fuerza quedó muy por debajo (<40) o
+     muy por encima (>60).
+   - Marca **desvíos** de las cargas/series del archivo y **problemas de ejecución**.
+4. **Adherencia semanal (al cerrar la semana o si lo piden):** revisa los `workouts` de los
+   últimos 7 días y verifica **5 sesiones** y, sobre todo, **que el Día 3 (Cardio Z2) se
+   haya hecho** — si falta, es el aviso #1. Aporta el **volumen por grupo muscular** (suma
+   `exercises[].volumeKg` por `muscle`) y avisa si **piernas/glúteos** quedaron bajo cuota
+   frente a tren superior.
+5. **Alertas del Speediance** ("Fuerza bilateral desigual", "Mantenga su nivel máximo"):
+   trátalas como banderas a vigilar, pero **descártalas si Hugo las explica por armado mal
+   configurado del ejercicio** (no es asimetría real).
+6. **"Tasa de finalización" del Speediance** puede venir inflada o baja por ejercicios mal
+   configurados (p. ej. fila alterna con rondas de más). Confía en lo que Hugo confirma
+   sobre la completitud real, no en el % de la app.
+7. **Cardio de cierre en días de fuerza:** márcalo como desvío si la FC supera Z2 cómodo.
+   Debe ser enfriamiento real (~120-125 bpm), no Z2 alto rozando 135+. (Esto es el cardio
+   de cierre, NO reemplaza el Día 3 de Z2 puro.)
+8. Al cerrar, **recuerda siempre que las kcal de entreno NO se suman como margen comible**:
+   el déficit ya vive en la meta congelada de 2.000 kcal.
+
+**Registro tras el análisis:** máximo un workout de fuerza + un workout de cardio de cierre
+(con la regla de dedup de kcal del Paso 0), más los `lifts` ancla con `isPR` cuando aplique.
+Deriva la fecha con `TZ=America/Santiago date +%F`. El POST devuelve HTML "Page Not Found"
+aunque el write sea exitoso — verifica con un GET posterior, nunca reintentes por ese error
+(causa duplicados).

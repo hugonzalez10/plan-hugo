@@ -309,7 +309,11 @@ export function idbGet() {
 }
 
 export function recoverFromMirror(localState, mirrorJson) {
-  if (!localState || !localState.__freshStart) return null; // datos locales buenos → no tocar
+  // Rescatar del espejo IndexedDB en DOS casos: arranque vacío (__freshStart, device nuevo o purga
+  // de Safari) Y corrupción del localStorage (__corruptionDetected: había datos pero ilegibles). Sin
+  // el segundo caso, una corrupción del store primario borraba todo aunque el espejo durable estuviera
+  // intacto. Con datos locales buenos (ninguna marca) NO se toca nada.
+  if (!localState || !(localState.__freshStart || localState.__corruptionDetected)) return null;
   if (!mirrorJson) return null;
   let parsed;
   try { parsed = migrateState(JSON.parse(mirrorJson)); } catch { return null; }
