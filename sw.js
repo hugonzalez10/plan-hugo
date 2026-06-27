@@ -4,7 +4,7 @@
  * NO interceptamos llamadas a api.anthropic.com.
  */
 
-const CACHE_NAME = 'plan-hugo-v77-composicion-cintura';
+const CACHE_NAME = 'plan-hugo-v78-pr-historial-rutina';
 const CORE_URLS = [
   './index.html',
   './app.js',
