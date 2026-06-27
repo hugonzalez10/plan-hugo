@@ -172,28 +172,89 @@ export function withBridgeToken(url, token) {
   return url + sep + 'k=' + encodeURIComponent(token);
 }
 
-export async function fetchBridge(url, token) {
+// — Handshake de versión (anti-drift). El .gs sella cada lectura con bridgeVersion = BRIDGE_VERSION;
+//   la app compara contra EXPECTED_BRIDGE_VERSION y avisa si la implementación desplegada quedó
+//   atrás (el síntoma clásico: campos nuevos descartados en silencio porque no se redeployó el .gs).
+//   SUBIR EN LOCKSTEP con BRIDGE_VERSION en apps-script/bridge-writer.gs cada vez que cambie el shape.
+export const EXPECTED_BRIDGE_VERSION = 2;
+
+// Drift de versión del bridge desplegado. Devuelve null si está al día; si no, el detalle para el
+// indicador. deployed=null = implementación vieja sin sello (todavía no redeployada).
+export function bridgeVersionDrift(deployedVersion) {
+  const dep = (deployedVersion != null && Number.isFinite(Number(deployedVersion))) ? Number(deployedVersion) : null;
+  if (dep != null && dep >= EXPECTED_BRIDGE_VERSION) return null;
+  return { stale: true, deployed: dep, expected: EXPECTED_BRIDGE_VERSION };
+}
+
+// Endurecimiento de la lectura (Nivel 1): timeout explícito + reintentos con backoff. Sin esto un
+// fetch lento colgaba ~2min (default del navegador) y un fallo transitorio rompía el sync hasta el
+// siguiente poll (30s). Reintenta SOLO fallos transitorios (red, timeout, 5xx, JSON corrupto/HTML
+// de página de error de Google); 4xx y token inválido NO se reintentan.
+export const BRIDGE_FETCH_TIMEOUT_MS = 15000;
+export const BRIDGE_FETCH_RETRIES = 2; // intentos totales = 1 + reintentos
+
+function bridgeBackoffMs(attempt) {
+  return Math.min(4000, 500 * Math.pow(3, attempt)); // 500ms, 1500ms, (4000)
+}
+
+async function fetchBridgeOnce(fullUrl, timeoutMs) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    return await fetch(fullUrl, { redirect: 'follow', signal: ctrl.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function fetchBridge(url, token, opts = {}) {
   const tokenized = withBridgeToken(url, token);
   const sep = tokenized.includes('?') ? '&' : '?';
-  const resp = await fetch(tokenized + sep + 't=' + Date.now(), { redirect: 'follow' });
-  if (!resp.ok) throw new Error('HTTP ' + resp.status);
-  const data = await resp.json();
-  if (data && data.ok === false && data.reason === 'unauthorized') {
-    throw new Error('Token del bridge inválido (revisa Ajustes → Token del bridge).');
+  const timeoutMs = opts.timeoutMs ?? BRIDGE_FETCH_TIMEOUT_MS;
+  const retries = opts.retries ?? BRIDGE_FETCH_RETRIES;
+  const sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+
+  let lastErr = null;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    if (attempt > 0) await sleep(bridgeBackoffMs(attempt - 1));
+    let resp;
+    try {
+      resp = await fetchBridgeOnce(tokenized + sep + 't=' + Date.now(), timeoutMs);
+    } catch (e) {
+      lastErr = (e && e.name === 'AbortError') ? new Error('Timeout del bridge (' + timeoutMs + 'ms)') : (e || new Error('red'));
+      continue; // red/timeout → reintentable
+    }
+    if (!resp.ok) {
+      if (resp.status >= 500) { lastErr = new Error('HTTP ' + resp.status); continue; } // 5xx reintentable
+      throw new Error('HTTP ' + resp.status); // 4xx no
+    }
+    let data;
+    try {
+      data = await resp.json();
+    } catch (e) {
+      lastErr = new Error('Respuesta del bridge no es JSON (¿página de error de Google?)');
+      continue; // HTML/JSON corrupto → reintentable
+    }
+    if (data && data.ok === false && data.reason === 'unauthorized') {
+      throw new Error('Token del bridge inválido (revisa Ajustes → Token del bridge).');
+    }
+    return {
+      meals: Array.isArray(data.meals) ? data.meals : [],
+      weights: Array.isArray(data.weights) ? data.weights : [],
+      workouts: Array.isArray(data.workouts) ? data.workouts : [],
+      checks: Array.isArray(data.checks) ? data.checks : [],
+      water: Array.isArray(data.water) ? data.water : [],
+      health: Array.isArray(data.health) ? data.health : [],
+      lifts: Array.isArray(data.lifts) ? data.lifts : [],
+      // Singletons (objetos, no arrays). El doGet del bridge devuelve el archivo completo, así que
+      // basta con forwardearlos acá para que fluyan bridge→app (energy no está y por eso nunca fluyó).
+      routine: (data.routine && typeof data.routine === 'object' && !Array.isArray(data.routine)) ? data.routine : null,
+      exercise_videos: (data.exercise_videos && typeof data.exercise_videos === 'object' && !Array.isArray(data.exercise_videos)) ? data.exercise_videos : {},
+      // Sello de versión del .gs desplegado (null si la implementación es vieja y no lo sella).
+      bridgeVersion: Number.isFinite(Number(data.bridgeVersion)) ? Number(data.bridgeVersion) : null,
+    };
   }
-  return {
-    meals: Array.isArray(data.meals) ? data.meals : [],
-    weights: Array.isArray(data.weights) ? data.weights : [],
-    workouts: Array.isArray(data.workouts) ? data.workouts : [],
-    checks: Array.isArray(data.checks) ? data.checks : [],
-    water: Array.isArray(data.water) ? data.water : [],
-    health: Array.isArray(data.health) ? data.health : [],
-    lifts: Array.isArray(data.lifts) ? data.lifts : [],
-    // Singletons (objetos, no arrays). El doGet del bridge devuelve el archivo completo, así que
-    // basta con forwardearlos acá para que fluyan bridge→app (energy no está y por eso nunca fluyó).
-    routine: (data.routine && typeof data.routine === 'object' && !Array.isArray(data.routine)) ? data.routine : null,
-    exercise_videos: (data.exercise_videos && typeof data.exercise_videos === 'object' && !Array.isArray(data.exercise_videos)) ? data.exercise_videos : {},
-  };
+  throw lastErr || new Error('fetch');
 }
 
 export function postBridgeDelete(settings, section, id) {
@@ -571,6 +632,9 @@ export function mergeBridge(state, rawBridge) {
       lastSyncAt: new Date().toISOString(),
       lastSyncOk: true, lastSyncError: null, lastSyncAdded: added,
       lastSyncDropped: dropped, lastSyncWarnings: warnings,
+      // Versión del .gs desplegado (handshake anti-drift). El indicador del header avisa si quedó
+      // atrás de EXPECTED_BRIDGE_VERSION. undefined en rawBridge viejos → null (vieja, redeploy).
+      deployedVersion: (rawBridge && rawBridge.bridgeVersion != null) ? rawBridge.bridgeVersion : null,
       importedIds: [...importedIds],
     },
   };

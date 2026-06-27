@@ -40,7 +40,7 @@ import {
 } from './src/fields.mjs';
 import {
   gistCreate, gistPush, gistPull, sanitizeStateForUpload, syncSig, applyRemoteState, hashSig,
-  withBridgeToken, fetchBridge, postBridgeDelete, mergeBridge,
+  withBridgeToken, fetchBridge, postBridgeDelete, mergeBridge, bridgeVersionDrift,
 } from './src/sync.mjs';
 import {
   ARSENAL_V2_SNACKS, ARSENAL_V2_PROTEINS, ARSENAL_V2_DESSERTS,
@@ -10490,6 +10490,15 @@ function bridgeSyncStatus(state) {
   if (b.lastSyncAt) {
     const a = b.lastSyncAdded || {};
     const n = (a.meals || 0) + (a.weights || 0) + (a.workouts || 0);
+    // Drift de versión: el .gs desplegado quedó atrás del código (campos nuevos se descartan en
+    // silencio). Ámbar accionable hasta que se redeploye el bridge. Solo si ya sincronizó OK.
+    const drift = bridgeVersionDrift(b.deployedVersion);
+    if (drift) {
+      const detail = drift.deployed == null
+        ? 'Implementación vieja sin sello de versión · redeploy del .gs pendiente'
+        : `Bridge desplegado v${drift.deployed}, el código espera v${drift.expected} · redeploy pendiente`;
+      return { color: '#f59e0b', label: 'Bridge: redeploy pendiente', detail, at: b.lastSyncAt };
+    }
     // Items del bridge descartados por malformados (campo mal nombrado, sin id, kcal ilegible).
     // Se avisa en ámbar para que el dato no se pierda en silencio (ver validate.mjs).
     const d = b.lastSyncDropped || {};
