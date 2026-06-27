@@ -5819,112 +5819,79 @@ Reglas:
             );
           })()}
 
-          {/* Récords (PRs) · acotado a la rutina, con "otros" colapsado */}
-          {stats.byExercise.length > 0 && (() => {
-            const recCell = (x, key) => {
-              const primLabel = x.bestRm != null ? '1RM' : 'Peso';
-              const primVal = x.bestRm != null ? x.bestRm : x.bestWeight;
-              const noData = x.data === false;
-              return (
-                <div key={key} style={{ padding: '12px 14px', border: '1px solid var(--bento-hairline)', borderRadius: 10, opacity: noData ? 0.55 : 1 }}>
-                  <div className="flex items-center gap-1.5" style={{ fontSize: 12.5, fontWeight: 600, lineHeight: 1.3 }}>
-                    <span>{emojiForExercise(x.name)}</span><span className="truncate">{x.name}</span>
-                  </div>
-                  {noData ? (
-                    <div style={{ marginTop: 8, fontSize: 11, color: 'var(--bento-faint)' }}>sin datos aún</div>
-                  ) : (
-                    <div className="flex gap-4" style={{ marginTop: 8 }}>
-                      {primVal != null && (
-                        <div>
-                          <div className="bento-label" style={{ fontSize: 9 }}>{primLabel}</div>
-                          <div className="bento-num" style={{ fontSize: 18 }}>{primVal}<span style={{ fontSize: 10, color: 'var(--bento-faint)' }}> kg</span></div>
-                        </div>
-                      )}
-                      {x.bestVolume != null && (
-                        <div>
-                          <div className="bento-label" style={{ fontSize: 9 }}>Volumen</div>
-                          <div className="bento-num" style={{ fontSize: 18 }}>{Math.round(x.bestVolume)}</div>
-                        </div>
-                      )}
+          {/* Récords + historial por ejercicio · SOLO ejercicios de la rutina (expandible) */}
+          {routineProg.hasRoutine ? (
+            <div className="bento-card space-y-1">
+              <div className="bento-label" style={{ marginBottom: 4 }}>🏋️ Récords e historial · ejercicios de la rutina</div>
+              <div style={{ fontSize: 10.5, color: 'var(--bento-faint)', marginBottom: 6 }}>Toca un ejercicio para ver su historial · ↑ = sugerencia de carga próxima</div>
+              {routineProg.routine.map((it) => {
+                const noData = it.entries.length < 1;
+                const primVal = it.bestWeight != null ? it.bestWeight : it.bestRm;
+                const head = (
+                  <div className="flex items-center gap-3" style={{ padding: '8px 0' }}>
+                    <div className="min-w-0" style={{ flex: '1 1 0' }}>
+                      <div className="flex items-center gap-1.5" style={{ fontSize: 12.5, fontWeight: 600 }}>
+                        <span>{emojiForExercise(it.name)}</span><span className="truncate">{it.name}</span>
+                        {it.stagnant && <span title="Sin progreso en las últimas sesiones" style={{ fontSize: 9, padding: '1px 6px', borderRadius: 6, background: 'rgba(205,122,85,0.14)', color: 'var(--bento-warm)' }}>meseta</span>}
+                      </div>
+                      <div style={{ fontSize: 10.5, color: 'var(--bento-faint)', marginTop: 2 }}>
+                        {noData ? 'sin datos aún' : (
+                          <>
+                            <b style={{ color: 'var(--bento-ink)' }}>PR {primVal} kg</b>
+                            {it.bestVolume != null ? <span> · vol {Math.round(it.bestVolume)}</span> : null}
+                            {it.delta != null && it.delta !== 0 ? <span style={{ color: it.delta >= 0 ? 'var(--bento-pos)' : 'var(--bento-warm)' }}> · {it.delta >= 0 ? '+' : ''}{it.delta}</span> : null}
+                            {it.suggestNextKg != null ? (it.suggestUp
+                              ? <span style={{ color: 'var(--bento-blue)' }}> · ↑ ~{it.suggestNextKg}kg</span>
+                              : <span style={{ color: 'var(--bento-faint)' }}> · → mantén {it.suggestNextKg}kg</span>) : null}
+                          </>
+                        )}
+                      </div>
                     </div>
-                  )}
-                </div>
-              );
-            };
-            if (routineProg.hasRoutine) {
-              return (
-                <div className="bento-card">
-                  <div className="bento-label" style={{ marginBottom: 14 }}>🏆 Récords · ejercicios de la rutina</div>
-                  <div className="bento-grid2 is-eq">
-                    {routineProg.routine.map((x) => recCell(x, x.slug))}
+                    {!noData && it.spark.length >= 1 && <div className="shrink-0"><Sparkline values={it.spark} color={it.stagnant ? 'var(--bento-warm)' : 'var(--bento-blue)'} /></div>}
                   </div>
-                  {routineProg.others.length > 0 && (
-                    <details style={{ marginTop: 14 }}>
-                      <summary className="bento-label" style={{ cursor: 'pointer', fontSize: 11 }}>Otros ejercicios ({routineProg.others.length})</summary>
-                      <div className="bento-grid2 is-eq" style={{ marginTop: 12 }}>
-                        {routineProg.others.slice(0, 12).map((x) => recCell(x, x.name))}
-                      </div>
-                    </details>
-                  )}
-                </div>
-              );
-            }
-            return (
-              <div className="bento-card">
-                <div className="bento-label" style={{ marginBottom: 6 }}>🏆 Récords por ejercicio</div>
-                <div style={{ fontSize: 11, color: 'var(--bento-faint)', marginBottom: 12 }}>Carga tu rutina en la pestaña Rutina para acotar esto a tus ejercicios.</div>
-                <div className="bento-grid2 is-eq">
-                  {stats.byExercise.slice(0, 6).map((x) => recCell(x, x.name))}
-                </div>
-              </div>
-            );
-          })()}
-
-          {/* Progresión por ejercicio · sparklines */}
-          {(() => {
-            const rows = routineProg.hasRoutine
-              ? routineProg.routine.filter((x) => x.spark.length >= 1)
-              : stats.byExercise.slice(0, 10).map((x) => {
-                  const vals = (x.entries || []).map((e) => e.oneRepMaxKg ?? e.weightKg).filter((v) => v != null);
-                  const first = vals.length ? vals[0] : null;
-                  const current = vals.length ? vals[vals.length - 1] : null;
-                  return { name: x.name, slug: x.name, spark: vals, current, bestRm: x.bestRm,
-                    delta: first != null && current != null ? Math.round((current - first) * 10) / 10 : null,
-                    stagnant: false, suggestNextKg: null };
-                }).filter((x) => x.spark.length >= 1);
-            if (!rows.length) return null;
-            return (
-              <div className="bento-card space-y-1">
-                <div className="bento-label" style={{ marginBottom: 8 }}>📈 Progresión por ejercicio</div>
-                <div style={{ fontSize: 10.5, color: 'var(--bento-faint)', marginBottom: 6 }}>1RM / peso máx por sesión · ↑ = sugerencia de carga próxima</div>
-                {rows.map((it) => {
-                  const noData = !it.spark || it.spark.length < 1;
+                );
+                if (noData) {
+                  return <div key={it.slug} style={{ borderTop: '1px solid var(--bento-hairline)', opacity: 0.55 }}>{head}</div>;
+                }
+                return (
+                  <details key={it.slug} style={{ borderTop: '1px solid var(--bento-hairline)' }}>
+                    <summary style={{ listStyle: 'none', cursor: 'pointer' }}>{head}</summary>
+                    <div style={{ padding: '2px 0 10px 26px' }}>
+                      {it.entries.slice().reverse().map((e, i) => (
+                        <div key={i} className="bento-mono flex items-center justify-between" style={{ fontSize: 11, padding: '3px 0', color: 'var(--bento-muted)' }}>
+                          <span style={{ color: 'var(--bento-faint)' }}>{new Date(e.date + 'T12:00:00').toLocaleDateString('es-CL', { day: '2-digit', month: 'short' })}</span>
+                          <span style={{ flex: 1, textAlign: 'right' }}>
+                            {e.weightKg != null ? `${e.weightKg}kg` : (e.oneRepMaxKg != null ? `1RM ${e.oneRepMaxKg}` : '—')}
+                            {e.reps != null ? ` ×${e.reps}` : ''}
+                            {e.volumeKg != null ? ` · ${Math.round(e.volumeKg)} vol` : ''}
+                            {e.quality ? ` · ${e.quality}` : ''}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                );
+              })}
+            </div>
+          ) : stats.byExercise.length > 0 ? (
+            <div className="bento-card">
+              <div className="bento-label" style={{ marginBottom: 6 }}>🏆 Récords por ejercicio</div>
+              <div style={{ fontSize: 11, color: 'var(--bento-faint)', marginBottom: 12 }}>Carga tu rutina en la pestaña Rutina para ver acá los PR e historial de tus ejercicios.</div>
+              <div className="bento-grid2 is-eq">
+                {stats.byExercise.slice(0, 6).map((x) => {
+                  const primVal = x.bestRm != null ? x.bestRm : x.bestWeight;
                   return (
-                    <div key={it.slug || it.name} className="flex items-center gap-3" style={{ padding: '7px 0', borderTop: '1px solid var(--bento-hairline)' }}>
-                      <div className="min-w-0" style={{ flex: '1 1 0' }}>
-                        <div className="flex items-center gap-1.5" style={{ fontSize: 12.5, fontWeight: 600 }}>
-                          <span>{emojiForExercise(it.name)}</span><span className="truncate">{it.name}</span>
-                          {it.stagnant && <span title="Sin progreso en las últimas sesiones" style={{ fontSize: 9, padding: '1px 6px', borderRadius: 6, background: 'rgba(205,122,85,0.14)', color: 'var(--bento-warm)' }}>meseta</span>}
-                        </div>
-                        <div style={{ fontSize: 10.5, color: 'var(--bento-faint)', marginTop: 2 }}>
-                          {noData ? 'sin datos aún' : (
-                            <>
-                              {it.current != null ? <b style={{ color: 'var(--bento-ink)' }}>{it.current} kg</b> : '—'}
-                              {it.delta != null && it.delta !== 0 ? <span style={{ color: it.delta >= 0 ? 'var(--bento-pos)' : 'var(--bento-warm)' }}> · {it.delta >= 0 ? '+' : ''}{it.delta}</span> : null}
-                              {it.suggestNextKg != null ? (it.suggestUp
-                                ? <span style={{ color: 'var(--bento-blue)' }}> · ↑ ~{it.suggestNextKg}kg</span>
-                                : <span style={{ color: 'var(--bento-faint)' }}> · → mantén {it.suggestNextKg}kg</span>) : null}
-                            </>
-                          )}
-                        </div>
+                    <div key={x.name} style={{ padding: '12px 14px', border: '1px solid var(--bento-hairline)', borderRadius: 10 }}>
+                      <div className="flex items-center gap-1.5" style={{ fontSize: 12.5, fontWeight: 600 }}>
+                        <span>{emojiForExercise(x.name)}</span><span className="truncate">{x.name}</span>
                       </div>
-                      {!noData && <div className="shrink-0"><Sparkline values={it.spark} color={it.stagnant ? 'var(--bento-warm)' : 'var(--bento-blue)'} /></div>}
+                      <div className="bento-num" style={{ fontSize: 18, marginTop: 8 }}>{primVal ?? '—'}<span style={{ fontSize: 10, color: 'var(--bento-faint)' }}> kg</span></div>
                     </div>
                   );
                 })}
               </div>
-            );
-          })()}
+            </div>
+          ) : null}
 
           {/* Historial de sesiones (ver/editar/borrar) */}
           <div className="bento-card space-y-2">

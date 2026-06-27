@@ -454,6 +454,8 @@ export function computeExerciseStats(days, refDate, weeks = 8) {
         weightKg: e.weightKg ?? null,
         oneRepMaxKg: e.oneRepMaxKg ?? null,
         volumeKg: e.volumeKg ?? null,
+        reps: e.reps ?? null,
+        sets: e.sets ?? null,
         quality: e.quality ?? null,
       });
     }
@@ -485,33 +487,88 @@ export function computeExerciseStats(days, refDate, weeks = 8) {
   };
 }
 
-// Cruza los récords/progresión (stats.byExercise, por nombre libre) con la rutina vigente
-// (routine.days[].exercises[], cada uno con slug). Devuelve un item por ejercicio de la rutina
-// enriquecido con su histórico (o data:false si nunca se registró), más los que NO calzan con la
-// rutina ("otros"). El match es por slug exacto y, si falla, por subconjunto de tokens (la rutina
-// dice "Sentadilla" → calza "sentadilla-frontal-con-mancuernas", y viceversa). Puro, sin React.
+// Diccionario de sinónimos: la rutina usa español limpio ("sentadilla", "peso muerto", "remo",
+// "jalón") y Speediance registra otra jerga para el MISMO movimiento ("squat", "deadlift", "fila",
+// "lat pulldown"). Canonicaliza ambos lados a un vocabulario común antes de comparar. Orden
+// importa: las frases largas primero (p.ej. "lat pulldown" antes que "pulldown").
+const EX_SYNONYMS = [
+  ['lat pulldown', 'jalon'], ['pulldown', 'jalon'],
+  ['squat', 'sentadilla'], ['deadlift', 'peso muerto'],
+  ['fila', 'remo'], ['prensa', 'press'], ['barbell', 'barra'],
+  ['manija', 'mango'], ['incline', 'inclinado'], ['aumento', 'elevacion'],
+];
+// Alias explícitos por slug de ejercicio de la rutina, para los cruces que el sinónimo no alcanza
+// (jerga Speediance idiosincrática). Regex sobre el nombre normalizado (minúsculas, sin tildes).
+const ROUTINE_EX_ALIASES = {
+  'sentadilla-con-barra': [/\bsquat con barra\b(?!.*(split|dividid|bulgaro|overhead|caja|cremallera))/],
+  'peso-muerto-rumano-bisagra-de-cadera-isquiotibiales-y-gluteos': [/rumano deadlift|deadlift.*rumano|levantamiento.*rumano/],
+  'peso-muerto-rumano': [/rumano deadlift|deadlift.*rumano|levantamiento.*rumano/],
+  'peso-muerto-piernas-rigidas': [/barrena deadlift|piernas? rigida|rigida.*deadlift/],
+  'split-squat-con-doble-mango-una-pierna-adelante': [/split squat|squat split|bulgaro/],
+  'empuje-de-cadera-con-barra-hip-thrust': [/manchon de cadera|empujada de cadera|empuje de cadera|puente.*barra|hip thrust/],
+  'press-de-banca-con-barra-empuje-horizontal-de-pecho': [/pres.?a de banca con barra|press de banca/],
+  'press-de-hombro-de-pie-con-barra-al-frente': [/press de hombro de pie con barra|prensa de hombro con barra de pie|prensa de hombro de.*pie/],
+  'press-de-hombro-de-pie': [/press de hombro de pie con barra|prensa de hombro con barra de pie|prensa de hombro de.*pie/],
+  'press-de-pecho-inclinado-con-doble-mango': [/prensa de pecho.*incline|prensa de pecho inclinad|incline de doble manija/],
+  'elevaciones-laterales-de-hombro-con-doble-mango': [/elevacion lateral de doble|elevacion lateral doble|aumento lateral/],
+  'extension-de-triceps-con-doble-mango': [/triceps de pie.*extension|extension de triceps con|prensa de banco de triceps/],
+  'remo-con-barra-de-pie-traccion-horizontal': [/barbell repartido por la fila|fila de barbell de pie|fila de barbell sellada/],
+  'remo-con-barra-de-pie': [/barbell repartido por la fila|fila de barbell de pie|fila de barbell sellada|fila de barbell/],
+  'jalon-al-pecho-con-barra-traccion-vertical': [/lat pulldown|pulsacion de lat/],
+  'remo-a-un-brazo-de-pie': [/fila alterna de pie|fila alterna sellada|encorvado de un solo brazo|fila de un solo brazo/],
+  'remo-con-doble-manija-de-pie': [/fila de doble manija de pie|fila de doble manija$|fila de agarre neutral de doble mango/],
+  'curl-de-biceps-con-barra-de-pie': [/curl para biceps con barra de pie|curl de biceps.*con barra de pie|curl con barra/],
+  'curl-de-biceps-en-polea-con-doble-asa': [/curl de biceps en polea alta|encogimiento de biceps en polea alta/],
+};
+const _normEx = (s) => (s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
+const _canonEx = (s) => { let n = _normEx(s); for (const [a, b] of EX_SYNONYMS) n = n.split(a).join(b); return n; };
+
+// Cruza los récords/progresión (stats.byExercise, por nombre libre Speediance) con la rutina
+// vigente (routine.days[].exercises[]). Para CADA ejercicio de la rutina junta TODAS las apariciones
+// registradas que le corresponden (slug exacto → alias → sinónimo-canónico → subconjunto de tokens),
+// fusiona su historial y devuelve récords + entries. Cada registro Speediance se asigna a UN solo
+// ejercicio de la rutina (no se reparte). `others` = lo que no calza con la rutina. Puro, sin React.
 export function computeRoutineExerciseProgress(stats, routine, refDate = todayKey()) {
   const today = refDate || todayKey();
   const byExercise = Array.isArray(stats?.byExercise) ? stats.byExercise : [];
-  const reg = byExercise.map((x) => {
-    const slug = slugifyExercise(x.name);
-    return { x, slug, tokens: slug.split('-').filter(Boolean) };
-  });
-  const valOf = (e) => (e.oneRepMaxKg ?? e.weightKg ?? null);
+  const reg = byExercise.map((x) => ({
+    x, slug: slugifyExercise(x.name), cslug: _canonEx(x.name).replace(/\s+/g, '-'),
+    n: _normEx(x.name), used: false,
+  }));
+  // Peso de TRABAJO primero (lo que muestra el historial); el 1RM estimado de Speediance es
+  // esporádico y mezclaría escalas en el Δ/sparkline. Cae a 1RM solo si no hay peso.
+  const valOf = (e) => (e.weightKg ?? e.oneRepMaxKg ?? null);
 
-  const matchFor = (name) => {
-    const slug = slugifyExercise(name);
-    if (!slug) return null;
-    let hit = reg.find((r) => r.slug === slug);
-    if (hit) return hit;
-    const rtoks = slug.split('-').filter(Boolean);
-    if (!rtoks.length) return null;
-    // Todos los tokens de la rutina presentes en el registro (registro más específico).
-    hit = reg.find((r) => rtoks.every((t) => r.tokens.includes(t)));
-    if (hit) return hit;
-    // O al revés: el registro más corto contenido en el nombre de la rutina.
-    hit = reg.find((r) => r.tokens.length && r.tokens.every((t) => rtoks.includes(t)));
-    return hit || null;
+  // Devuelve TODAS las entradas reg (no usadas) que corresponden a este ejercicio de la rutina,
+  // marcándolas como usadas. Prioriza alias/slug/sinónimo; cae a subconjunto de tokens canónicos.
+  const matchesFor = (rslug, rname) => {
+    const rc = _canonEx(rname).replace(/\s+/g, '-');
+    const pats = ROUTINE_EX_ALIASES[rslug] || [];
+    const pool = reg.filter((r) => !r.used);
+    let ms = pool.filter((r) => r.slug === rslug || r.cslug === rc || pats.some((p) => p.test(r.n)));
+    if (!ms.length) {
+      const rtoks = new Set(rc.split('-').filter(Boolean));
+      ms = pool.filter((r) => {
+        const t = new Set(r.cslug.split('-').filter(Boolean));
+        if (!t.size) return false;
+        return [...rtoks].every((x) => t.has(x)) || [...t].every((x) => rtoks.has(x));
+      });
+    }
+    ms.forEach((m) => { m.used = true; });
+    return ms;
+  };
+
+  // Fusiona varias entradas reg en un "base" tipo byExercise (historial unión + récords recomputados).
+  const mergeMatches = (ms) => {
+    if (!ms.length) return null;
+    const entries = ms.flatMap((m) => m.x.entries || [])
+      .slice().sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+    const best = (k) => { const v = entries.map((e) => e[k]).filter((x) => x != null); return v.length ? Math.max(...v) : null; };
+    return {
+      name: ms[0].x.name, muscle: ms.map((m) => m.x.muscle).find(Boolean) || null,
+      entries, sessions: entries.length,
+      bestRm: best('oneRepMaxKg'), bestWeight: best('weightKg'), bestVolume: best('volumeKg'),
+    };
   };
 
   const enrich = (base, name, slug) => {
@@ -556,9 +613,9 @@ export function computeRoutineExerciseProgress(stats, routine, refDate = todayKe
     };
   };
 
-  const routineExs = [];
+  // Lista única de ejercicios de la rutina (por slug), en orden de la rutina.
+  const uniq = [];
   const seenSlugs = new Set();
-  const usedNames = new Set();
   const days = Array.isArray(routine?.days) ? routine.days : [];
   for (const d of days) {
     for (const ex of (Array.isArray(d?.exercises) ? d.exercises : [])) {
@@ -566,13 +623,21 @@ export function computeRoutineExerciseProgress(stats, routine, refDate = todayKe
       const slug = ex?.slug || slugifyExercise(name);
       if (!name || !slug || seenSlugs.has(slug)) continue;
       seenSlugs.add(slug);
-      const hit = matchFor(name);
-      if (hit) usedNames.add(hit.x.name);
-      routineExs.push(enrich(hit ? hit.x : null, name, slug));
+      uniq.push({ name, slug, ctoks: new Set(_canonEx(name).split(/\s+/).filter(Boolean)) });
     }
   }
+  // Dedup por MOVIMIENTO entre días (p.ej. "Peso muerto rumano (bisagra…)" del Día 1 y "Peso muerto
+  // rumano" del Día 5 son el mismo ejercicio): si los tokens canónicos de uno están contenidos en
+  // los de otro ya conservado, se omite (se queda el primero en orden de rutina, normalmente el más
+  // descriptivo). Así no salen filas duplicadas/vacías.
+  const kept = [];
+  for (const e of uniq) {
+    const dup = kept.find((k) => [...e.ctoks].every((t) => k.ctoks.has(t)) || [...k.ctoks].every((t) => e.ctoks.has(t)));
+    if (!dup) kept.push(e);
+  }
+  const routineExs = kept.map((e) => enrich(mergeMatches(matchesFor(e.slug, e.name)), e.name, e.slug));
 
-  const others = byExercise.filter((x) => !usedNames.has(x.name));
+  const others = reg.filter((r) => !r.used).map((r) => r.x);
   const hasRoutine = routineExs.length > 0;
   return { hasRoutine, routine: routineExs, others };
 }
