@@ -5,7 +5,7 @@
 import { uuid, normalizeName } from './util.mjs';
 import {
   buildSeed, SEED_SNACKS, SEED_PROTEINS, SEED_DESSERTS, SEED_RECIPES, SEED_RULES, SNACK_TAGS,
-  ARSENAL_V2_SNACKS, ARSENAL_V2_PROTEINS, ARSENAL_V2_DESSERTS,
+  ARSENAL_V2_SNACKS, ARSENAL_V2_PROTEINS, ARSENAL_V2_DESSERTS, SEED_FOODS,
 } from './seed.mjs';
 import { extraPlanSlot, dedupeDayExtras } from './meals.mjs';
 
@@ -99,6 +99,18 @@ export function migrateState(parsed) {
       return t ? { ...s, tags: [...t] } : s;
     });
     next.arsenalVersion = 3;
+  }
+  // Biblioteca de alimentos reusables (state.foods, Fase B/C). Inicializa el store y carga la
+  // semilla curada de integrales una sola vez (foodsVersion), sin resucitar lo que el usuario
+  // borre — mismo patrón que el arsenal. Dedup por nombre normalizado.
+  next.foods = Array.isArray(next.foods) ? next.foods : [];
+  if (!(Number(next.foodsVersion) >= 1)) {
+    const haveFoods = new Set(next.foods.map((f) => normalizeName(f.name)));
+    const addFoods = SEED_FOODS
+      .filter((f) => !haveFoods.has(normalizeName(f.name)))
+      .map((f) => ({ ...f, id: uuid(), key: normalizeName(f.name), source: 'seed', builtin: true, usageCount: 0, lastUsedAt: null }));
+    next.foods = [...next.foods, ...addFoods];
+    next.foodsVersion = 1;
   }
   next.bridge = (next.bridge && Array.isArray(next.bridge.importedIds))
     ? next.bridge

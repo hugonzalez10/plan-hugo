@@ -32,13 +32,17 @@ import {
 } from './src/analytics.mjs';
 import { uuid, normalizeName, getDeviceId } from './src/util.mjs';
 import {
+  scaleFoodToPortion, foodToMealItem, mealItemToFood,
+  upsertFood, searchFoods, makeFood, stripPortionSuffix,
+} from './src/foods.mjs';
+import {
   WEIGHT_FIELDS, SEGMENT_FIELDS, SEGMENT_OPTIONS, STRING_FIELDS,
   WEIGHT_CAT_LABELS, CHART_METRICS, WORKOUT_EXTRA_FIELDS, HEALTH_FIELDS,
 } from './src/fields.mjs';
 import {
   gistCreate, gistPush, gistPull, sanitizeStateForUpload, syncSig, applyRemoteState, hashSig,
   mergeRemoteState, isPlausibleState,
-  withBridgeToken, fetchBridge, postBridgeDelete, mergeBridge,
+  withBridgeToken, fetchBridge, postBridgeDelete, mergeBridge, bridgeVersionDrift,
 } from './src/sync.mjs';
 import {
   ARSENAL_V2_SNACKS, ARSENAL_V2_PROTEINS, ARSENAL_V2_DESSERTS,
@@ -242,14 +246,10 @@ function loadScript(src) {
   return _scriptPromises[src];
 }
 
-async function searchOpenFoodFacts(barcode) {
-  const url = `https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(barcode)}.json?fields=product_name,brands,nutriments,serving_size,serving_quantity,quantity,image_front_small_url`;
-  const resp = await fetch(url);
-  if (!resp.ok) throw new Error('No se pudo consultar OpenFoodFacts');
-  const data = await resp.json();
-  if (data.status !== 1 || !data.product) return null;
-
-  const p = data.product;
+// Mapea un producto de OpenFoodFacts (de la API de código o de la de búsqueda) al shape común
+// { name, portion, kcal..., barcode, raw{*Per100, servingG} }. Devuelve null si no hay kcal.
+// raw carga los macros por 100g → alimenta foodFromOFF para guardar el producto como Food reusable.
+function mapOFFProduct(p, fallbackCode) {
   const n = p.nutriments || {};
   const kcalPer100 = Number(n['energy-kcal_100g']) || (Number(n['energy_100g']) ? Math.round(Number(n['energy_100g']) / 4.184) : null);
   if (kcalPer100 == null) return null;
@@ -268,22 +268,53 @@ async function searchOpenFoodFacts(barcode) {
   if (!servingG) servingG = 100;
   const factor = servingG / 100;
 
-  const brand = p.brands ? `${p.brands.split(',')[0].trim()} ` : '';
-  const namePart = p.product_name || `Producto ${barcode}`;
+  const brandName = p.brands ? p.brands.split(',')[0].trim() : '';
+  const code = p.code || fallbackCode || null;
+  const namePart = p.product_name || (code ? `Producto ${code}` : 'Producto');
   const portionLabel = servingG === 100 ? '100g' : `${servingG}g`;
 
   return {
-    name: `${brand}${namePart}`.trim(),
+    name: `${brandName ? brandName + ' ' : ''}${namePart}`.trim(),
+    brand: brandName || undefined,
     portion: portionLabel,
     kcal: Math.round(kcalPer100 * factor),
     protein: Math.round(protPer100 * factor),
     carbs: Math.round(carbsPer100 * factor),
     fat: Math.round(fatPer100 * factor),
     fiber: Number((fiberPer100 * factor).toFixed(1)),
-    barcode,
+    barcode: code || undefined,
     imageUrl: p.image_front_small_url || null,
     raw: { kcalPer100, protPer100, carbsPer100, fatPer100, fiberPer100, servingG },
   };
+}
+
+async function searchOpenFoodFacts(barcode) {
+  const url = `https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(barcode)}.json?fields=product_name,brands,nutriments,serving_size,serving_quantity,quantity,code,image_front_small_url`;
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error('No se pudo consultar OpenFoodFacts');
+  const data = await resp.json();
+  if (data.status !== 1 || !data.product) return null;
+  return mapOFFProduct(data.product, barcode);
+}
+
+// Búsqueda OpenFoodFacts POR NOMBRE (Fase A): el endpoint de barcode no permitía buscar texto.
+// Devuelve hasta `limit` candidatos en el mismo shape que searchOpenFoodFacts (descarta los sin
+// kcal). OFF es fuerte en productos de marca, flojo en integrales chilenos → es el último fallback
+// del buscador del modal, detrás de "Mis alimentos".
+async function searchOpenFoodFactsByName(query, limit = 12) {
+  const q = String(query || '').trim();
+  if (q.length < 2) return [];
+  const url = `https://world.openfoodfacts.org/cgi/search.pl?search_terms=${encodeURIComponent(q)}&search_simple=1&action=process&json=1&page_size=${limit}&fields=product_name,brands,nutriments,serving_size,serving_quantity,code,image_front_small_url`;
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error('No se pudo consultar OpenFoodFacts');
+  const data = await resp.json();
+  const products = Array.isArray(data.products) ? data.products : [];
+  const out = [];
+  for (const p of products) {
+    const r = mapOFFProduct(p);
+    if (r && r.name) out.push(r);
+  }
+  return out;
 }
 
 
@@ -1765,7 +1796,7 @@ function BarcodeScannerModal({ onCancel, onDetected }) {
   );
 }
 
-function AddExtraModal({ apiKey, onCancel, onSave }) {
+function AddExtraModal({ apiKey, onCancel, onSave, foods, onSaveFood }) {
   const [name, setName] = useState('');
   const [attachments, setAttachments] = useState([]);
   const [kcal, setKcal] = useState('');
@@ -1781,9 +1812,75 @@ function AddExtraModal({ apiKey, onCancel, onSave }) {
   const [fromBarcode, setFromBarcode] = useState(null); // {barcode, name}
   const [productMeta, setProductMeta] = useState(null); // { barcode, per100 } para recordar el producto
   const [tags, setTags] = useState([]); // ['dulce', 'delivery', 'alcohol']
+  // — Buscador "Mis alimentos" (Fase B) + OpenFoodFacts por nombre (Fase A) —
+  const [foodQuery, setFoodQuery] = useState('');
+  const [pickedFood, setPickedFood] = useState(null); // Food elegido → ajustar gramos antes de registrar
+  const [grams, setGrams] = useState('');
+  const [offResults, setOffResults] = useState(null); // null=no buscado, []=sin resultados
+  const [offLoading, setOffLoading] = useState(false);
+  const [savedFood, setSavedFood] = useState(false);
 
   const toggleTag = (tag) => {
     setTags((prev) => prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag]);
+  };
+
+  const localMatches = useMemo(
+    () => (foodQuery.trim().length >= 1 ? searchFoods(foods || [], foodQuery, 6) : []),
+    [foodQuery, foods],
+  );
+
+  const pickFood = (food) => {
+    setPickedFood(food);
+    setGrams(String(food.defaultPortionG || 100));
+  };
+
+  // Registra el alimento elegido escalado a los gramos indicados (vía foodToMealItem) — bypassa
+  // los campos manuales. id/ts los estampa handleSave del padre.
+  const registerPickedFood = () => {
+    if (!pickedFood) return;
+    const g = Number(grams) > 0 ? Number(grams) : (pickedFood.defaultPortionG || 100);
+    onSave(foodToMealItem(pickedFood, g));
+  };
+
+  const runOffSearch = async () => {
+    const q = foodQuery.trim();
+    if (q.length < 2) { setError('Escribe al menos 2 letras para buscar.'); return; }
+    setOffLoading(true); setOffResults(null); setError(null);
+    try {
+      const res = await searchOpenFoodFactsByName(q);
+      setOffResults(res);
+    } catch (e) {
+      setError(e.message || 'Error buscando en OpenFoodFacts');
+      setOffResults([]);
+    } finally {
+      setOffLoading(false);
+    }
+  };
+
+  // Resultado de OFF → rellena el formulario manual (reusa applyProductData) para ajustar/guardar.
+  const pickOff = (product) => {
+    applyProductData(product);
+    setOffResults(null);
+    setPickedFood(null);
+    setFoodQuery('');
+  };
+
+  // "Guardar como alimento": promueve lo que esté en el formulario a la biblioteca reusable.
+  const saveCurrentAsFood = () => {
+    if (!onSaveFood) return;
+    const k = Number(kcal);
+    if (!name.trim() || !Number.isFinite(k) || k < 0) { setError('Necesitas nombre y kcal para guardar.'); return; }
+    const num = (v) => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : 0; };
+    onSaveFood({
+      name: portion ? `${name.trim()} (${portion})` : name.trim(),
+      kcal: k, protein: num(protein), carbs: num(carbs), fat: num(fat), fiber: num(fiber),
+      portion: portion || undefined,
+      per100: productMeta?.per100 || undefined,
+      barcode: productMeta?.barcode || undefined,
+      tags: tags.length ? tags.slice() : undefined,
+    });
+    setSavedFood(true);
+    setTimeout(() => setSavedFood(false), 2200);
   };
 
   const applyProductData = (product) => {
@@ -1875,11 +1972,82 @@ function AddExtraModal({ apiKey, onCancel, onSave }) {
       <form onSubmit={submit} className="w-full max-w-md bg-white dark:bg-gray-900 rounded-2xl shadow-xl border border-gray-200 dark:border-gray-800 p-5 space-y-4 my-4 max-h-[92vh] overflow-y-auto">
         <h2 className="text-lg font-bold">Agregar extra</h2>
 
+        {/* — Buscar en Mis alimentos (Fase B) + OpenFoodFacts por nombre (Fase A) — */}
+        <div className="rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50 p-3 space-y-2">
+          <div className="flex gap-2">
+            <input type="text" value={foodQuery}
+              onChange={(e) => { setFoodQuery(e.target.value); setPickedFood(null); setOffResults(null); }}
+              placeholder="🔍 Buscar alimento (pollo, arroz, palta…)"
+              className="flex-1 px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500" />
+            <button type="button" onClick={runOffSearch} disabled={offLoading || foodQuery.trim().length < 2}
+              title="Buscar en OpenFoodFacts por nombre"
+              className="px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-700 text-xs font-medium hover:bg-white dark:hover:bg-gray-900 disabled:opacity-50">
+              {offLoading ? '…' : '🌐 OFF'}
+            </button>
+          </div>
+
+          {/* Resultados de Mis alimentos */}
+          {!pickedFood && localMatches.length > 0 && (
+            <div className="space-y-1">
+              {localMatches.map((f) => (
+                <button type="button" key={f.id} onClick={() => pickFood(f)}
+                  className="w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 hover:border-emerald-400 text-left">
+                  <span className="text-sm truncate">{f.name}{f.builtin && <span className="ml-1 text-[10px] text-gray-400">semilla</span>}</span>
+                  <span className="text-[11px] text-gray-500 dark:text-gray-400 shrink-0">{Math.round(f.per100?.kcal || 0)} kcal/100g</span>
+                </button>
+              ))}
+            </div>
+          )}
+          {!pickedFood && foodQuery.trim().length >= 1 && localMatches.length === 0 && offResults == null && (
+            <p className="text-[11px] text-gray-500 dark:text-gray-400">Sin coincidencias en tus alimentos. Prueba 🌐 OFF o regístralo abajo.</p>
+          )}
+
+          {/* Ajuste de gramos del alimento elegido */}
+          {pickedFood && (
+            <div className="rounded-lg bg-white dark:bg-gray-900 border border-emerald-300 dark:border-emerald-700 p-2.5 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-sm font-semibold truncate">{stripPortionSuffix(pickedFood.name)}</span>
+                <button type="button" onClick={() => setPickedFood(null)} className="text-[11px] text-gray-400 hover:text-gray-600">✕</button>
+              </div>
+              <div className="flex items-center gap-2">
+                <label className="text-xs text-gray-500 dark:text-gray-400">Gramos</label>
+                <input type="number" inputMode="numeric" min="1" value={grams} onChange={(e) => setGrams(e.target.value)}
+                  className="w-20 px-2 py-1.5 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500" />
+                <span className="text-[11px] text-gray-500 dark:text-gray-400 flex-1">
+                  {(() => { const m = scaleFoodToPortion(pickedFood, Number(grams) || pickedFood.defaultPortionG); return `${m.kcal} kcal · P ${m.protein} · C ${m.carbs} · G ${m.fat}`; })()}
+                </span>
+              </div>
+              <button type="button" onClick={registerPickedFood}
+                className="w-full py-2 rounded-lg bg-emerald-500 text-white font-semibold text-sm hover:bg-emerald-600">
+                Registrar {Number(grams) > 0 ? `${grams}g` : ''}
+              </button>
+            </div>
+          )}
+
+          {/* Resultados de OpenFoodFacts por nombre */}
+          {offResults != null && (
+            offResults.length === 0
+              ? <p className="text-[11px] text-gray-500 dark:text-gray-400">OpenFoodFacts no encontró nada para “{foodQuery.trim()}”.</p>
+              : (
+                <div className="space-y-1">
+                  <p className="text-[10px] uppercase tracking-wide text-gray-400">OpenFoodFacts</p>
+                  {offResults.map((p, i) => (
+                    <button type="button" key={p.barcode || i} onClick={() => pickOff(p)}
+                      className="w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 hover:border-sky-400 text-left">
+                      <span className="text-sm truncate">{p.name}</span>
+                      <span className="text-[11px] text-gray-500 dark:text-gray-400 shrink-0">{p.kcal} kcal / {p.portion}</span>
+                    </button>
+                  ))}
+                </div>
+              )
+          )}
+        </div>
+
         <label className="block">
           <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Nombre</span>
           <input type="text" value={name} onChange={(e) => setName(e.target.value)}
             placeholder='Ej. Café latte, galleta'
-            className="mt-1 w-full px-3 py-2.5 rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-emerald-500" autoFocus />
+            className="mt-1 w-full px-3 py-2.5 rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-emerald-500" />
         </label>
 
         {/* Adjuntos */}
@@ -1990,6 +2158,17 @@ function AddExtraModal({ apiKey, onCancel, onSave }) {
         </div>
 
         {error && <p className="text-xs text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-900/30 p-2 rounded-lg">{error}</p>}
+
+        {onSaveFood && (name.trim() && Number(kcal) > 0) && (
+          <button type="button" onClick={saveCurrentAsFood}
+            className={`w-full py-2 rounded-xl border text-xs font-semibold transition-colors ${
+              savedFood
+                ? 'border-emerald-400 bg-emerald-50 dark:bg-emerald-900/20 text-emerald-700 dark:text-emerald-300'
+                : 'border-dashed border-gray-300 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800'
+            }`}>
+            {savedFood ? '✓ Guardado en Mis alimentos' : '💾 Guardar como alimento reusable'}
+          </button>
+        )}
 
         <div className="flex gap-2 pt-2">
           <button type="button" onClick={onCancel}
@@ -2114,7 +2293,7 @@ function QuickLogCard({ recents, favorites, bankNames, favKeys, onQuickLog, onTo
   );
 }
 
-function ExtrasSection({ day, onUpdate, apiKey, tryWithRules, onRemoveExtra, onEditExtra }) {
+function ExtrasSection({ day, onUpdate, apiKey, tryWithRules, onRemoveExtra, onEditExtra, foods, onSaveFood }) {
   const [adding, setAdding] = useState(false);
   const allItems = day.extras || [];
   // Solo la cubeta 'extra' se lista aquí; colación/cena se muestran dentro de sus secciones.
@@ -2158,7 +2337,7 @@ function ExtrasSection({ day, onUpdate, apiKey, tryWithRules, onRemoveExtra, onE
         )}
       />
       {adding && (
-        <AddExtraModal apiKey={apiKey}
+        <AddExtraModal apiKey={apiKey} foods={foods} onSaveFood={onSaveFood}
           onCancel={() => setAdding(false)} onSave={handleSave}
         />
       )}
@@ -3859,6 +4038,17 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
     updateDay({ eaten: { ...cur, [key]: !cur[key] } });
   };
 
+  // Guarda un alimento reusable en la biblioteca (state.foods). Acepta un Food ya armado o un
+  // registro/resultado a promover (mealItemToFood). Dedup por nombre/código en upsertFood.
+  const saveFood = (foodOrExtra) => {
+    if (!foodOrExtra) return;
+    const food = foodOrExtra.per100 && foodOrExtra.per100.kcal != null && foodOrExtra.key
+      ? foodOrExtra
+      : mealItemToFood(foodOrExtra);
+    if (!food || !food.name) return;
+    setState((prev) => ({ ...prev, foods: upsertFood(prev.foods || [], food) }));
+  };
+
   // Agrega un ítem custom al antojo (persiste en state, disponible todos los días)
   const addAntojoItem = ({ label, kcal, protein, carbs, fat, fiber }) => {
     setState((prev) => {
@@ -4242,6 +4432,7 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
         <QuickLogCard recents={recents} favorites={favorites} bankNames={bankNames} favKeys={favKeys}
           onQuickLog={quickLogExtra} onToggleFav={toggleFavorite} />
         <ExtrasSection day={day} onUpdate={updateDay} apiKey={state.settings?.anthropicApiKey} tryWithRules={tryWithRules}
+          foods={state.foods} onSaveFood={saveFood}
           onRemoveExtra={(id) => removeSlotExtra('extra', id)} onEditExtra={setEditTarget} />
         <ExerciseSection day={day} onUpdate={updateDay} apiKey={state.settings?.anthropicApiKey} userWeightKg={state.userProfile?.weightKg}
           onSaveToDate={(item, date) => setState((prev) => {
@@ -6713,6 +6904,135 @@ Reglas:
   );
 }
 
+// Formulario de un alimento reusable: macros POR 100g + porción por defecto. Distinto de
+// BankItemForm (que edita macros absolutos de una toma); aquí la fuente de verdad es per100.
+function FoodEditModal({ initial, onCancel, onSave }) {
+  const p = initial?.per100 || {};
+  const [name, setName] = useState(initial?.name || '');
+  const [kcal, setKcal] = useState(initial ? String(p.kcal ?? '') : '');
+  const [protein, setProtein] = useState(initial ? String(p.protein ?? '') : '');
+  const [carbs, setCarbs] = useState(initial ? String(p.carbs ?? '') : '');
+  const [fat, setFat] = useState(initial ? String(p.fat ?? '') : '');
+  const [fiber, setFiber] = useState(initial ? String(p.fiber ?? '') : '');
+  const [portionG, setPortionG] = useState(String(initial?.defaultPortionG || 100));
+  const [error, setError] = useState(null);
+
+  const submit = (e) => {
+    e?.preventDefault?.();
+    if (!name.trim()) { setError('Necesitas un nombre.'); return; }
+    const n = (v) => { const x = Number(v); return Number.isFinite(x) && x >= 0 ? x : 0; };
+    onSave(makeFood({
+      id: initial?.id,
+      name: name.trim(),
+      per100: { kcal: n(kcal), protein: n(protein), carbs: n(carbs), fat: n(fat), fiber: n(fiber) },
+      defaultPortionG: Number(portionG) > 0 ? Number(portionG) : 100,
+      barcode: initial?.barcode,
+      tags: initial?.tags,
+      source: initial?.source || 'manual',
+      builtin: initial?.builtin,
+      usageCount: initial?.usageCount,
+      lastUsedAt: initial?.lastUsedAt,
+    }));
+  };
+
+  const field = (label, val, set, step) => (
+    <label className="block">
+      <span className="text-xs font-medium text-gray-600 dark:text-gray-400">{label}</span>
+      <input type="number" inputMode="decimal" step={step || '1'} min="0" value={val} onChange={(e) => set(e.target.value)} placeholder="0"
+        className="mt-1 w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-emerald-500" />
+    </label>
+  );
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 p-4 overflow-y-auto">
+      <form onSubmit={submit} className="w-full max-w-md bg-white dark:bg-gray-900 rounded-2xl shadow-xl border border-gray-200 dark:border-gray-800 p-5 space-y-4 my-4 max-h-[92vh] overflow-y-auto">
+        <h2 className="text-lg font-bold">{initial?.id ? 'Editar alimento' : 'Nuevo alimento'}</h2>
+        <label className="block">
+          <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Nombre</span>
+          <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="Ej. Pechuga de pollo cocida"
+            className="mt-1 w-full px-3 py-2.5 rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-emerald-500" autoFocus />
+        </label>
+        <p className="text-[11px] text-gray-500 dark:text-gray-400">Macros <strong>por 100 g</strong> (se escalan por gramos al registrar)</p>
+        {field('Calorías /100g', kcal, setKcal)}
+        <div className="grid grid-cols-2 gap-3">
+          {field('Proteína /100g', protein, setProtein)}
+          {field('Carbos /100g', carbs, setCarbs)}
+          {field('Grasas /100g', fat, setFat)}
+          {field('Fibra /100g', fiber, setFiber, '0.1')}
+        </div>
+        {field('Porción por defecto (g)', portionG, setPortionG)}
+        {error && <p className="text-xs text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-900/30 p-2 rounded-lg">{error}</p>}
+        <div className="flex gap-2 pt-2">
+          <button type="button" onClick={onCancel} className="flex-1 py-2.5 rounded-xl border border-gray-300 dark:border-gray-700 font-medium">Cancelar</button>
+          <button type="submit" className="flex-1 py-2.5 rounded-xl bg-emerald-500 text-white font-semibold hover:bg-emerald-600">Guardar</button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+// Sección "Mis alimentos" del tab Banco: biblioteca reusable con buscador + CRUD. Editar por id
+// (permite renombrar); los nuevos pasan por upsertFood (dedup por nombre/código).
+function FoodsBankSection({ state, setState }) {
+  const [query, setQuery] = useState('');
+  const [editing, setEditing] = useState(null); // food (edit) | {} (nuevo) | null
+  const foods = state.foods || [];
+  const shown = useMemo(() => searchFoods(foods, query, query.trim() ? 40 : 300), [foods, query]);
+
+  const saveFood = (food) => {
+    setState((prev) => {
+      const list = prev.foods || [];
+      if (food.id && list.some((f) => f.id === food.id)) {
+        return { ...prev, foods: list.map((f) => (f.id === food.id ? food : f)) };
+      }
+      return { ...prev, foods: upsertFood(list, food) };
+    });
+    setEditing(null);
+  };
+  const deleteFood = (id) => {
+    setState((prev) => ({ ...prev, foods: (prev.foods || []).filter((f) => f.id !== id) }));
+  };
+
+  return (
+    <div>
+      <div className="flex items-end justify-between mb-1">
+        <SectionHeader title="Mis alimentos" hint="Base reusable · macros por 100g, se escalan por gramos al registrar" />
+        <button onClick={() => setEditing({})}
+          className="px-2.5 py-1 rounded-full text-[11px] font-semibold" style={{ background: 'rgba(90,141,181,0.14)', color: 'var(--bento-blue)' }}>
+          + Agregar
+        </button>
+      </div>
+      <input type="text" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="🔍 Buscar en mis alimentos…"
+        className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 mb-2" />
+      <div className="space-y-1.5">
+        {shown.length === 0 && (
+          <p className="text-xs" style={{ color: 'var(--bento-faint)' }}>
+            {foods.length === 0 ? 'Aún no tienes alimentos. Agrega uno o guárdalos al registrar un extra.' : 'Sin coincidencias.'}
+          </p>
+        )}
+        {shown.map((f) => (
+          <div key={f.id} className="bento-card flex items-center gap-2" style={{ padding: 10 }}>
+            <div className="flex-1 min-w-0">
+              <div className="text-sm font-medium truncate">
+                {stripPortionSuffix(f.name)}
+                {f.builtin && <span className="ml-1 text-[10px]" style={{ color: 'var(--bento-faint)' }}>semilla</span>}
+              </div>
+              <div className="text-[11px]" style={{ color: 'var(--bento-faint)' }}>
+                {Math.round(f.per100?.kcal || 0)} kcal · P {Math.round(f.per100?.protein || 0)} · C {Math.round(f.per100?.carbs || 0)} · G {Math.round(f.per100?.fat || 0)} /100g · porción {f.defaultPortionG}g
+              </div>
+            </div>
+            <button onClick={() => setEditing(f)} className="px-2 py-1 rounded-lg text-xs hover:bg-gray-100 dark:hover:bg-gray-800" title="Editar">✏️</button>
+            <button onClick={() => deleteFood(f.id)} className="px-2 py-1 rounded-lg text-xs text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-900/30" title="Borrar">🗑️</button>
+          </div>
+        ))}
+      </div>
+      {editing && (
+        <FoodEditModal initial={editing.id ? editing : null} onCancel={() => setEditing(null)} onSave={saveFood} />
+      )}
+    </div>
+  );
+}
+
 function BankView({ state, setState }) {
   const [editing, setEditing] = useState(null);
   const [suggesting, setSuggesting] = useState(null);
@@ -6821,6 +7141,7 @@ function BankView({ state, setState }) {
           onEdit={(item) => setEditing({ kind: 'dessert', item })}
           onDelete={deleteDessert} />
       </div>
+      <FoodsBankSection state={state} setState={setState} />
       {editing && (
         <BankItemForm kind={editing.kind} initial={editing.item}
           apiKey={state.settings?.anthropicApiKey}
@@ -10432,6 +10753,15 @@ function bridgeSyncStatus(state) {
   if (b.lastSyncAt) {
     const a = b.lastSyncAdded || {};
     const n = (a.meals || 0) + (a.weights || 0) + (a.workouts || 0);
+    // Drift de versión: el .gs desplegado quedó atrás del código (campos nuevos se descartan en
+    // silencio). Ámbar accionable hasta que se redeploye el bridge. Solo si ya sincronizó OK.
+    const drift = bridgeVersionDrift(b.deployedVersion);
+    if (drift) {
+      const detail = drift.deployed == null
+        ? 'Implementación vieja sin sello de versión · redeploy del .gs pendiente'
+        : `Bridge desplegado v${drift.deployed}, el código espera v${drift.expected} · redeploy pendiente`;
+      return { color: '#f59e0b', label: 'Bridge: redeploy pendiente', detail, at: b.lastSyncAt };
+    }
     // Items del bridge descartados por malformados (campo mal nombrado, sin id, kcal ilegible).
     // Se avisa en ámbar para que el dato no se pierda en silencio (ver validate.mjs).
     const d = b.lastSyncDropped || {};

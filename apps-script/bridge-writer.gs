@@ -144,6 +144,14 @@
 // ?k= aunque el .gs aún no lo exija), y recién después fija SHARED_TOKEN aquí y redeploy.
 var SHARED_TOKEN = ''; // candado DESACTIVADO (2026-06-05): rompía el registro por chat. La URL /exec ya es secreta.
 
+// Versión del contrato/esquema del bridge. Sella cada lectura principal (doGet) como
+// `bridgeVersion`; la app la compara contra EXPECTED_BRIDGE_VERSION (src/sync.mjs) y, si esta
+// implementación quedó atrás, avisa en el indicador 🔗 ("redeploy pendiente"). Así el drift entre
+// el código fuente y la versión desplegada deja de ser silencioso (el síntoma clásico: campos
+// nuevos descartados sin aviso). SUBIR EN LOCKSTEP con EXPECTED_BRIDGE_VERSION cada vez que cambie
+// el shape servido, y redeployar este .gs.
+var BRIDGE_VERSION = 2;
+
 function _authed(e) {
   if (!SHARED_TOKEN) return true; // auth desactivada mientras el token esté vacío
   var got = (e && e.parameter && e.parameter.k) || '';
@@ -942,9 +950,15 @@ function doGet(e) {
     var meal = _totals(bR, day);     // autoridad del log de comida: suma de meals[]
     return _json(_reconcile(day, snap, meal, _mealNames(bR, day)));
   }
-  // Lectura principal de la app: AUTO-HEAL antes de servir, luego entrega el JSON.
+  // Lectura principal de la app: AUTO-HEAL antes de servir, luego entrega el JSON sellado con
+  // bridgeVersion (handshake anti-drift; la app compara y avisa si esta implementación quedó vieja).
   try { _absorbStrays(); } catch (err) { /* nunca falles la lectura por el heal */ }
   var data = DriveApp.getFileById(CANONICAL_ID).getBlob().getDataAsString();
+  try {
+    var obj = JSON.parse(data);
+    obj.bridgeVersion = BRIDGE_VERSION;
+    data = JSON.stringify(obj);
+  } catch (err) { /* si el archivo no parsea, entrégalo tal cual (no romper la lectura) */ }
   return ContentService.createTextOutput(data).setMimeType(ContentService.MimeType.JSON);
 }
 
