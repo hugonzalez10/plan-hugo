@@ -612,6 +612,18 @@ function _entryTs(e, nowMs) {
   return nowMs;
 }
 
+// Infiere el tipo de entreno (cardio|strength) desde el nombre cuando la entrada llegó SIN
+// `type` (la skill del chat a veces lo omite y entonces la pestaña Ejercicios no lo clasifica).
+// Fuerza gana sobre cardio: un "fuerza + cardio de cierre" es, en el cómputo, sesión de fuerza.
+// Devuelve '' si no se puede inferir (no se fuerza nada). Red de seguridad server-side: cubre
+// op:add, ?w=add, la unión de un bridge completo y el auto-heal — venga de donde venga.
+function _inferWorkoutType(name) {
+  var n = String(name || '').toLowerCase();
+  if (/fuerza|pierna|legs|empuje|tracci|pesas|squat|press|espalda|pecho|hombro|b[ií]ceps|tr[ií]ceps|speediance/.test(n)) return 'strength';
+  if (/bici|bicicleta|carrera|trote|remo|caminata|caminadora|cardio|el[ií]ptica|spinning|nataci|nado/.test(n)) return 'cardio';
+  return '';
+}
+
 // Unión por CONTENIDO (reemplaza la unión por id). El servidor es la autoridad del
 // id: a cada entrada NUEVA (sin match) le asigna un uuid y le sella el ts. Dedup:
 //   · meals/workouts → misma firma de contenido Y |Δts| ≤ WINDOW_MS.
@@ -626,6 +638,8 @@ function _contentUnion(bridge, sec, entries, assignId) {
   var added = 0;
   entries.forEach(function (e) {
     if (!e) return;
+    // Auto-clasifica el entreno si llegó sin `type` (la skill a veces lo omite). Self-heal.
+    if (sec === 'workouts' && !e.type) { var _t = _inferWorkoutType(e.name); if (_t) e.type = _t; }
     var sig = _sig(sec, e);
     var ets = _entryTs(e, nowMs);
     var hitIdx = -1;
