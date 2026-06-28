@@ -132,6 +132,9 @@ export function migrateState(parsed) {
   //    resucitaría lo borrado. Ver mergeBridge.
   if (!Array.isArray(next.bridge.pushedIds)) next.bridge.pushedIds = [];
   if (!Array.isArray(next.bridge.removedBridgeIds)) next.bridge.removedBridgeIds = [];
+  //  · removedFoodKeys → foods (por nombre normalizado) que el usuario borró; mergeBridge no los
+  //    reimporta del bridge (anti-resurrección, espejo de removedBridgeIds para la sección foods).
+  if (!Array.isArray(next.bridge.removedFoodKeys)) next.bridge.removedFoodKeys = [];
   next.snackBank = next.snackBank.map((s) => ({
     carbs: 0, fat: 0, fiber: 0, ...s,
   }));

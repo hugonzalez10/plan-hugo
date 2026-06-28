@@ -261,7 +261,7 @@ export function withBridgeToken(url, token) {
 //   la app compara contra EXPECTED_BRIDGE_VERSION y avisa si la implementación desplegada quedó
 //   atrás (el síntoma clásico: campos nuevos descartados en silencio porque no se redeployó el .gs).
 //   SUBIR EN LOCKSTEP con BRIDGE_VERSION en apps-script/bridge-writer.gs cada vez que cambie el shape.
-export const EXPECTED_BRIDGE_VERSION = 3;
+export const EXPECTED_BRIDGE_VERSION = 4;
 
 // Drift de versión del bridge desplegado. Devuelve null si está al día; si no, el detalle para el
 // indicador. deployed=null = implementación vieja sin sello (todavía no redeployada).
@@ -716,6 +716,10 @@ export function mergeBridge(state, rawBridge) {
   // Biblioteca de alimentos (chat→app): la skill agrega al bridge los que Hugo escanea/confirma.
   // Se importan SOLO los nombres que el usuario aún no tiene (no pisar sus per100 curados); cada uno
   // recibe id/key frescos vía makeFood. Espejo del enriquecimiento que la app ya hace localmente.
+  // removedFoodKeys (como removedBridgeIds para meals) frena la RESURRECCIÓN: si Hugo borró un food,
+  // su key queda vetada y el bridge no lo reimporta aunque siga ahí (el borrado se propaga al .gs,
+  // pero esto cubre la ventana hasta que ese write llegue y a otros dispositivos).
+  const removedFoodKeys = new Set((state.bridge?.removedFoodKeys) || []);
   let foods = Array.isArray(state.foods) ? state.foods : [];
   if (Array.isArray(bridge.foods) && bridge.foods.length) {
     const haveKeys = new Set(foods.map((f) => f.key || normalizeName(f.name)));
@@ -723,7 +727,7 @@ export function mergeBridge(state, rawBridge) {
     for (const bf of bridge.foods) {
       if (!bf || !bf.name || !bf.per100) continue;
       const key = bf.key || normalizeName(bf.name);
-      if (haveKeys.has(key)) continue;
+      if (haveKeys.has(key) || removedFoodKeys.has(key)) continue;
       haveKeys.add(key);
       incoming.push(makeFood({ ...bf, source: bf.source || 'promoted' }));
       added.foods++;

@@ -64,6 +64,7 @@
 //                                       plan fijo del snapshot). Ver el branch p.totals.
 //  GET  /exec?config=1               → devuelve solo el bloque `config` (la skill)
 //  GET  /exec?foods=1                → devuelve la biblioteca `foods` (la skill, antes de estimar)
+//                                       Borrar un food: ?w=delete&section=foods&id=<nombre/key>.
 //  GET  /exec?cleanup=1              → barre duplicados en todo Drive (mantención)
 //  GET  /exec?heal=1                 → fuerza el auto-heal y reporta cuántos absorbió
 //  GET  /exec?commit=<uploadFileId>  → LEGACY: aplica un upload suelto al canónico.
@@ -151,7 +152,7 @@ var SHARED_TOKEN = ''; // candado DESACTIVADO (2026-06-05): rompía el registro 
 // el código fuente y la versión desplegada deja de ser silencioso (el síntoma clásico: campos
 // nuevos descartados sin aviso). SUBIR EN LOCKSTEP con EXPECTED_BRIDGE_VERSION cada vez que cambie
 // el shape servido, y redeployar este .gs.
-var BRIDGE_VERSION = 3;
+var BRIDGE_VERSION = 4;
 
 function _authed(e) {
   if (!SHARED_TOKEN) return true; // auth desactivada mientras el token esté vacío
@@ -753,6 +754,22 @@ function _contentUnion(bridge, sec, entries, assignId) {
 // Borra de una sección la entrada con ese id (compara como String → sirve para ids
 // numéricos legacy y uuid nuevos). Bajo lock. Devuelve { ok, deleted, section, id }.
 function _applyDelete(section, id) {
+  // foods: librería keyed por NOMBRE normalizado (no por id; está fuera de SECTIONS). El borrado
+  // viene por `id` = la key/nombre. Permite que la app propague el borrado y limpiar entradas sueltas.
+  if (section === 'foods') {
+    if (id == null || id === '') return { ok: false, reason: 'no-id' };
+    var lockF = LockService.getScriptLock();
+    try { lockF.waitLock(20000); } catch (e) { return { ok: false, reason: 'busy' }; }
+    try {
+      var bF = _readCanonical();
+      var key = _norm(String(id));
+      var beforeF = (bF.foods || []).length;
+      bF.foods = (bF.foods || []).filter(function (f) { return !f || _norm(f.key || f.name) !== key; });
+      var delF = beforeF - bF.foods.length;
+      if (delF > 0) _writeCanonical(bF);
+      return { ok: true, deleted: delF, section: 'foods', key: key };
+    } finally { lockF.releaseLock(); }
+  }
   if (SECTIONS.indexOf(section) < 0) return { ok: false, reason: 'bad-section' };
   if (id == null || id === '') return { ok: false, reason: 'no-id' };
   var lock = LockService.getScriptLock();

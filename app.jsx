@@ -4046,7 +4046,12 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
       ? foodOrExtra
       : mealItemToFood(foodOrExtra);
     if (!food || !food.name) return;
-    setState((prev) => ({ ...prev, foods: upsertFood(prev.foods || [], food) }));
+    setState((prev) => {
+      const key = food.key || normalizeName(food.name);
+      const removed = new Set((prev.bridge?.removedFoodKeys) || []);
+      removed.delete(key); // re-agregar des-veta (ver removedFoodKeys / mergeBridge)
+      return { ...prev, foods: upsertFood(prev.foods || [], food), bridge: { ...(prev.bridge || {}), removedFoodKeys: [...removed] } };
+    });
   };
 
   // Agrega un ítem custom al antojo (persiste en state, disponible todos los días)
@@ -6982,15 +6987,33 @@ function FoodsBankSection({ state, setState }) {
   const saveFood = (food) => {
     setState((prev) => {
       const list = prev.foods || [];
-      if (food.id && list.some((f) => f.id === food.id)) {
-        return { ...prev, foods: list.map((f) => (f.id === food.id ? food : f)) };
-      }
-      return { ...prev, foods: upsertFood(list, food) };
+      // Re-agregar un alimento lo DES-veta (sácalo de removedFoodKeys), si no el bridge nunca
+      // lo volvería a traer y el merge tampoco lo importaría.
+      const key = food.key || normalizeName(food.name);
+      const removed = new Set((prev.bridge?.removedFoodKeys) || []);
+      removed.delete(key);
+      const foods = (food.id && list.some((f) => f.id === food.id))
+        ? list.map((f) => (f.id === food.id ? food : f))
+        : upsertFood(list, food);
+      return { ...prev, foods, bridge: { ...(prev.bridge || {}), removedFoodKeys: [...removed] } };
     });
     setEditing(null);
   };
   const deleteFood = (id) => {
-    setState((prev) => ({ ...prev, foods: (prev.foods || []).filter((f) => f.id !== id) }));
+    setState((prev) => {
+      const food = (prev.foods || []).find((f) => f.id === id);
+      const key = food ? (food.key || normalizeName(food.name)) : null;
+      // Propaga el borrado al bridge (otros dispositivos + limpieza) y veta la key para que
+      // mergeBridge NO lo resucite en el próximo sync (espejo del flujo de weights/meals).
+      if (key) postBridgeDelete(prev.settings, 'foods', key);
+      const removed = new Set((prev.bridge?.removedFoodKeys) || []);
+      if (key) removed.add(key);
+      return {
+        ...prev,
+        foods: (prev.foods || []).filter((f) => f.id !== id),
+        bridge: { ...(prev.bridge || {}), removedFoodKeys: [...removed] },
+      };
+    });
   };
 
   return (
