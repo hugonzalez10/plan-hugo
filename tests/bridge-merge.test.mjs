@@ -190,3 +190,13 @@ test('foods del bridge sin per100 o sin nombre no entran (validación de fronter
   assert.equal(added.foods, 0);
   assert.equal(state.foods.length, 0);
 });
+
+test('mergeBridge NO resucita un food borrado (key en removedFoodKeys)', () => {
+  const state = { ...baseState(), foods: [], bridge: { importedIds: [], removedBridgeIds: [], removedFoodKeys: ['barra x'] } };
+  const bridge = baseBridge({ foods: [{ name: 'Barra X', per100: { kcal: 450, protein: 20, carbs: 40, fat: 18, fiber: 5 }, defaultPortionG: 60, source: 'off' }] });
+  const { state: out, added } = mergeBridge(state, bridge);
+  assert.equal(added.foods, 0);
+  assert.equal(out.foods.length, 0);
+  // y la veta se conserva en el estado resultante (no se pierde entre syncs)
+  assert.ok((out.bridge.removedFoodKeys || []).includes('barra x'));
+});
