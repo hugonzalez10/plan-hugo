@@ -11,7 +11,9 @@ description: >
   "tomé X vasos", "me tomé una botella/un litro", o cualquier variación de registro de
   comida, peso, actividad o agua. agregar/añadir/sumar = registrar (ej. "agrega 1.5lt
   de agua" = 1500 ml). También activar con "cómo voy hoy", "cuánto llevo", "resumen
-  del día".
+  del día". Y con CONSULTAS DE BIBLIOTECA: "qué alimentos tengo", "qué hay en mi
+  biblioteca", "lista mis alimentos", "qué macros tiene X", "cuánta proteína tiene X"
+  — se responden desde la tabla de la skill + `?foods=1` del bridge, NO de memoria.
 ---
 
 # Food Tracker — Plan Hugo
@@ -160,6 +162,17 @@ Antes de procesar, decide qué es:
   agua", "me tomé un litro", "anota un vaso de agua" → sección `water`. Convierte a
   **ml**: vaso ≈ 250 ml, botella ≈ 500 ml, litro/jarro = 1000 ml. Si la cantidad es
   ambigua, pregunta en una línea cuántos ml/vasos.
+- **Consulta de biblioteca** (NO es registro) → "qué alimentos tengo", "qué hay en mi
+  biblioteca", "lista mis alimentos", "qué macros tiene X", "cuánta proteína tiene X
+  por 100 g". → **Responde desde la base conocida, NO de memoria ni del menú semanal:**
+  (1) la **tabla embebida** de "Base de alimentos conocidos de Hugo" (Paso 1, más abajo)
+  y (2) un `curl -sL "$BRIDGE_URL?foods=1&k=$BRIDGE_TOKEN"` para sumar lo que Hugo agregó
+  (escaneos/confirmados); la UNIÓN de ambas es la biblioteca. Da los macros que pide
+  (per 100 g + porción típica para los integrales, por unidad para los de formato fijo).
+  Si pregunta por un alimento que NO está en ninguna de las dos, dilo explícito ("no lo
+  tengo en tu base, lo estimo: …") en vez de inventar un dato como si estuviera cargado.
+  Si `?foods=1` viene vacío, es normal: solo guarda lo que agregaste más allá de la
+  tabla curada (los ~50 semilla viven en la tabla embebida, no en el bridge).
 
 Si hay ambigüedad, pregunta en una línea.
 
