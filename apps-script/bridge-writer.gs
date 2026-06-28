@@ -63,6 +63,7 @@
 //                                       nutriente (nunca muestra de menos, conserva el
 //                                       plan fijo del snapshot). Ver el branch p.totals.
 //  GET  /exec?config=1               → devuelve solo el bloque `config` (la skill)
+//  GET  /exec?foods=1                → devuelve la biblioteca `foods` (la skill, antes de estimar)
 //  GET  /exec?cleanup=1              → barre duplicados en todo Drive (mantención)
 //  GET  /exec?heal=1                 → fuerza el auto-heal y reporta cuántos absorbió
 //  GET  /exec?commit=<uploadFileId>  → LEGACY: aplica un upload suelto al canónico.
@@ -150,7 +151,7 @@ var SHARED_TOKEN = ''; // candado DESACTIVADO (2026-06-05): rompía el registro 
 // el código fuente y la versión desplegada deja de ser silencioso (el síntoma clásico: campos
 // nuevos descartados sin aviso). SUBIR EN LOCKSTEP con EXPECTED_BRIDGE_VERSION cada vez que cambie
 // el shape servido, y redeployar este .gs.
-var BRIDGE_VERSION = 2;
+var BRIDGE_VERSION = 3;
 
 function _authed(e) {
   if (!SHARED_TOKEN) return true; // auth desactivada mientras el token esté vacío
@@ -247,6 +248,12 @@ function _readCanonical() {
   if (typeof b.routine !== 'object' || b.routine === null || Array.isArray(b.routine)) b.routine = {};
   // `exercise_videos` = mapa slug→{youtube_id, assignedAt}. Persiste entre rutinas. NO se poda.
   if (typeof b.exercise_videos !== 'object' || b.exercise_videos === null || Array.isArray(b.exercise_videos)) b.exercise_videos = {};
+  // `foods` = biblioteca de alimentos reusables (state.foods de la app). Array de {name,key,per100,
+  //   defaultPortionG,tags?,source,usageCount}. Es una LIBRERÍA (no un log diario): dedup por nombre
+  //   normalizado, la última escritura gana, NO se poda. Fuera de SECTIONS a propósito (no pasa por
+  //   la unión por contenido/ventana ni la poda de los logs). La app la empuja (op:'foods') y la lee
+  //   en el GET principal; la skill la consulta (?foods=1) para no re-estimar alimentos conocidos.
+  if (!Array.isArray(b.foods)) b.foods = [];
   return b;
 }
 
@@ -458,6 +465,32 @@ function _mergeInto(bridge, payload, day) {
       }
     });
     return 0;
+  }
+
+  // FOODS: biblioteca de alimentos reusables. Upsert por nombre normalizado (la última escritura
+  // gana — la app es la autoridad de los suyos; la skill agrega los que Hugo escanea/confirma).
+  // NO se poda. Acepta tanto un add incremental (1+ alimentos) como un reemplazo de varios.
+  if (payload.op === 'foods' && Array.isArray(payload.foods)) {
+    if (!Array.isArray(bridge.foods)) bridge.foods = [];
+    var byKey = {};
+    bridge.foods.forEach(function (f, i) { if (f && f.name) byKey[_norm(f.name)] = i; });
+    var nAdded = 0;
+    payload.foods.forEach(function (inc) {
+      if (!inc || !inc.name || !inc.per100) return;
+      var k = inc.key || _norm(inc.name);
+      var clean = {
+        name: String(inc.name), key: k,
+        per100: inc.per100,
+        defaultPortionG: Number(inc.defaultPortionG) > 0 ? Number(inc.defaultPortionG) : 100,
+        source: inc.source || 'manual',
+        usageCount: Number(inc.usageCount) || 0,
+      };
+      if (Array.isArray(inc.tags) && inc.tags.length) clean.tags = inc.tags;
+      if (inc.barcode) clean.barcode = String(inc.barcode);
+      if (byKey[k] != null) { bridge.foods[byKey[k]] = clean; }
+      else { byKey[k] = bridge.foods.length; bridge.foods.push(clean); nAdded++; }
+    });
+    return nAdded;
   }
 
   // DELTA add: agrega entradas a una sección, dedup por CONTENIDO. El servidor
@@ -794,7 +827,7 @@ function _apply(payload) {
     var day = (payload && payload.today) || _daysAgoKey(0);
     if (!payload) return { ok: false, reason: 'empty-or-bad-payload' };
     var isKnown = payload.op === 'snapshot' || payload.op === 'config' ||
-      payload.op === 'routine' || payload.op === 'exercise_videos' ||
+      payload.op === 'routine' || payload.op === 'exercise_videos' || payload.op === 'foods' ||
       payload.op === 'add' || SECTIONS.some(function (s) { return Array.isArray(payload[s]); });
     if (!isKnown) return { ok: false, reason: 'empty-or-bad-payload' };
 
@@ -806,6 +839,7 @@ function _apply(payload) {
     if (payload.op === 'config')   return { ok: true, config: true };
     if (payload.op === 'routine')         return { ok: true, routine: true };
     if (payload.op === 'exercise_videos') return { ok: true, exercise_videos: true };
+    if (payload.op === 'foods')           return { ok: true, foods: true, added: added };
     var sum = _totals(bridge, day);
     return { ok: true, added: added, today: day, totals: sum.totals, workoutsKcal: sum.workoutsKcal, waterMl: sum.waterMl };
   } finally {
@@ -943,6 +977,8 @@ function doGet(e) {
   if (p.cleanup) return _json({ ok: true, trashed: _trashDuplicates() });
   if (p.heal)    return _json({ ok: true, absorbed: _absorbStrays() });
   if (p.config)  return _json({ ok: true, config: _readCanonical().config || {} });
+  // Biblioteca de alimentos para la skill: la lee antes de estimar, así no re-adivina lo conocido.
+  if (p.foods)   return _json({ ok: true, foods: _readCanonical().foods || [] });
   if (p.totals) {
     var bR = _readCanonical();
     var day = p.totals;

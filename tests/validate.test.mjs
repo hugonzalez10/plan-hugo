@@ -101,3 +101,16 @@ test('mergeBridge descarta el meal basura y lo expone en state.bridge.lastSyncDr
   assert.equal(state.bridge.lastSyncDropped.meals, 1);
   assert.ok(Array.isArray(state.bridge.lastSyncWarnings));
 });
+
+test('normaliza foods: descarta sin nombre o sin per100.kcal numérico, conserva los válidos', () => {
+  const { payload, dropped } = normalizeBridgePayload(baseBridge({ foods: [
+    { name: 'Yogur X', per100: { kcal: 60, protein: 10, carbs: 4, fat: 0, fiber: 0 }, defaultPortionG: 150 },
+    { name: 'Sin macros', defaultPortionG: 50 },               // sin per100 → fuera
+    { per100: { kcal: 100 } },                                  // sin nombre → fuera
+    { name: 'kcal basura', per100: { kcal: 'abc' } },           // kcal no numérico → fuera
+  ] }));
+  assert.equal(payload.foods.length, 1);
+  assert.equal(payload.foods[0].name, 'Yogur X');
+  assert.equal(dropped.foods, 3);
+  assert.ok(hasDrops(dropped));
+});

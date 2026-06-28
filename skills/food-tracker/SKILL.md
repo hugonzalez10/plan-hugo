@@ -179,6 +179,28 @@ Esta es la base curada de los alimentos que Hugo más usa (espejo de `state.food
 de la app). **Si el alimento que registra Hugo está acá, NO lo estimes con visión: usa estos
 números.** Solo cae a la estimación IA (más abajo) cuando el alimento NO está en estas tablas.
 
+> **Base VIVA en el bridge (además de esta tabla).** La app empuja la biblioteca de alimentos de
+> Hugo al bridge; léela antes de estimar para conocer lo que él agregó/escaneó después de esta
+> tabla estática:
+> ```sh
+> curl -sL "$BRIDGE_URL?foods=1&k=$BRIDGE_TOKEN"   # → { ok:true, foods:[{name,per100,defaultPortionG,...}] }
+> ```
+> Cada food trae `per100` (escala por gramos) y `defaultPortionG`. La UNIÓN de esta tabla embebida
+> + los `foods` del bridge es la base conocida. Si el GET falla, usa solo la tabla embebida.
+>
+> **Enriquecer la base (solo escaneos y confirmaciones — NO estimaciones).** Cuando registres un
+> alimento que **no** estaba en la base y proviene de un dato DURO —código de barras/OpenFoodFacts,
+> o macros que Hugo te dictó/confirmó explícitamente, o cuando él diga "guárdalo"— agrégalo al
+> bridge para que la próxima vez se conozca:
+> ```sh
+> curl -sL -X POST "$BRIDGE_URL" -H 'Content-Type: text/plain' --data '{"op":"foods","foods":[
+>   {"name":"<nombre>","per100":{"kcal":..,"protein":..,"carbs":..,"fat":..,"fiber":..},"defaultPortionG":<g>,"source":"off"}
+> ]}'
+> ```
+> `per100` siempre por 100 g (si tienes la porción, divide a 100 g). El servidor hace upsert por
+> nombre. **NUNCA guardes una estimación por visión** (foto/texto sin confirmar): ensucia la base
+> con datos aproximados. Esas se registran como comida (Paso 4) pero NO van a `foods`.
+
 **Integrales — valores POR 100 g; escala por los gramos que indique Hugo** (ej. "180 g de pavo"
 → ×1.8). Si no dice gramos, usa la porción típica.
 
