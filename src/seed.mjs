@@ -88,6 +88,21 @@ export const SEED_RECIPES = [
   { name: 'Pavo molido 140g + zapallo italiano + arroz', occasion: 'cena', totals: { kcal: 420, protein: 36, carbs: 45, fat: 8, fiber: 5 } },
 ];
 
+// — Delta foodsVersion 2: base curada de "los que más usa" de Hugo (planilla jun-2026). Se mergea
+//   aparte (como el arsenal) para llegar a instalaciones ya en v1 SIN resucitar lo borrado; además
+//   se spreadea dentro de SEED_FOODS para que las instalaciones nuevas lo traigan de fábrica.
+//   Distinguidos por nombre de los genéricos previos (p. ej. "Pavo molido cocido" ≠ pechuga magra;
+//   garbanzos de lata escurridos ≠ cocidos de grano).
+export const FOODS_V2 = [
+  { name: 'Pavo pechuga magra cocida', per100: { kcal: 135, protein: 30, carbs: 0, fat: 1, fiber: 0 }, defaultPortionG: 180 },
+  { name: 'Garbanzos cocidos escurridos (lata)', per100: { kcal: 122, protein: 6.7, carbs: 20, fat: 2.2, fiber: 6 }, defaultPortionG: 135 },
+  { name: 'Charqui (jerky) seco', per100: { kcal: 350, protein: 53, carbs: 10, fat: 10, fiber: 0 }, defaultPortionG: 30, tags: ['portable', 'sin-refrigeración'] },
+  { name: 'Edamame seco Skukli', per100: { kcal: 384, protein: 42, carbs: 20, fat: 15, fiber: 24.7 }, defaultPortionG: 20, tags: ['portable', 'sin-refrigeración'] },
+  { name: 'ISO 100 Dymatize (polvo)', per100: { kcal: 333, protein: 76, carbs: 6, fat: 1.5, fiber: 0 }, defaultPortionG: 33, tags: ['portable', 'sin-refrigeración'] },
+  { name: 'Frambuesa', per100: { kcal: 53, protein: 1.2, carbs: 12, fat: 0.7, fiber: 6.5 }, defaultPortionG: 75 },
+  { name: 'Kiwi', per100: { kcal: 56, protein: 1.1, carbs: 14, fat: 0.5, fiber: 3 }, defaultPortionG: 75, tags: ['portable'] },
+];
+
 // — Biblioteca de alimentos integrales (state.foods, Fase C). Macros POR 100 g de fuente dura
 //   (USDA / tabla de composición chilena); pesos cocidos donde aplica (carnes, cereales, legumbres
 //   = porción que Hugo realmente sirve). Cierra el punto débil de la IA en comida casera/integral:
@@ -151,6 +166,8 @@ export const SEED_FOODS = [
   { name: 'Arándano', per100: { kcal: 57, protein: 0.7, carbs: 14, fat: 0.3, fiber: 2.4 }, defaultPortionG: 100 },
   { name: 'Pera', per100: { kcal: 57, protein: 0.4, carbs: 15, fat: 0.1, fiber: 3.1 }, defaultPortionG: 180, tags: ['portable'] },
   { name: 'Uva', per100: { kcal: 69, protein: 0.7, carbs: 18, fat: 0.2, fiber: 0.9 }, defaultPortionG: 120 },
+  // Base curada de Hugo (planilla jun-2026); ver FOODS_V2.
+  ...FOODS_V2,
 ];
 
 export const SEED_RULES = [
@@ -203,7 +220,7 @@ export function buildSeed() {
     routine: null,
     exercise_videos: {},
     arsenalVersion: 3,
-    foodsVersion: 1,
+    foodsVersion: 2,
     bridge: { lastSyncAt: null, importedIds: [], pushedIds: [], removedBridgeIds: [] },
     aiCache: { coach: {}, weekly: {}, patterns: null, lastSubstitution: null, health: null },
   };

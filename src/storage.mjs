@@ -5,7 +5,7 @@
 import { uuid, normalizeName } from './util.mjs';
 import {
   buildSeed, SEED_SNACKS, SEED_PROTEINS, SEED_DESSERTS, SEED_RECIPES, SEED_RULES, SNACK_TAGS,
-  ARSENAL_V2_SNACKS, ARSENAL_V2_PROTEINS, ARSENAL_V2_DESSERTS, SEED_FOODS,
+  ARSENAL_V2_SNACKS, ARSENAL_V2_PROTEINS, ARSENAL_V2_DESSERTS, SEED_FOODS, FOODS_V2,
 } from './seed.mjs';
 import { extraPlanSlot, dedupeDayExtras } from './meals.mjs';
 
@@ -111,6 +111,16 @@ export function migrateState(parsed) {
       .map((f) => ({ ...f, id: uuid(), key: normalizeName(f.name), source: 'seed', builtin: true, usageCount: 0, lastUsedAt: null }));
     next.foods = [...next.foods, ...addFoods];
     next.foodsVersion = 1;
+  }
+  // foodsVersion 2: delta de la base curada de Hugo (FOODS_V2). Mismo patrón que el arsenal —
+  // mergea solo los nombres ausentes, así no resucita lo que el usuario haya borrado en v1.
+  if (!(Number(next.foodsVersion) >= 2)) {
+    const haveFoods = new Set(next.foods.map((f) => normalizeName(f.name)));
+    const addFoods = FOODS_V2
+      .filter((f) => !haveFoods.has(normalizeName(f.name)))
+      .map((f) => ({ ...f, id: uuid(), key: normalizeName(f.name), source: 'seed', builtin: true, usageCount: 0, lastUsedAt: null }));
+    next.foods = [...next.foods, ...addFoods];
+    next.foodsVersion = 2;
   }
   next.bridge = (next.bridge && Array.isArray(next.bridge.importedIds))
     ? next.bridge
