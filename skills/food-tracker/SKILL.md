@@ -11,9 +11,8 @@ description: >
   "tomé X vasos", "me tomé una botella/un litro", o cualquier variación de registro de
   comida, peso, actividad o agua. agregar/añadir/sumar = registrar (ej. "agrega 1.5lt
   de agua" = 1500 ml). También activar con "cómo voy hoy", "cuánto llevo", "resumen
-  del día". Y con CONSULTAS DE BIBLIOTECA: "qué alimentos tengo", "qué hay en mi
-  biblioteca", "lista mis alimentos", "qué macros tiene X", "cuánta proteína tiene X"
-  — se responden desde la tabla de la skill + `?foods=1` del bridge, NO de memoria.
+  del día". También CONSULTAS DE BIBLIOTECA ("qué alimentos tengo", "qué macros tiene
+  X"): responde desde la tabla de la skill + `?foods=1`, NO de memoria.
 ---
 
 # Food Tracker — Plan Hugo
