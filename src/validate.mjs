@@ -44,7 +44,7 @@ const isLocatable = (it) => (typeof it.date === 'string' && it.date) || it.ts !=
 export function normalizeBridgePayload(bridge) {
   const b = bridge || {};
   const warnings = [];
-  const dropped = { meals: 0, weights: 0, workouts: 0, water: 0, health: 0, checks: 0, lifts: 0 };
+  const dropped = { meals: 0, weights: 0, workouts: 0, water: 0, health: 0, checks: 0, lifts: 0, foods: 0 };
 
   const meals = (Array.isArray(b.meals) ? b.meals : []).flatMap((raw, i) => {
     if (raw == null) { dropped.meals++; return []; }
@@ -109,7 +109,19 @@ export function normalizeBridgePayload(bridge) {
     return [{ ...raw }];
   });
 
-  const payload = { ...b, meals, weights, workouts, water, health, checks, lifts };
+  // foods (biblioteca reusable, chat→app): exige nombre + per100 con kcal numérico. Sin id (se
+  // dedup por nombre normalizado en mergeBridge), así que basta nombre+macros para ser usable.
+  const foods = (Array.isArray(b.foods) ? b.foods : []).flatMap((raw, i) => {
+    if (raw == null) { dropped.foods++; return []; }
+    const label = `food ${raw.name ?? `#${i}`}`;
+    if (isAbsent(raw.name)) { warnings.push(`${label}: sin nombre — descartado`); dropped.foods++; return []; }
+    if (!raw.per100 || !Number.isFinite(Number(raw.per100.kcal))) {
+      warnings.push(`${label}: sin per100.kcal numérico — descartado`); dropped.foods++; return [];
+    }
+    return [{ ...raw }];
+  });
+
+  const payload = { ...b, meals, weights, workouts, water, health, checks, lifts, foods };
   return { payload, dropped, warnings };
 }
 

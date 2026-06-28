@@ -12,6 +12,7 @@ import {
   WEIGHT_FIELDS, SEGMENT_FIELDS, STRING_FIELDS, WORKOUT_EXTRA_FIELDS, BODY_TYPE_OPTIONS, HEALTH_MERGE_FIELDS,
 } from './fields.mjs';
 import { normalizeBridgePayload } from './validate.mjs';
+import { makeFood } from './foods.mjs';
 
 export const GIST_FILENAME = 'plan-hugo.json';
 export const GIST_DESCRIPTION = 'Plan Hugo · backup privado (no compartir)';
@@ -260,7 +261,7 @@ export function withBridgeToken(url, token) {
 //   la app compara contra EXPECTED_BRIDGE_VERSION y avisa si la implementación desplegada quedó
 //   atrás (el síntoma clásico: campos nuevos descartados en silencio porque no se redeployó el .gs).
 //   SUBIR EN LOCKSTEP con BRIDGE_VERSION en apps-script/bridge-writer.gs cada vez que cambie el shape.
-export const EXPECTED_BRIDGE_VERSION = 2;
+export const EXPECTED_BRIDGE_VERSION = 3;
 
 // Drift de versión del bridge desplegado. Devuelve null si está al día; si no, el detalle para el
 // indicador. deployed=null = implementación vieja sin sello (todavía no redeployada).
@@ -330,6 +331,9 @@ export async function fetchBridge(url, token, opts = {}) {
       water: Array.isArray(data.water) ? data.water : [],
       health: Array.isArray(data.health) ? data.health : [],
       lifts: Array.isArray(data.lifts) ? data.lifts : [],
+      // Biblioteca de alimentos reusables (chat→app): los que la skill agregue al escanear/confirmar
+      // fluyen acá y mergeBridge los suma a state.foods sin pisar los curados del usuario.
+      foods: Array.isArray(data.foods) ? data.foods : [],
       // Singletons (objetos, no arrays). El doGet del bridge devuelve el archivo completo, así que
       // basta con forwardearlos acá para que fluyan bridge→app (energy no está y por eso nunca fluyó).
       routine: (data.routine && typeof data.routine === 'object' && !Array.isArray(data.routine)) ? data.routine : null,
@@ -393,7 +397,7 @@ export function mergeBridge(state, rawBridge) {
   const removedBridgeIds = new Set((state.bridge?.removedBridgeIds) || []);
   const days = { ...(state.days || {}) };
   const weights = Array.isArray(state.weights) ? [...state.weights] : [];
-  const added = { meals: 0, weights: 0, workouts: 0, checks: 0, water: 0, health: 0, lifts: 0 };
+  const added = { meals: 0, weights: 0, workouts: 0, checks: 0, water: 0, health: 0, lifts: 0, foods: 0 };
 
   const ensureDay = (dk) => {
     const base = days[dk] || { eaten: {}, snackId1: null, snackId2: null, proteinId: null, water: { ml: 0 }, skipped: [], nudgesDismissed: [], dessertAlmuerzoId: null, dessertCenaId: null, notes: null };
@@ -709,8 +713,26 @@ export function mergeBridge(state, rawBridge) {
     }
   }
 
+  // Biblioteca de alimentos (chat→app): la skill agrega al bridge los que Hugo escanea/confirma.
+  // Se importan SOLO los nombres que el usuario aún no tiene (no pisar sus per100 curados); cada uno
+  // recibe id/key frescos vía makeFood. Espejo del enriquecimiento que la app ya hace localmente.
+  let foods = Array.isArray(state.foods) ? state.foods : [];
+  if (Array.isArray(bridge.foods) && bridge.foods.length) {
+    const haveKeys = new Set(foods.map((f) => f.key || normalizeName(f.name)));
+    const incoming = [];
+    for (const bf of bridge.foods) {
+      if (!bf || !bf.name || !bf.per100) continue;
+      const key = bf.key || normalizeName(bf.name);
+      if (haveKeys.has(key)) continue;
+      haveKeys.add(key);
+      incoming.push(makeFood({ ...bf, source: bf.source || 'promoted' }));
+      added.foods++;
+    }
+    if (incoming.length) foods = [...foods, ...incoming];
+  }
+
   const nextState = {
-    ...state, days, weights, energy, routine, exercise_videos,
+    ...state, days, weights, energy, routine, exercise_videos, foods,
     bridge: {
       ...(state.bridge || {}),
       lastSyncAt: new Date().toISOString(),

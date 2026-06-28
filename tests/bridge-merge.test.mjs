@@ -162,3 +162,31 @@ test('health con date dd-MM-yy del atajo aterriza en el día correcto vía merge
   const r = mergeBridge(baseState(), baseBridge({ health: [{ date: '16-06-26', steps: 9665, activeEnergyKcal: 879 }] }));
   assert.equal(r.state.days['2026-06-16'].health.steps, 9665);
 });
+
+// — Biblioteca de alimentos (chat→app): el bridge transporta los foods que la skill agrega al
+//   escanear/confirmar. mergeBridge los suma a state.foods SIN pisar los curados del usuario.
+test('importa un food nuevo del bridge a state.foods con id/key frescos', () => {
+  const bridge = baseBridge({ foods: [{ name: 'Barra X', per100: { kcal: 450, protein: 20, carbs: 40, fat: 18, fiber: 5 }, defaultPortionG: 60, source: 'off' }] });
+  const { state, added } = mergeBridge({ ...baseState(), foods: [] }, bridge);
+  assert.equal(added.foods, 1);
+  const f = state.foods.find((x) => x.name === 'Barra X');
+  assert.ok(f && f.id && f.key === 'barra x');
+  assert.equal(f.per100.kcal, 450);
+  assert.equal(f.defaultPortionG, 60);
+});
+
+test('mergeBridge NO pisa un food que el usuario ya tiene (mismo nombre normalizado)', () => {
+  const mine = { id: 'u1', name: 'Pavo', key: 'pavo', per100: { kcal: 999, protein: 30, carbs: 0, fat: 1, fiber: 0 }, defaultPortionG: 180, source: 'manual' };
+  const bridge = baseBridge({ foods: [{ name: 'pavo', per100: { kcal: 135, protein: 30, carbs: 0, fat: 1, fiber: 0 }, defaultPortionG: 180, source: 'off' }] });
+  const { state, added } = mergeBridge({ ...baseState(), foods: [mine] }, bridge);
+  assert.equal(added.foods, 0);
+  assert.equal(state.foods.length, 1);
+  assert.equal(state.foods[0].per100.kcal, 999); // conserva el valor curado del usuario
+});
+
+test('foods del bridge sin per100 o sin nombre no entran (validación de frontera)', () => {
+  const bridge = baseBridge({ foods: [{ name: 'Sin macros', defaultPortionG: 50 }, { per100: { kcal: 100 } }] });
+  const { state, added } = mergeBridge({ ...baseState(), foods: [] }, bridge);
+  assert.equal(added.foods, 0);
+  assert.equal(state.foods.length, 0);
+});
