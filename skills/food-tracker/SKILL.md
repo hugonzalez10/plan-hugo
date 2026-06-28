@@ -173,6 +173,57 @@ Si hay ambigüedad, pregunta en una línea.
 
 ## Paso 1 — Extraer datos con visión IA
 
+### Base de alimentos conocidos de Hugo — usar ANTES de estimar
+
+Esta es la base curada de los alimentos que Hugo más usa (espejo de `state.foods`/`SEED_FOODS`
+de la app). **Si el alimento que registra Hugo está acá, NO lo estimes con visión: usa estos
+números.** Solo cae a la estimación IA (más abajo) cuando el alimento NO está en estas tablas.
+
+**Integrales — valores POR 100 g; escala por los gramos que indique Hugo** (ej. "180 g de pavo"
+→ ×1.8). Si no dice gramos, usa la porción típica.
+
+| Alimento | kcal | P | C | G | Fibra | Porción típica |
+|---|---|---|---|---|---|---|
+| Pavo pechuga magra cocida | 135 | 30 | 0 | 1 | 0 | 180 g |
+| Pollo pechuga cocida | 164 | 30 | 0 | 4.4 | 0 | 180 g |
+| Atún en agua escurrido | 116 | 26 | 0 | 1 | 0 | 100 g |
+| Huevo entero | 143 | 12.5 | 1 | 9.5 | 0 | 50 g (1 unid) |
+| Charqui (jerky) seco | 350 | 53 | 10 | 10 | 0 | 30 g |
+| Edamame seco Skukli | 384 | 42 | 20 | 15 | 24.7 | 20 g |
+| ISO 100 Dymatize (polvo) | 333 | 76 | 6 | 1.5 | 0 | 33 g (1 scoop) |
+| Yogur griego 0% | 60 | 10 | 4 | 0 | 0 | 150 g |
+| Garbanzos cocidos escurridos (lata) | 122 | 6.7 | 20 | 2.2 | 6 | 135 g |
+| Lentejas cocidas escurridas (lata) | 115 | 8 | 19 | 0.7 | 6 | 135 g |
+| Arroz cocido | 130 | 2.5 | 28 | 0.3 | 0.4 | 100 g (almuerzo) |
+| Quinoa cocida | 120 | 4.4 | 21 | 1.9 | 2.8 | 185 g |
+| Frambuesa | 53 | 1.2 | 12 | 0.7 | 6.5 | 75 g |
+| Chía | 486 | 17 | 42 | 31 | 34 | 12 g |
+| Manzana | 52 | 0.3 | 14 | 0.2 | 2.4 | 150 g |
+| Pera | 57 | 0.4 | 15 | 0.1 | 3.1 | 150 g |
+| Kiwi | 56 | 1.1 | 14 | 0.5 | 3 | 75 g |
+| Plátano | 89 | 1.1 | 23 | 0.3 | 2.6 | 120 g |
+| Uva | 69 | 0.7 | 18 | 0.2 | 0.9 | 50 g (~10 u) |
+| Zanahoria / baby carrots | 41 | 0.9 | 10 | 0.2 | 2.8 | 90 g |
+| Brócoli cocido | 35 | 2.4 | 7 | 0.4 | 3.3 | 50 g |
+| Tomate | 18 | 0.9 | 4 | 0.2 | 1.2 | 100 g |
+
+**Formato fijo — macros POR UNIDAD; cuenta unidades, NO escales por gramos:**
+
+| Producto | kcal | P | C | G | Fibra |
+|---|---|---|---|---|---|
+| Colún Protein potito | 90 | 11 | 9 | 1 | 0 |
+| Colún Protein Plus bebible | 130 | 18 | 12 | 1.5 | 0 |
+| Loncoleche Protein | 120 | 15 | 10 | 2 | 0 |
+| Quest Bar | 190 | 21 | 23 | 8 | 14 |
+| SNP Protein Treat (azul) | 150 | 21 | 14 | 5 | 3 |
+| Jalea proteica Colún | 50 | 10 | 2 | 0 | 0 |
+| Gelatina Vivo (½ porción) | 25 | 8 | 6 | 0 | 0 |
+| Brownie proteico casero | 150 | 12 | 14 | 6 | 2 |
+| Creatina | 0 | 0 | 0 | 0 | 0 |
+
+Para platos compuestos (varios de estos alimentos juntos), suma los componentes escalados.
+Solo lo que NO esté acá se estima con el prompt de visión de abajo.
+
 ### Comida
 ```
 Eres nutricionista experto. Analiza esta comida. Responde SOLO JSON sin markdown ni backticks:

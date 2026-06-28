@@ -9,7 +9,7 @@ import {
   upsertFood, searchFoods, makeFood, parseGrams, stripPortionSuffix, markFoodUsed,
 } from '../src/foods.mjs';
 import { migrateState } from '../src/storage.mjs';
-import { buildSeed, SEED_FOODS } from '../src/seed.mjs';
+import { buildSeed, SEED_FOODS, FOODS_V2 } from '../src/seed.mjs';
 
 const pollo = makeFood({ name: 'Pechuga de pollo cocida', per100: { kcal: 165, protein: 31, carbs: 0, fat: 3.6, fiber: 0 }, defaultPortionG: 150 });
 
@@ -131,7 +131,7 @@ test('parseGrams / stripPortionSuffix', () => {
 test('buildSeed trae la biblioteca de alimentos semilla', () => {
   const s = buildSeed();
   assert.equal(s.foods.length, SEED_FOODS.length);
-  assert.equal(s.foodsVersion, 1);
+  assert.equal(s.foodsVersion, 2);
   assert.ok(s.foods.every((f) => f.builtin && f.source === 'seed' && f.id && f.key));
 });
 
@@ -139,13 +139,23 @@ test('migrateState inicializa foods y carga la semilla una sola vez', () => {
   const old = { snackBank: [], proteinBank: [], days: {} }; // estado viejo sin foods
   const m = migrateState(old);
   assert.ok(Array.isArray(m.foods));
-  assert.equal(m.foods.length, SEED_FOODS.length);
-  assert.equal(m.foodsVersion, 1);
+  assert.equal(m.foods.length, SEED_FOODS.length); // SEED_FOODS ya incluye el delta FOODS_V2
+  assert.equal(m.foodsVersion, 2);
 });
 
-test('migrateState NO resucita alimentos semilla que el usuario borró', () => {
-  // Usuario ya pasó por foodsVersion 1 y borró todo: el merge no debe re-agregar.
+test('migrateState NO resucita alimentos semilla v1 que el usuario borró', () => {
+  // Usuario ya pasó por foodsVersion 1 y borró todo: el merge v1 no re-agrega, pero el delta
+  // v2 (alimentos nuevos que nunca vio) sí se entrega — igual que el arsenal.
   const state = { snackBank: [], proteinBank: [], days: {}, foods: [], foodsVersion: 1 };
+  const m = migrateState(state);
+  assert.equal(m.foods.length, FOODS_V2.length); // solo el delta nuevo, nada del v1 resucitado
+  assert.ok(m.foods.every((f) => FOODS_V2.some((d) => d.name === f.name)));
+  assert.equal(m.foodsVersion, 2);
+});
+
+test('migrateState NO resucita el delta v2 que el usuario borró', () => {
+  // Usuario ya en v2 y borró todo: nada se re-agrega.
+  const state = { snackBank: [], proteinBank: [], days: {}, foods: [], foodsVersion: 2 };
   const m = migrateState(state);
   assert.equal(m.foods.length, 0);
 });
