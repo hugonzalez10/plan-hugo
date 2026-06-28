@@ -11260,6 +11260,39 @@ function App() {
     return () => clearTimeout(id);
   }, [bridgePost, videosBody]);
 
+  // Biblioteca de alimentos app→bridge (op:'foods', upsert por nombre del lado servidor). Es una
+  // LIBRERÍA, no un log diario → mismo patrón singleton que routine/exercise_videos. Empuja el
+  // DELTA útil: lo que NO es semilla (escaneos/manuales/promovidos) + las semillas que Hugo ya usó
+  // (usageCount>0). La skill tiene la tabla semilla embebida, así que el bridge solo necesita el
+  // delta para que el chat conozca lo que Hugo agregó. El servidor dedup por nombre, reenviar es inocuo.
+  const foodsBody = useMemo(() => {
+    const list = (state.foods || []).filter((f) => f && f.name && f.per100
+      && (f.source !== 'seed' || Number(f.usageCount) > 0));
+    if (!list.length) return null;
+    const compact = list.map((f) => {
+      const o = {
+        name: f.name, key: f.key || normalizeName(f.name),
+        per100: f.per100, defaultPortionG: f.defaultPortionG || 100,
+        source: f.source || 'manual', usageCount: Number(f.usageCount) || 0,
+      };
+      if (Array.isArray(f.tags) && f.tags.length) o.tags = f.tags;
+      if (f.barcode) o.barcode = f.barcode;
+      return o;
+    });
+    return JSON.stringify({ op: 'foods', foods: compact });
+  }, [state.foods]);
+  useEffect(() => {
+    if (!bridgeUrl || !foodsBody) return;
+    const id = setTimeout(() => {
+      fetch(bridgePost, {
+        method: 'POST', mode: 'no-cors', keepalive: true,
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: foodsBody,
+      }).catch(() => {});
+    }, 2800);
+    return () => clearTimeout(id);
+  }, [bridgePost, foodsBody]);
+
   // Empuje app→bridge de entradas creadas en la app (extras, ejercicios, pesos) para que el
   // chat y el bridge las vean (bidireccional). El servidor reasigna el id y dedup por contenido,
   // así que reenviar es inocuo. NO se reenvía lo que vino del bridge (id en importedIds) ni lo ya

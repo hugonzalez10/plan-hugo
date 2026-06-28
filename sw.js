@@ -4,7 +4,7 @@
  * NO interceptamos llamadas a api.anthropic.com.
  */
 
-const CACHE_NAME = 'plan-hugo-v79-base-alimentos-hugo-foods-v2-tabla-en-skill';
+const CACHE_NAME = 'plan-hugo-v80-biblioteca-de-alimentos-viva-chat-app-por-el-bridge';
 const CORE_URLS = [
   './index.html',
   './app.js',
