@@ -4,7 +4,7 @@
  * NO interceptamos llamadas a api.anthropic.com.
  */
 
-const CACHE_NAME = 'plan-hugo-v78-pr-historial-rutina';
+const CACHE_NAME = 'plan-hugo-v79-base-alimentos-hugo-foods-v2-tabla-en-skill';
 const CORE_URLS = [
   './index.html',
   './app.js',
