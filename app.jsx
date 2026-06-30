@@ -38,6 +38,7 @@ import {
 import {
   WEIGHT_FIELDS, SEGMENT_FIELDS, SEGMENT_OPTIONS, STRING_FIELDS,
   WEIGHT_CAT_LABELS, CHART_METRICS, WORKOUT_EXTRA_FIELDS, HEALTH_FIELDS,
+  sanitizeSleepHours,
 } from './src/fields.mjs';
 import {
   gistCreate, gistPush, gistPull, sanitizeStateForUpload, syncSig, applyRemoteState, hashSig,
@@ -5327,7 +5328,7 @@ function HeartWatchImportModal({ state, setState, onClose }) {
         const cur = { ...(d.health || {}) };
         for (const k of Object.keys(h)) {
           if (k === 'date') continue;
-          if (k === 'sleepHours') { if (cur.sleepHours == null) cur.sleepHours = h.sleepHours; continue; }
+          if (k === 'sleepHours') { const s = sanitizeSleepHours(h.sleepHours); if (cur.sleepHours == null && s != null) cur.sleepHours = s; continue; }
           if (h[k] != null) cur[k] = h[k];
         }
         cur.healthTs = Date.now();
