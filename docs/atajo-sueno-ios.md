@@ -57,9 +57,28 @@ Pasos en el atajo, reemplazando el bloque que suma:
 > (sobrestima un poco). Es un error de minutos, muchísimo menor que el **×5** de sumar solapes, y
 > queda holgadamente bajo el guard de 14 h. Aceptable.
 
-## El POST (idéntico al de hoy)
+## Arquitectura (dónde encaja este atajo)
 
-El contrato del bridge no cambia. El atajo sigue posteando a la sección `health`:
+"Sueño" es un **sub-atajo**: solo **calcula y devuelve** las horas (su última acción, `SuenoHoras`,
+es el output). **No postea nada por sí mismo.** El que envía al bridge es el atajo maestro **"Plan
+Hugo Health"**, que corre los sub-atajos y arma el POST:
+
+```
+Plan Hugo Health:
+  Fecha actual → Aplicar formato (yyyy-MM-dd)
+  Ejecutar Steps    → variable Pasos
+  Ejecutar Calorias → variable EnergiaActiva
+  Ejecutar FC       → variable FCReposo
+  Ejecutar Vo2max   → variable VO2
+  Ejecutar Sueño    → variable SuenoHoras     ← consume ESTE atajo
+  Obtener contenido de URL (POST al bridge con todas las variables)
+```
+
+Por eso arreglar "Sueño" arregla el pipeline completo: "Plan Hugo Health" usa su resultado tal cual.
+
+## El POST (lo hace "Plan Hugo Health")
+
+El contrato del bridge no cambia. Se postea a la sección `health`:
 
 ```json
 {
@@ -81,6 +100,27 @@ El contrato del bridge no cambia. El atajo sigue posteando a la sección `health
 
 - La acción "Buscar muestras" y sus filtros **no se ven bien en el Mac**, y macOS suele conceder
   Atajos en tier "click" (sin escribir ni arrastrar acciones) → **edita el atajo en el iPhone**.
+
+## Automatización (auto-ejecución, para no olvidar correrlo)
+
+"Plan Hugo Health" envía **todo junto** en cada corrida (sueño + pasos + energía + FC + VO2), no por
+partes. Para que corra solo se usan **dos Automatizaciones personales apuntando al MISMO atajo**:
+
+- **09:30 diario** → captura el **sueño** de la noche recién sincronizado (ventana sin siestas) y la
+  actividad parcial de la mañana.
+- **21:30 diario** → captura la **actividad completa** del día (pasos/energía/FC finales); como el
+  merge del bridge es "último valor no vacío gana", sobrescribe los parciales de la mañana.
+
+Cómo crearlas (iPhone, se repite dos veces cambiando la hora):
+`Atajos → pestaña Automatización → + → Crear automatización personal → Hora del día → 09:30 (y otra
+a 21:30) → Diariamente → Siguiente → Ejecutar atajo → "Plan Hugo Health" → activar` **Ejecutar
+inmediatamente** `(NO "Preguntar antes") → Listo`.
+
+> Caveat de la corrida de 21:30: recalcula el sueño, y en un día con **siesta** la ventana "últimos
+> 1 día" la incluye → el sueño puede inflarse (> 14 h). No es grave: el guard de la app descarta todo
+> sueño > 14 h, así que la app sigue mostrando el valor bueno de la mañana; solo el bridge queda con
+> un número feo ese día. Si molesta, la alternativa prolija es una copia del maestro **sin** el paso
+> `Ejecutar Sueño` para las 21:30 (así el sueño solo lo escribe la corrida de las 09:30).
 
 ## Verificar
 
