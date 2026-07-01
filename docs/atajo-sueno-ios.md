@@ -131,3 +131,18 @@ inmediatamente** `(NO "Preguntar antes") → Listo`.
   `takeout-parse.mjs`), así descarta los despertares entre bloques que la ventana `máx−mín` sí
   contaría. Hace **gap-fill**: solo rellena noches sin dato o con el valor inflado (> 14 h); un dato
   bueno del Watch (≤ 14 h) **se respeta**, así que este atajo y el backfill no se pisan.
+
+## Estado (handoff, 2026-07-01)
+
+- **Atajo "Sueño" reconstruido con método de ventana → VERIFICADO.** El 01-jul "Plan Hugo Health"
+  corrió y escribió sueño **6.5 h** (realista) + pasos/energía/FC/VO2. Contraste con días previos del
+  atajo roto en el bridge: 29-06 = 26.3 h, 30-06 = 15.2 h, 27-06 = 14.6 h. El fix quedó demostrado.
+- **Backfill Takeout corrido:** 175 noches (2022→2026), METs (19 workouts) y curva FC (10 workouts).
+  Creds del bridge en `skills/food-tracker/SKILL.md` (leerlas de ahí, nunca inline).
+- **Formato de fecha (no rompe nada):** el atajo escribe `DD-MM-YY` (`01-07-26`) y el backfill escribió
+  `YYYY-MM-DD` (`2026-07-01`). El bridge guarda ambos keys, pero la app los reconcilia: `healthDateKey`
+  (`src/sync.mjs`) normaliza los dos al mismo día, y el guard `sanitizeSleepHours` (`src/fields.mjs`)
+  descarta los inflados > 14 h del atajo viejo, dejando el valor limpio. Bridge con keys redundantes =
+  cosmético, no requiere limpieza.
+- **Único pendiente (device-side):** crear las 2 Automatizaciones (09:30 y 21:30) en el iPhone — ver
+  sección "Automatización" arriba.
