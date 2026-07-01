@@ -8,6 +8,7 @@ import {
   ARSENAL_V2_SNACKS, ARSENAL_V2_PROTEINS, ARSENAL_V2_DESSERTS, SEED_FOODS, FOODS_V2,
 } from './seed.mjs';
 import { extraPlanSlot, dedupeDayExtras } from './meals.mjs';
+import { sanitizeSleepHours } from './fields.mjs';
 
 export const STORAGE_KEY = 'plan-hugo-v3';
 export const BACKUP_STORAGE_KEY = 'plan-hugo-v3-bak';
@@ -185,9 +186,18 @@ export function migrateState(parsed) {
     const cleanWater = (wMl > 0 && wLogSum !== wMl)
       ? { ...w0, log: [...wLog, { id: uuid(), ml: wMl - wLogSum, ts: Date.now() }] }
       : { ...w0, log: wLog };
+    // Sueño corrupto ya guardado (p.ej. 15.2h del doble conteo del Shortcut): se borra para
+    // que la tarjeta caiga al último valor válido y el promedio no lo arrastre. Idempotente:
+    // un valor sano se conserva, uno ausente no se toca.
+    let cleanHealth = v.health;
+    if (cleanHealth && cleanHealth.sleepHours != null && sanitizeSleepHours(cleanHealth.sleepHours) == null) {
+      cleanHealth = { ...cleanHealth };
+      delete cleanHealth.sleepHours;
+    }
     migratedDays[k] = {
       ...v,
       water: cleanWater,
+      health: cleanHealth,
       extras: cleanExtras,
       exercise: cleanExercise,
       eaten,

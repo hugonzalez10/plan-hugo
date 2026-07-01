@@ -3,13 +3,14 @@
 // paso más delicado: mergeBridge concentra los bugs históricos (doble-conteo, divergencia,
 // dedup, fechas) y está cubierto por bridge-merge.test. La orquestación con hooks
 // (useGistAutoSync, runBridgeSync, snap/pushPayload) se queda en app.jsx; acá va lo reusable.
-import { todayKey, sanitizeSleepHours } from './dates.mjs';
+import { todayKey } from './dates.mjs';
 import { normalizeName, getDeviceId } from './util.mjs';
 import {
   extraPlanSlot, resolveColacion, computeDayTotals, chatMealSig, sameWindow, dedupeDayExtras,
 } from './meals.mjs';
 import {
   WEIGHT_FIELDS, SEGMENT_FIELDS, STRING_FIELDS, WORKOUT_EXTRA_FIELDS, BODY_TYPE_OPTIONS, HEALTH_MERGE_FIELDS,
+  sanitizeSleepHours,
 } from './fields.mjs';
 import { normalizeBridgePayload } from './validate.mjs';
 import { makeFood } from './foods.mjs';
@@ -667,8 +668,8 @@ export function mergeBridge(state, rawBridge) {
         const v = Number(h[k]);
         if (!Number.isFinite(v)) continue;
         if (POSITIVE_ONLY.has(k) && v <= 0) continue;
-        // Sueño >14h es doble conteo (In Bed+Asleep solapados del atajo, o Fit multi-fuente): se
-        // descarta para no plantar "15h" ni pisar un dato bueno previo del Watch. Idempotente.
+        // Sueño >14h = doble conteo del Shortcut (In Bed+Asleep solapados) o Fit multi-fuente →
+        // se descarta para no plantar "15h" ni ensuciar el promedio (no pisa el valor previo bueno).
         if (k === 'sleepHours' && sanitizeSleepHours(v) == null) continue;
         next[k] = v;
       }

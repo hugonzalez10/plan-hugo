@@ -1,6 +1,7 @@
 // Parsing puro (JSON tolerante de la IA, plantillas de rutina, slugs), sin React/JSX.
-// Extraído de app.jsx en la modularización (Etapa 1, sub-etapa 2). Autocontenido: no
-// depende de otros módulos. esbuild lo reinjecta en el bundle.
+// Extraído de app.jsx en la modularización (Etapa 1, sub-etapa 2). esbuild lo reinjecta
+// en el bundle.
+import { sanitizeSleepHours } from './fields.mjs';
 
 // Slug estable de un ejercicio: minúsculas, sin tildes, espacios/símbolos → guiones. Es la
 // clave de unión entre la rutina y el mapa exercise_videos, así un video sobrevive a renovar
@@ -265,9 +266,8 @@ export function parseHeartWatchDaily(text) {
     }
     if (sleepCol >= 0) {
       const mins = _hmsToMin(cells[sleepCol]);
-      // >14h es doble conteo (muestras solapadas), no fisiológico → se descarta. parsing.mjs es
-      // autocontenido, así que el techo va inline (mismo valor que MAX_PLAUSIBLE_SLEEP_H en dates.mjs).
-      if (mins != null && mins > 0 && mins <= 14 * 60) { h.sleepHours = +(mins / 60).toFixed(2); any = true; }
+      const hrs = mins != null ? sanitizeSleepHours(mins / 60) : null; // descarta >14h (dato corrupto)
+      if (hrs != null) { h.sleepHours = +hrs.toFixed(2); any = true; }
     }
     if (any) days.push(h);
   }

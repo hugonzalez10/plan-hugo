@@ -114,6 +114,20 @@ export const HEALTH_FIELDS = [
 // Solo las claves numéricas que se round-trippean por el bridge (sin healthTs, que es metadato).
 export const HEALTH_MERGE_FIELDS = HEALTH_FIELDS.map((f) => f.key);
 
+// Cota fisiológica del sueño diario. >14h no es real: es el doble conteo del Shortcut de
+// Apple Health (muestras "In Bed" + etapas "Asleep" solapadas, o iPhone+Watch sumados),
+// misma clase de bug que pasos (~1.8×) y energía activa (1.68×).
+export const MAX_PLAUSIBLE_SLEEP_H = 14;
+
+// Sanea un valor de sueño en horas: devuelve el número si es plausible, o null si es basura
+// (no numérico, ≤0, o >MAX_PLAUSIBLE_SLEEP_H → muestra corrupta que se descarta). Punto único
+// de la regla, reusado por el merge del bridge, la migración de storage y el import HeartWatch.
+export function sanitizeSleepHours(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0 || n > MAX_PLAUSIBLE_SLEEP_H) return null;
+  return n;
+}
+
 export const WEIGHT_FIELDS = [
   // Principales
   { key: 'weightKg',           label: 'Peso',              unit: 'kg',   step: '0.1', cat: 'main' },
