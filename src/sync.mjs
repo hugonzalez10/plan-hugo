@@ -10,6 +10,7 @@ import {
 } from './meals.mjs';
 import {
   WEIGHT_FIELDS, SEGMENT_FIELDS, STRING_FIELDS, WORKOUT_EXTRA_FIELDS, BODY_TYPE_OPTIONS, HEALTH_MERGE_FIELDS,
+  sanitizeSleepHours,
 } from './fields.mjs';
 import { normalizeBridgePayload } from './validate.mjs';
 import { makeFood } from './foods.mjs';
@@ -649,6 +650,9 @@ export function mergeBridge(state, rawBridge) {
         const v = Number(h[k]);
         if (!Number.isFinite(v)) continue;
         if (POSITIVE_ONLY.has(k) && v <= 0) continue;
+        // Sueño >14h = doble conteo del Shortcut → se descarta para no mostrarlo ni
+        // ensuciar el promedio (no pisa el valor previo bueno del día).
+        if (k === 'sleepHours' && sanitizeSleepHours(v) == null) continue;
         next[k] = v;
       }
       if (h.ts != null) next.healthTs = Number(h.ts);

@@ -4,7 +4,7 @@
  * NO interceptamos llamadas a api.anthropic.com.
  */
 
-const CACHE_NAME = 'plan-hugo-v81-foods-borrado-en-bridge-anti-resurreccion-removedfoodkeys';
+const CACHE_NAME = 'plan-hugo-v83-guard-sueno-imposible';
 const CORE_URLS = [
   './index.html',
   './app.js',
