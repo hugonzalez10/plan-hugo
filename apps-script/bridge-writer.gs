@@ -200,10 +200,11 @@ var HEALTH_MERGE_FIELDS = ['steps', 'activeEnergyKcal', 'sleepHours', 'restingHr
 // Campos de un entrenamiento que se mergean sobre la entrada existente del mismo día (la versión
 // más rica gana): si primero llegó una línea simple (name/kcal) y luego una con desglose, no se
 // pierde el detalle. Mantener en sync con WORKOUT_EXTRA_FIELDS + `exercises`/`hrZones` de app.jsx.
-// `hrZones` es objeto: se trata aparte (como `exercises`), solo sobrescribe si trae claves.
-// `maxHr` (FC pico) y `hrZonePct` (string "86/12/1/0/0" = %Z1..Z5) son escalares: la rama genérica
-// de merge los cubre. `hrZonePct` es DISTINTO de `hrZones` (este último, objeto en minutos de HeartWatch).
-var WORKOUT_MERGE_FIELDS = ['type', 'activity', 'minutes', 'volumeKg', 'distanceM', 'avgPowerW', 'avgCadenceRpm', 'avgHr', 'maxHr', 'rpe', 'hrZonePct', 'trainingLoad', 'calsPerHour', 'exercises', 'hrZones'];
+// `hrZones` (objeto) y `hrSeries` (array de {t,bpm}, curva FC intra-sesión) se tratan aparte
+// (como `exercises`): solo sobrescriben si el nuevo trae contenido. `maxHr`/`hrZonePct`/`mets`
+// son escalares: la rama genérica de merge los cubre. `hrZonePct` es DISTINTO de `hrZones`
+// (este último, objeto en minutos de HeartWatch). `mets` = intensidad relativa (kcal/kg/h).
+var WORKOUT_MERGE_FIELDS = ['type', 'activity', 'minutes', 'volumeKg', 'distanceM', 'avgPowerW', 'avgCadenceRpm', 'avgHr', 'maxHr', 'rpe', 'hrZonePct', 'trainingLoad', 'calsPerHour', 'mets', 'exercises', 'hrZones', 'hrSeries'];
 // Campos de una SERIE de fuerza (sección lifts) que se mergean sobre la serie existente del mismo
 // (ejercicio|fecha|nº de serie): re-registrar una serie la CORRIGE, no la duplica. Los booleanos
 // isPR/bilateralFlag se mergean también (el guard `!= null && !== ''` deja escribir `false`).
@@ -722,7 +723,7 @@ function _contentUnion(bridge, sec, entries, assignId) {
         // sobrescribe si el nuevo trae un array no vacío.
         var curW = bridge[sec][hitIdx];
         WORKOUT_MERGE_FIELDS.forEach(function (k) {
-          if (k === 'exercises') {
+          if (k === 'exercises' || k === 'hrSeries') {
             if (Array.isArray(e[k]) && e[k].length) curW[k] = e[k];
           } else if (k === 'hrZones') {
             if (e[k] && typeof e[k] === 'object' && Object.keys(e[k]).length) curW[k] = e[k];

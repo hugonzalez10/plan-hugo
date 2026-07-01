@@ -67,6 +67,32 @@ test('workouts: hrZones/rpe/carga se mergean sobre la sesión existente (no dupl
   assert.deepEqual(w.hrZones, { z60: 63.9, z50: 2.1 });
 });
 
+test('workouts: mets (escalar) y hrSeries (array) están en WORKOUT_MERGE_FIELDS y se enriquecen', () => {
+  assert.ok(gs.WORKOUT_MERGE_FIELDS.includes('mets'), 'mets no está en WORKOUT_MERGE_FIELDS');
+  assert.ok(gs.WORKOUT_MERGE_FIELDS.includes('hrSeries'), 'hrSeries no está en WORKOUT_MERGE_FIELDS');
+  const ts = new Date('2026-07-01T07:00:00-04:00').getTime();
+  const bridge = { workouts: [] };
+  // Sesión simple ya en el bridge; el import de Takeout la enriquece (mismo nombre+ventana) con
+  // mets + curva FC. Debe mergear sobre la fila, no crear otra.
+  gs._contentUnion(bridge, 'workouts', [{ name: 'Trote cinta', date: '2026-07-01', ts, kcal: 693, minutes: 62 }], false);
+  const hrSeries = [{ t: 0, bpm: 120 }, { t: 30, bpm: 142 }, { t: 60, bpm: 148 }];
+  gs._contentUnion(bridge, 'workouts', [{ name: 'Trote cinta', date: '2026-07-01', ts: ts + 60000, mets: 7.9, hrSeries }], false);
+  assert.equal(bridge.workouts.length, 1, 'duplicó la sesión en vez de enriquecerla');
+  const w = bridge.workouts[0];
+  assert.equal(w.kcal, 693, 'conserva la línea simple');
+  assert.equal(w.mets, 7.9);
+  assert.deepEqual(w.hrSeries, hrSeries);
+});
+
+test('workouts: hrSeries vacío NO pisa una curva ya presente (solo sobrescribe si trae items)', () => {
+  const ts = new Date('2026-07-01T07:00:00-04:00').getTime();
+  const bridge = { workouts: [] };
+  const good = [{ t: 0, bpm: 120 }, { t: 30, bpm: 142 }];
+  gs._contentUnion(bridge, 'workouts', [{ name: 'Trote', date: '2026-07-01', ts, kcal: 500, hrSeries: good }], false);
+  gs._contentUnion(bridge, 'workouts', [{ name: 'Trote', date: '2026-07-01', ts: ts + 60000, hrSeries: [] }], false);
+  assert.deepEqual(bridge.workouts[0].hrSeries, good, 'un hrSeries vacío borró la curva buena');
+});
+
 test('_prune NO toca health aunque sea viejísima', () => {
   const bridge = {
     meals: [], weights: [], workouts: [], checks: [], water: [], energy: [],

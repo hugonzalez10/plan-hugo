@@ -482,6 +482,10 @@ export function computeExerciseStats(days, refDate, weeks = 8) {
         rpe: w.rpe != null ? Number(w.rpe) : null,
         trainingLoad: w.trainingLoad != null ? Number(w.trainingLoad) : null,
         calsPerHour: w.calsPerHour != null ? Number(w.calsPerHour) : null,
+        // mets = intensidad relativa (kcal/kg/h) que deriva el import de Takeout; hrSeries = curva
+        // FC intra-sesión [{t,bpm}] downsampled desde el .tcx. Ambos enriquecen la session card.
+        mets: w.mets != null ? Number(w.mets) : null,
+        hrSeries: (Array.isArray(w.hrSeries) && w.hrSeries.length) ? w.hrSeries : null,
         hrZones: (w.hrZones && typeof w.hrZones === 'object') ? w.hrZones : null,
         // hrZonePct: string "86/12/1/0/0" (%Z1..Z5) que aporta el chat/skill, distinto de hrZones (minutos).
         hrZonePct: (typeof w.hrZonePct === 'string' && w.hrZonePct) ? w.hrZonePct : null,

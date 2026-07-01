@@ -200,3 +200,49 @@ test('mergeBridge NO resucita un food borrado (key en removedFoodKeys)', () => {
   // y la veta se conserva en el estado resultante (no se pierde entre syncs)
   assert.ok((out.bridge.removedFoodKeys || []).includes('barra x'));
 });
+
+// — Sueño: guard >14h (doble conteo In Bed+Asleep del atajo, o Fit multi-fuente). El backfill de
+//   Takeout llega ya fusionado, pero el guard es la red que impide plantar "15h" desde cualquier
+//   fuente y vuelve idempotente cualquier re-import.
+test('health: descarta sleepHours >14h sin tocar el resto de las métricas del día', () => {
+  const bridge = baseBridge({ health: [{ date: '2026-06-20', steps: 5000, sleepHours: 15.2, restingHr: 57 }] });
+  const { state } = mergeBridge(baseState(), bridge);
+  const h = state.days['2026-06-20'].health;
+  assert.equal(h.sleepHours, undefined, 'un sueño de 15.2h (doble conteo) no debe entrar');
+  assert.equal(h.steps, 5000, 'los pasos del mismo día no se ven afectados');
+  assert.equal(h.restingHr, 57);
+});
+
+test('health: sleepHours plausible (≤14h) sí entra; no pisa un valor bueno previo con uno inflado', () => {
+  const r1 = mergeBridge(baseState(), baseBridge({ health: [{ date: '2026-06-20', sleepHours: 5.7 }] }));
+  assert.equal(r1.state.days['2026-06-20'].health.sleepHours, 5.7);
+  // un re-post inflado (>14h) se descarta y conserva el 5.7 bueno
+  const r2 = mergeBridge(r1.state, baseBridge({ health: [{ date: '2026-06-20', sleepHours: 18.4 }] }));
+  assert.equal(r2.state.days['2026-06-20'].health.sleepHours, 5.7, 'el valor inflado pisó el bueno');
+});
+
+// — Workouts: un enriquecimiento posterior (mets/hrSeries por op:update en el bridge) sobre una
+//   sesión YA importada por id tiene que llegar a la app. Antes el skip-por-id lo ignoraba.
+test('workout ya importado por id: se rellenan mets/hrSeries nuevos (fill-in), no duplica', () => {
+  const s0 = baseState();
+  s0.days['2026-06-22'] = { eaten: {}, extras: [], exercise: [{ id: 'w1', ts: 1, name: 'Día 1', kcal: 500 }], water: { ml: 0 } };
+  const hrSeries = [{ t: 0, bpm: 110 }, { t: 30, bpm: 120 }];
+  const bridge = baseBridge({ workouts: [{ id: 'w1', date: '2026-06-22', ts: 1, name: 'Día 1', kcal: 500, mets: 7.9, hrSeries }] });
+  const { state } = mergeBridge(s0, bridge);
+  const ex = state.days['2026-06-22'].exercise;
+  assert.equal(ex.length, 1, 'no duplica la sesión');
+  assert.equal(ex[0].mets, 7.9, 'el mets enriquecido llegó a la app');
+  assert.deepEqual(ex[0].hrSeries, hrSeries, 'la curva FC enriquecida llegó a la app');
+});
+
+test('workout ya importado con detalle local: el fill-in NO pisa exercises ni kcal existentes', () => {
+  const s0 = baseState();
+  const localExercises = [{ name: 'Sentadilla', sets: 4 }];
+  s0.days['2026-06-22'] = { eaten: {}, extras: [], exercise: [{ id: 'w1', ts: 1, name: 'Día 1', kcal: 500, exercises: localExercises }], water: { ml: 0 } };
+  const bridge = baseBridge({ workouts: [{ id: 'w1', date: '2026-06-22', ts: 1, name: 'Día 1', kcal: 999, exercises: [{ name: 'Otro' }], mets: 6.1 }] });
+  const { state } = mergeBridge(s0, bridge);
+  const w = state.days['2026-06-22'].exercise[0];
+  assert.deepEqual(w.exercises, localExercises, 'no pisó el detalle local de ejercicios');
+  assert.equal(w.kcal, 500, 'no pisó las kcal locales');
+  assert.equal(w.mets, 6.1, 'sí rellena el campo nuevo que faltaba');
+});
