@@ -6,6 +6,11 @@
 // que la UI muestre un ⚠️. Idempotente: no muta la entrada.
 import { MEAL_NUMERIC_FIELDS, FIELD_ALIASES } from './fields.mjs';
 
+// Techo de puntos de la curva FC intra-sesión (`hrSeries`). El import de Takeout downsamplea a
+// ~60-120 pts/sesión; este cap es la última red contra un JSON del bridge inflado (la app lo
+// baja entero). Holgado sobre el objetivo para no recortar sesiones largas legítimas.
+const HR_SERIES_CAP = 240;
+
 // Valor presente pero ausente "de verdad" (null / '' / undefined) → tratamos como no provisto.
 function isAbsent(v) { return v == null || v === ''; }
 
@@ -74,7 +79,15 @@ export function normalizeBridgePayload(bridge) {
     const label = `workout ${raw.id ?? `#${i}`}`;
     if (isAbsent(raw.id)) { warnings.push(`${label}: sin id — descartado`); dropped.workouts++; return []; }
     if (!isLocatable(raw)) { warnings.push(`${label}: sin date ni ts — descartado`); dropped.workouts++; return []; }
-    return [{ ...raw }];
+    const item = { ...raw };
+    // Cap defensivo de la curva FC: el JSON del bridge lo baja la app entero, así que un .tcx mal
+    // downsampled (600+ pts) lo inflaría. El import debería mandar ~60-120 pts; si excede, se
+    // recorta a HR_SERIES_CAP conservando el inicio de la sesión.
+    if (Array.isArray(item.hrSeries) && item.hrSeries.length > HR_SERIES_CAP) {
+      warnings.push(`${label}: hrSeries ${item.hrSeries.length} pts → recortada a ${HR_SERIES_CAP}`);
+      item.hrSeries = item.hrSeries.slice(0, HR_SERIES_CAP);
+    }
+    return [item];
   });
 
   const water = (Array.isArray(b.water) ? b.water : []).flatMap((raw, i) => {

@@ -72,6 +72,22 @@ export function fmtSleepHours(hrs) {
   return m > 0 ? `${h}h ${m}m` : `${h}h`;
 }
 
+// Techo fisiológico del sueño de una noche. Un valor mayor es doble conteo: muestras "In Bed"
+// + "Asleep" solapadas (atajo iOS) o segmentos de varias fuentes en Google Fit sumados crudos
+// → 15-23 h/noche. No es real; se descarta antes de mostrar o mergear.
+export const MAX_PLAUSIBLE_SLEEP_H = 14;
+
+// Sanea horas de sueño: null (descartar) si no es finito o supera el techo fisiológico; si no,
+// el valor tal cual. Se usa en el merge del bridge y en el parser de HeartWatch para que ningún
+// re-import ni atajo aún sin corregir plante un "15h" fantasma. Umbral <6h (alerta clínica) es
+// otra cosa y vive en la UI; acá solo cortamos lo imposible.
+export function sanitizeSleepHours(hrs) {
+  const v = Number(hrs);
+  if (!Number.isFinite(v)) return null;
+  if (v > MAX_PLAUSIBLE_SLEEP_H) return null;
+  return v;
+}
+
 // Clave ISO de semana "2026-W26" de una fecha.
 export function getISOWeekKey(date = new Date()) {
   const d = new Date(date);

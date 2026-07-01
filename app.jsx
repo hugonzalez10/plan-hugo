@@ -5224,13 +5224,17 @@ function RoutineView({ state, setState }) {
 
 // Mini-gráfico de tendencia (sparkline) para una métrica de salud. `points` = lista alineada
 // al rango (28 días); y=null deja hueco (se conecta por encima). Sin ejes, compacto.
-function MetricSparkline({ points, color = 'var(--bento-blue)', height = 42 }) {
+// `refY`: dibuja una línea de referencia horizontal (p. ej. el umbral clínico de 6h de sueño) y
+// pinta en color de alerta los puntos que quedan por DEBAJO. El dominio y se estira para incluir
+// refY, así la línea siempre cae dentro del viewBox aunque todos los datos estén de un lado.
+function MetricSparkline({ points, color = 'var(--bento-blue)', height = 42, refY = null }) {
   const real = (points || []).filter((p) => p && p.y != null);
   if (real.length < 2) {
     return <div style={{ height, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, color: 'var(--bento-faint)' }}>pocos datos</div>;
   }
   const ys = real.map((p) => Number(p.y));
-  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  let minY = Math.min(...ys), maxY = Math.max(...ys);
+  if (refY != null) { minY = Math.min(minY, refY); maxY = Math.max(maxY, refY); }
   const range = (maxY - minY) || 1;
   const n = points.length;
   const W = 100, H = height;
@@ -5241,11 +5245,20 @@ function MetricSparkline({ points, color = 'var(--bento-blue)', height = 42 }) {
   const lastI = points.map((p, i) => (p && p.y != null ? i : -1)).filter((i) => i >= 0).pop();
   return (
     <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ width: '100%', height }}>
+      {refY != null && (
+        <line x1="0" y1={py(refY)} x2={W} y2={py(refY)} stroke="var(--bento-warm)" strokeWidth="1" strokeDasharray="3 2" vectorEffect="non-scaling-stroke" opacity="0.65" />
+      )}
       <polyline points={coords.join(' ')} fill="none" stroke={color} strokeWidth="1.6" vectorEffect="non-scaling-stroke" strokeLinejoin="round" strokeLinecap="round" />
+      {refY != null && points.map((p, i) => (p && p.y != null && Number(p.y) < refY
+        ? <circle key={i} cx={px(i)} cy={py(p.y)} r="1.8" fill="var(--bento-warm)" vectorEffect="non-scaling-stroke" /> : null))}
       {lastI != null && <circle cx={px(lastI)} cy={py(last.y)} r="2" fill={color} vectorEffect="non-scaling-stroke" />}
     </svg>
   );
 }
+
+// Umbral clínico de sueño: bajo esto es la señal de alerta (freno metabólico a grasa visceral,
+// prioridad #1). Se marca en el sparkline y en el gráfico de detalle del sueño.
+const SLEEP_ALERT_H = 6;
 
 // Planifica (sin mutar) el merge de un import de HeartWatch contra el estado actual: cuántos días
 // de salud entran (nuevos vs actualizaciones) y qué sesiones de entreno calzan con un entrenamiento
@@ -5646,8 +5659,14 @@ Reglas: 2 a 4 recomendaciones, las más importantes y accionables. Si una dimens
                       <span style={{ fontSize: 10.5, fontWeight: 600, color: 'var(--bento-warm)', marginLeft: 6 }}>{formatDateLabel(m.lastDate, todayKey())}</span>
                     )}
                   </div>
-                  <div style={{ fontSize: 10.5, color: 'var(--bento-faint)', marginTop: 2 }}>prom {m.avg != null ? m.fmt(m.avg) : '—'} · {m.count}d</div>
-                  <div style={{ marginTop: 8 }}><MetricSparkline points={m.spark} color={m.color} /></div>
+                  <div style={{ fontSize: 10.5, color: 'var(--bento-faint)', marginTop: 2 }}>
+                    prom {m.avg != null ? m.fmt(m.avg) : '—'} · {m.count}d
+                    {m.key === 'sueno_horas' && (() => {
+                      const low = m.vals.filter((v) => v < SLEEP_ALERT_H).length;
+                      return low > 0 ? <span style={{ color: 'var(--bento-warm)', fontWeight: 600 }}> · {low}/{m.count} &lt;6h</span> : null;
+                    })()}
+                  </div>
+                  <div style={{ marginTop: 8 }}><MetricSparkline points={m.spark} color={m.color} refY={m.key === 'sueno_horas' ? SLEEP_ALERT_H : null} /></div>
                 </button>
               );
             })}
@@ -5768,8 +5787,8 @@ function HealthMetricDetail({ metric, series, onClose }) {
 
           {/* Gráfico grande */}
           <div className="bento-card" style={{ padding: '14px 16px' }}>
-            <MetricSparkline points={series.map((s, i) => ({ x: i, y: s[metric.key] }))} color={metric.color} height={90} />
-            <div style={{ fontSize: 10, color: 'var(--bento-faint)', marginTop: 6, textAlign: 'center' }}>Últimos 28 días {metric.unit ? `· ${metric.unit}` : ''}</div>
+            <MetricSparkline points={series.map((s, i) => ({ x: i, y: s[metric.key] }))} color={metric.color} height={90} refY={metric.key === 'sueno_horas' ? SLEEP_ALERT_H : null} />
+            <div style={{ fontSize: 10, color: 'var(--bento-faint)', marginTop: 6, textAlign: 'center' }}>Últimos 28 días {metric.unit ? `· ${metric.unit}` : ''}{metric.key === 'sueno_horas' ? ' · línea = umbral 6h' : ''}</div>
           </div>
 
           {/* Lista día por día */}
@@ -6385,18 +6404,24 @@ Reglas:
                           ? `${s.distanceM != null ? ` · ${(s.distanceM / 1000).toFixed(1)} km` : ''}${s.avgPowerW != null ? ` · ${s.avgPowerW} W` : ''}${s.minutes != null ? ` · ${s.minutes} min` : ''}`
                           : `${s.volumeKg ? ` · ${Math.round(s.volumeKg)} kg` : ''}${s.exercises.length ? ` · ${s.exercises.length} ej.` : ''}`}
                       </div>
-                      {(s.avgHr != null || s.maxHr != null || s.rpe != null || s.trainingLoad != null) && (
+                      {(s.avgHr != null || s.maxHr != null || s.rpe != null || s.trainingLoad != null || s.mets != null) && (
                         <div style={{ fontSize: 10.5, color: 'var(--bento-faint)', marginTop: 1 }}>
                           {[s.avgHr != null ? `❤️ ${Math.round(s.avgHr)} lpm` : null,
                             s.maxHr != null ? `máx ${Math.round(s.maxHr)}` : null,
                             s.rpe != null ? `RPE ${s.rpe}` : null,
                             s.trainingLoad != null ? `carga ${Math.round(s.trainingLoad)}` : null,
+                            s.mets != null ? `${s.mets.toFixed(1)} MET` : null,
                           ].filter(Boolean).join(' · ')}
                         </div>
                       )}
                       {s.hrZonePct && (
                         <div style={{ fontSize: 10.5, color: 'var(--bento-faint)', marginTop: 1 }}>
                           🫀 zonas FC {s.hrZonePct.split('/').map((p, i) => `Z${i + 1} ${p}%`).join(' · ')}
+                        </div>
+                      )}
+                      {s.hrSeries && s.hrSeries.length >= 2 && (
+                        <div style={{ marginTop: 3 }} title="Curva de FC intra-sesión">
+                          <MetricSparkline points={s.hrSeries.map((p, i) => ({ x: i, y: p.bpm }))} color="var(--bento-pos)" height={28} />
                         </div>
                       )}
                     </div>

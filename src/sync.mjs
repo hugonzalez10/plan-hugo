@@ -3,7 +3,7 @@
 // paso más delicado: mergeBridge concentra los bugs históricos (doble-conteo, divergencia,
 // dedup, fechas) y está cubierto por bridge-merge.test. La orquestación con hooks
 // (useGistAutoSync, runBridgeSync, snap/pushPayload) se queda en app.jsx; acá va lo reusable.
-import { todayKey } from './dates.mjs';
+import { todayKey, sanitizeSleepHours } from './dates.mjs';
 import { normalizeName, getDeviceId } from './util.mjs';
 import {
   extraPlanSlot, resolveColacion, computeDayTotals, chatMealSig, sameWindow, dedupeDayExtras,
@@ -490,7 +490,24 @@ export function mergeBridge(state, rawBridge) {
     if (w.id == null || removedBridgeIds.has(w.id)) continue;
     const d = ensureDay(bridgeDateKey(w));
     // No se corta por importedIds (ver meals): reimporta si falta localmente.
-    if (d.exercise.some((x) => x.id === w.id)) { importedIds.add(w.id); continue; }
+    const localIdx = d.exercise.findIndex((x) => x.id === w.id);
+    if (localIdx >= 0) {
+      // Ya importado por id. Reconcilia SOLO enriquecimiento: rellena los campos que la sesión
+      // local aún NO tiene (p.ej. mets/hrSeries/hrZones que el import de Takeout añade después
+      // por w=update sobre una sesión simple ya vista). No pisa detalle local existente. Sin
+      // esto, el skip-por-id ignoraba el enriquecimiento y nunca llegaba a la app.
+      const cur = d.exercise[localIdx];
+      const patch = {};
+      for (const f of WORKOUT_EXTRA_FIELDS) {
+        if (w[f] == null || cur[f] != null) continue;
+        patch[f] = (f === 'type' || f === 'activity' || f === 'hrZonePct') ? w[f] : num(w[f]);
+      }
+      if (!(Array.isArray(cur.exercises) && cur.exercises.length) && Array.isArray(w.exercises) && w.exercises.length) patch.exercises = w.exercises;
+      if (!(cur.hrZones && Object.keys(cur.hrZones).length) && w.hrZones && typeof w.hrZones === 'object' && Object.keys(w.hrZones).length) patch.hrZones = w.hrZones;
+      if (!(Array.isArray(cur.hrSeries) && cur.hrSeries.length) && Array.isArray(w.hrSeries) && w.hrSeries.length) patch.hrSeries = w.hrSeries;
+      if (Object.keys(patch).length) d.exercise = d.exercise.map((x, i) => (i === localIdx ? { ...x, ...patch } : x));
+      importedIds.add(w.id); continue;
+    }
     // Dedup por contenido: mismo nombre normalizado DENTRO del día = mismo entreno. NO se exige
     // ventana de ±5 min: el eco del empuje app→bridge vuelve con id E HORA distintos (el servidor
     // sella otro ts), así que `sameWindow` lo dejaba pasar y duplicaba la sesión. Dentro de un día
@@ -507,6 +524,7 @@ export function mergeBridge(state, rawBridge) {
     }
     if (Array.isArray(w.exercises) && w.exercises.length) ex.exercises = w.exercises;
     if (w.hrZones && typeof w.hrZones === 'object' && Object.keys(w.hrZones).length) ex.hrZones = w.hrZones;
+    if (Array.isArray(w.hrSeries) && w.hrSeries.length) ex.hrSeries = w.hrSeries; // curva FC intra-sesión
     d.exercise.push(ex);
     importedIds.add(w.id); added.workouts++;
   }
@@ -649,6 +667,9 @@ export function mergeBridge(state, rawBridge) {
         const v = Number(h[k]);
         if (!Number.isFinite(v)) continue;
         if (POSITIVE_ONLY.has(k) && v <= 0) continue;
+        // Sueño >14h es doble conteo (In Bed+Asleep solapados del atajo, o Fit multi-fuente): se
+        // descarta para no plantar "15h" ni pisar un dato bueno previo del Watch. Idempotente.
+        if (k === 'sleepHours' && sanitizeSleepHours(v) == null) continue;
         next[k] = v;
       }
       if (h.ts != null) next.healthTs = Number(h.ts);

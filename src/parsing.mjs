@@ -265,7 +265,9 @@ export function parseHeartWatchDaily(text) {
     }
     if (sleepCol >= 0) {
       const mins = _hmsToMin(cells[sleepCol]);
-      if (mins != null && mins > 0) { h.sleepHours = +(mins / 60).toFixed(2); any = true; }
+      // >14h es doble conteo (muestras solapadas), no fisiológico → se descarta. parsing.mjs es
+      // autocontenido, así que el techo va inline (mismo valor que MAX_PLAUSIBLE_SLEEP_H en dates.mjs).
+      if (mins != null && mins > 0 && mins <= 14 * 60) { h.sleepHours = +(mins / 60).toFixed(2); any = true; }
     }
     if (any) days.push(h);
   }
