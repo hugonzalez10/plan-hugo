@@ -715,6 +715,7 @@ export function routineWindowWeeks(routine, refDate = todayKey()) {
 // ejercicio de la rutina (no se reparte). `others` = lo que no calza con la rutina. Puro, sin React.
 export function computeRoutineExerciseProgress(stats, routine, refDate = todayKey()) {
   const today = refDate || todayKey();
+  const rStart = routineStartKey(routine); // acota la detección de meseta a la rutina vigente
   const byExercise = Array.isArray(stats?.byExercise) ? stats.byExercise : [];
   const reg = byExercise.map((x) => ({ x, used: false }));
   // Peso de TRABAJO primero (lo que muestra el historial); el 1RM estimado de Speediance es
@@ -763,14 +764,17 @@ export function computeRoutineExerciseProgress(stats, routine, refDate = todayKe
     const lastDate = entries.length ? entries[entries.length - 1].date : null;
     const daysSince = lastDate ? daysBetween(lastDate, today) : null;
     const trainedThisWeek = daysSince != null && daysSince <= 7;
-    // Meseta: el máximo de las últimas 3 apariciones no supera el de las previas. Necesita ≥5
-    // apariciones Y ≥21 días de historial: con una rutina recién cargada casi todo ejercicio
-    // tiene 4 apariciones sin subir peso todavía, y marcar 12/16 "en meseta" no discrimina nada.
+    // Meseta: el máximo de las últimas 3 apariciones no supera el de las previas. Se evalúa
+    // SOLO dentro de la rutina vigente (entries desde updatedAt; sin updatedAt, historial
+    // completo) y necesita ≥5 apariciones Y ≥21 días de span: compararse contra récords de la
+    // rutina anterior marcaba 12/16 "en meseta" a las 2 semanas, lo que no discrimina nada.
     let stagnant = false;
-    const spanDays = entries.length >= 2 ? daysBetween(entries[0].date, entries[entries.length - 1].date) : 0;
-    if (vals.length >= 5 && spanDays >= 21) {
-      const maxRecent = Math.max(...vals.slice(-3));
-      const maxEarlier = Math.max(...vals.slice(0, -3));
+    const rEntries = rStart ? entries.filter((e) => e.date >= rStart) : entries;
+    const rVals = rEntries.map(valOf).filter((v) => v != null);
+    const spanDays = rEntries.length >= 2 ? daysBetween(rEntries[0].date, rEntries[rEntries.length - 1].date) : 0;
+    if (rVals.length >= 5 && spanDays >= 21) {
+      const maxRecent = Math.max(...rVals.slice(-3));
+      const maxEarlier = Math.max(...rVals.slice(0, -3));
       stagnant = maxRecent <= maxEarlier;
     }
     // Sobrecarga progresiva: sobre el peso (o 1RM) — si la última sesión igualó/superó la previa,
