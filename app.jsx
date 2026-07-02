@@ -6354,22 +6354,18 @@ Reglas:
             </p>
           )}
 
-          {/* Aviso de mesetas · ejercicios de la rutina sin progreso reciente */}
+          {/* Aviso de mesetas · línea compacta (el detalle vive en el badge "meseta" de Récords).
+              Con el criterio endurecido (≥5 apariciones y ≥21 días) esto rara vez lista más de 2-3. */}
           {routineProg.hasRoutine && (() => {
             const stuck = routineProg.routine.filter((x) => x.data && x.stagnant);
             if (!stuck.length) return null;
+            const names = stuck.slice(0, 3).map((x) => x.name.replace(/\s*\(.*$/, ''));
             return (
-              <div className="bento-card" style={{ borderLeft: '3px solid var(--bento-warm)' }}>
-                <div className="bento-label" style={{ marginBottom: 8, color: 'var(--bento-warm)' }}>⚠️ Posible meseta · {stuck.length} ejercicio{stuck.length > 1 ? 's' : ''}</div>
-                <div className="flex flex-col gap-2">
-                  {stuck.map((x) => (
-                    <div key={x.slug} className="flex items-center justify-between gap-2" style={{ fontSize: 12 }}>
-                      <span className="flex items-center gap-1.5 min-w-0"><span className="shrink-0">{emojiForExercise(x.name)}</span><span className="truncate">{x.name}</span></span>
-                      <span className="bento-mono shrink-0" style={{ color: 'var(--bento-faint)', fontSize: 11 }}>{x.current != null ? `${x.current} kg` : ''}{x.daysSince != null ? ` · hace ${x.daysSince}d` : ''}</span>
-                    </div>
-                  ))}
-                </div>
-                <p style={{ fontSize: 11, color: 'var(--bento-muted)', marginTop: 10 }}>Sin récord en las últimas sesiones. Considera un deload, subir reps antes que peso, o cambiar la variante.</p>
+              <div className="bento-card" style={{ borderLeft: '3px solid var(--bento-warm)', padding: '12px 16px' }}>
+                <p style={{ fontSize: 12, color: 'var(--bento-muted)', margin: 0 }}>
+                  <span style={{ color: 'var(--bento-warm)', fontWeight: 600 }}>⚠️ Posible meseta ({stuck.length}):</span>{' '}
+                  {names.join(', ')}{stuck.length > 3 ? ` y ${stuck.length - 3} más` : ''} — detalle en Récords, considera deload o subir reps antes que peso.
+                </p>
               </div>
             );
           })()}

@@ -763,9 +763,12 @@ export function computeRoutineExerciseProgress(stats, routine, refDate = todayKe
     const lastDate = entries.length ? entries[entries.length - 1].date : null;
     const daysSince = lastDate ? daysBetween(lastDate, today) : null;
     const trainedThisWeek = daysSince != null && daysSince <= 7;
-    // Meseta: el máximo de las últimas 3 apariciones no supera el de las previas (necesita ≥4).
+    // Meseta: el máximo de las últimas 3 apariciones no supera el de las previas. Necesita ≥5
+    // apariciones Y ≥21 días de historial: con una rutina recién cargada casi todo ejercicio
+    // tiene 4 apariciones sin subir peso todavía, y marcar 12/16 "en meseta" no discrimina nada.
     let stagnant = false;
-    if (vals.length >= 4) {
+    const spanDays = entries.length >= 2 ? daysBetween(entries[0].date, entries[entries.length - 1].date) : 0;
+    if (vals.length >= 5 && spanDays >= 21) {
       const maxRecent = Math.max(...vals.slice(-3));
       const maxEarlier = Math.max(...vals.slice(0, -3));
       stagnant = maxRecent <= maxEarlier;
