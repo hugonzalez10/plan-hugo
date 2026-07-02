@@ -4,7 +4,7 @@
 // métricas sobre computeDayTotals (meals.mjs) + la math de peso (energy.mjs) + la fórmula
 // (nutrition.mjs). esbuild la reinjecta en el bundle; los tests (adaptive-tdee, trend-weight,
 // evolution) la importan directo.
-import { todayKey, daysBetween, shiftDate } from './dates.mjs';
+import { todayKey, daysBetween, shiftDate, getRuleWeekKeys } from './dates.mjs';
 import { weightSeries, trendWeightAt, linRegSlopePerDay, WEEKLY_LOSS } from './energy.mjs';
 import { calcTargets, KCAL_PER_KG_FAT, DEFAULT_TARGETS } from './nutrition.mjs';
 import { computeDayTotals, extraPlanSlot } from './meals.mjs';
@@ -453,9 +453,14 @@ export function interpretTrend(data, targets) {
 // Stats locales (sin IA) para la pestaña Ejercicios. Recorre el histórico de días y agrega
 // cada entrada de day.exercise[] como una "sesión". Calcula frecuencia, días entrenados,
 // tendencia semanal, volumen por grupo muscular (sets como proxy) y top de ejercicios.
-export function computeExerciseStats(days, refDate, weeks = 8) {
+export function computeExerciseStats(days, refDate, weeks = 8, opts = {}) {
   const today = refDate || todayKey();
-  const start = shiftDate(today, -(weeks * 7 - 1));
+  // opts.startKey (opcional) recorta la ventana al inicio de la rutina vigente: weeks redondea a
+  // semanas enteras y arrancaría hasta 6 días ANTES de updatedAt, contaminando las tasas con
+  // sesiones pre-rutina. effWeeks es el denominador exacto (fraccional) para las frecuencias.
+  const windowStart = shiftDate(today, -(weeks * 7 - 1));
+  const start = (opts.startKey && opts.startKey > windowStart) ? opts.startKey : windowStart;
+  const effWeeks = opts.startKey ? Math.max(0.5, (daysBetween(start, today) + 1) / 7) : weeks;
   const sessions = [];
   for (const [dk, day] of Object.entries(days || {})) {
     if (dk > today) continue;
@@ -502,12 +507,12 @@ export function computeExerciseStats(days, refDate, weeks = 8) {
   const daysSinceLast = lastDate ? daysBetween(lastDate, today) : null;
   const ym = today.slice(0, 7);
   const sessionsThisMonth = new Set(sessions.filter((s) => s.date.slice(0, 7) === ym).map((s) => s.date)).size;
-  const freqPerWeek = trainedDatesWindow.size / weeks;
+  const freqPerWeek = trainedDatesWindow.size / effWeeks;
   // Frecuencia separada por tipo (días distintos con fuerza / con cardio, en la ventana)
   const strengthDatesWindow = new Set(inWindow.filter((s) => s.type === 'strength').map((s) => s.date));
   const cardioDatesWindow = new Set(inWindow.filter((s) => s.type === 'cardio').map((s) => s.date));
-  const freqStrengthPerWeek = strengthDatesWindow.size / weeks;
-  const freqCardioPerWeek = cardioDatesWindow.size / weeks;
+  const freqStrengthPerWeek = strengthDatesWindow.size / effWeeks;
+  const freqCardioPerWeek = cardioDatesWindow.size / effWeeks;
   const cardioSessions = sessions.filter((s) => s.type === 'cardio').length;
   const strengthSessions = sessions.filter((s) => s.type === 'strength').length;
 
@@ -516,7 +521,7 @@ export function computeExerciseStats(days, refDate, weeks = 8) {
   for (let i = weeks - 1; i >= 0; i--) {
     const wEnd = shiftDate(today, -(i * 7));
     const wStart = shiftDate(wEnd, -6);
-    const ws = sessions.filter((s) => s.date >= wStart && s.date <= wEnd);
+    const ws = sessions.filter((s) => s.date >= wStart && s.date <= wEnd && s.date >= start);
     weekBuckets.push({
       label: wStart.slice(5),
       sessions: new Set(ws.map((s) => s.date)).size,
@@ -627,6 +632,8 @@ export function computeExerciseStats(days, refDate, weeks = 8) {
     detailSessions,
     byExercise,
     weeks,
+    windowStart: start,
+    effWeeks,
     sessions,
   };
 }
@@ -667,6 +674,40 @@ const ROUTINE_EX_ALIASES = {
 const _normEx = (s) => (s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
 const _canonEx = (s) => { let n = _normEx(s); for (const [a, b] of EX_SYNONYMS) n = n.split(a).join(b); return n; };
 
+// Matcher rutina↔registro para UN ejercicio de la rutina: devuelve una función que clasifica un
+// nombre registrado (Speediance, jerga libre) en 'exact' (slug / canónico / alias regex),
+// 'loose' (subconjunto de tokens canónicos en cualquier dirección) o null. Compartido por
+// computeRoutineExerciseProgress y computeRoutineDayAdherence para que ambos calcen igual.
+function _routineExMatcher(rslug, rname) {
+  const rc = _canonEx(rname).replace(/\s+/g, '-');
+  const pats = ROUTINE_EX_ALIASES[rslug] || [];
+  const rtoks = new Set(rc.split('-').filter(Boolean));
+  return (regName) => {
+    const slug = slugifyExercise(regName);
+    const cslug = _canonEx(regName).replace(/\s+/g, '-');
+    const n = _normEx(regName);
+    if (slug === rslug || cslug === rc || pats.some((p) => p.test(n))) return 'exact';
+    const t = new Set(cslug.split('-').filter(Boolean));
+    if (t.size && ([...rtoks].every((x) => t.has(x)) || [...t].every((x) => rtoks.has(x)))) return 'loose';
+    return null;
+  };
+}
+
+// Fecha (YYYY-MM-DD) en que se guardó/renovó la rutina vigente — única fuente del "desde"
+// (normalizeRoutine estampa updatedAt al confirmar). null si no hay rutina o el campo es basura.
+export function routineStartKey(routine) {
+  const k = String(routine?.updatedAt || '').slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(k) ? k : null;
+}
+
+// Semanas (enteras, techo) que lleva la rutina vigente, para pasarlas a computeExerciseStats.
+// Clamp [1..26] para que los charts por semana no exploten si la rutina envejece.
+export function routineWindowWeeks(routine, refDate = todayKey()) {
+  const start = routineStartKey(routine);
+  if (!start || start > refDate) return null;
+  return Math.min(26, Math.max(1, Math.ceil((daysBetween(start, refDate) + 1) / 7)));
+}
+
 // Cruza los récords/progresión (stats.byExercise, por nombre libre Speediance) con la rutina
 // vigente (routine.days[].exercises[]). Para CADA ejercicio de la rutina junta TODAS las apariciones
 // registradas que le corresponden (slug exacto → alias → sinónimo-canónico → subconjunto de tokens),
@@ -675,29 +716,19 @@ const _canonEx = (s) => { let n = _normEx(s); for (const [a, b] of EX_SYNONYMS) 
 export function computeRoutineExerciseProgress(stats, routine, refDate = todayKey()) {
   const today = refDate || todayKey();
   const byExercise = Array.isArray(stats?.byExercise) ? stats.byExercise : [];
-  const reg = byExercise.map((x) => ({
-    x, slug: slugifyExercise(x.name), cslug: _canonEx(x.name).replace(/\s+/g, '-'),
-    n: _normEx(x.name), used: false,
-  }));
+  const reg = byExercise.map((x) => ({ x, used: false }));
   // Peso de TRABAJO primero (lo que muestra el historial); el 1RM estimado de Speediance es
   // esporádico y mezclaría escalas en el Δ/sparkline. Cae a 1RM solo si no hay peso.
   const valOf = (e) => (e.weightKg ?? e.oneRepMaxKg ?? null);
 
   // Devuelve TODAS las entradas reg (no usadas) que corresponden a este ejercicio de la rutina,
-  // marcándolas como usadas. Prioriza alias/slug/sinónimo; cae a subconjunto de tokens canónicos.
+  // marcándolas como usadas. Prioriza alias/slug/sinónimo ('exact'); cae a subconjunto de
+  // tokens canónicos ('loose'). El predicado vive en _routineExMatcher (compartido).
   const matchesFor = (rslug, rname) => {
-    const rc = _canonEx(rname).replace(/\s+/g, '-');
-    const pats = ROUTINE_EX_ALIASES[rslug] || [];
+    const match = _routineExMatcher(rslug, rname);
     const pool = reg.filter((r) => !r.used);
-    let ms = pool.filter((r) => r.slug === rslug || r.cslug === rc || pats.some((p) => p.test(r.n)));
-    if (!ms.length) {
-      const rtoks = new Set(rc.split('-').filter(Boolean));
-      ms = pool.filter((r) => {
-        const t = new Set(r.cslug.split('-').filter(Boolean));
-        if (!t.size) return false;
-        return [...rtoks].every((x) => t.has(x)) || [...t].every((x) => rtoks.has(x));
-      });
-    }
+    let ms = pool.filter((r) => match(r.x.name) === 'exact');
+    if (!ms.length) ms = pool.filter((r) => match(r.x.name) === 'loose');
     ms.forEach((m) => { m.used = true; });
     return ms;
   };
@@ -784,6 +815,98 @@ export function computeRoutineExerciseProgress(stats, routine, refDate = todayKe
   const others = reg.filter((r) => !r.used).map((r) => r.x);
   const hasRoutine = routineExs.length > 0;
   return { hasRoutine, routine: routineExs, others };
+}
+
+// Adherencia por DÍA de rutina en la semana calendario (lunes-domingo). Asigna cada sesión
+// registrada de la semana a lo más a UN día de la rutina: las de cardio (o sin ejercicios) al
+// primer día cardio-only pendiente (p.ej. "Día 3 — Z2", exercises vacío); las de fuerza al día
+// cuyos ejercicios más calzan (matcher compartido con computeRoutineExerciseProgress). Un día
+// 'done' no re-captura (la sesión sobrante va a extraSessions); un día 'partial' puede ser
+// reemplazado por una sesión que calce mejor (la anterior pasa a extraSessions). Puro, sin React.
+export function computeRoutineDayAdherence(stats, routine, refDate = todayKey()) {
+  const rdays = Array.isArray(routine?.days) ? routine.days : [];
+  if (!rdays.length) {
+    return { hasRoutine: false, weekStart: null, weekEnd: null, days: [], extraSessions: [], doneCount: 0, totalDays: 0 };
+  }
+  const weekKeys = getRuleWeekKeys(refDate);
+  const wk = new Set(weekKeys);
+  const sessions = (stats?.sessions || [])
+    .filter((s) => wk.has(s.date) && s.date <= refDate)
+    .slice().sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0)); // cronológico
+
+  const dayStates = rdays.map((d) => {
+    const exs = Array.isArray(d?.exercises) ? d.exercises : [];
+    return {
+      id: d.id, label: d.label, isCardio: exs.length === 0, planned: exs.length || null,
+      matchers: exs.map((e) => {
+        const slug = e.slug || slugifyExercise(e.name);
+        return { slug, match: _routineExMatcher(slug, e.name) };
+      }),
+      status: 'pending', date: null, sessionName: null, matched: 0, matchedSlugs: [],
+    };
+  });
+
+  const extraSessions = [];
+  const asExtra = (s) => extraSessions.push({ date: s.date, name: s.name, type: s.type });
+  for (const s of sessions) {
+    const sexs = Array.isArray(s.exercises) ? s.exercises : [];
+    if (s.type === 'cardio' || !sexs.length) {
+      const target = dayStates.find((d) => d.isCardio && d.status === 'pending');
+      if (target) { target.status = 'done'; target.date = s.date; target.sessionName = s.name; }
+      else asExtra(s);
+      continue;
+    }
+    // Fuerza: puntuar contra cada día con ejercicios que no esté 'done'. matched cuenta slugs de
+    // rutina únicos calzados (no apariciones). Empate → gana el primero en orden de rutina.
+    let best = null, bestMatched = 0, bestSlugs = [];
+    for (const d of dayStates) {
+      if (d.isCardio || d.status === 'done') continue;
+      const hit = new Set();
+      for (const m of d.matchers) {
+        if (sexs.some((e) => m.match(e.name))) hit.add(m.slug);
+      }
+      if (hit.size > bestMatched) { best = d; bestMatched = hit.size; bestSlugs = [...hit]; }
+    }
+    const assignable = best && (bestMatched >= 2 || (sexs.length === 1 && bestMatched === 1));
+    if (!assignable) { asExtra(s); continue; }
+    if (best.status === 'partial') {
+      if (bestMatched <= best.matched) { asExtra(s); continue; }
+      extraSessions.push({ date: best.date, name: best.sessionName, type: 'strength' }); // desplazada
+    }
+    best.matched = bestMatched;
+    best.matchedSlugs = bestSlugs;
+    best.date = s.date;
+    best.sessionName = s.name;
+    best.status = bestMatched >= Math.ceil((best.planned || 0) * 0.6) ? 'done' : 'partial';
+  }
+
+  return {
+    hasRoutine: true,
+    weekStart: weekKeys[0],
+    weekEnd: weekKeys[6],
+    days: dayStates.map(({ matchers, ...rest }) => rest),
+    extraSessions,
+    doneCount: dayStates.filter((d) => d.status === 'done').length,
+    totalDays: dayStates.length,
+  };
+}
+
+// Agregado breve de lo ANTERIOR a la rutina vigente — contexto de un bloque para el prompt de la
+// evaluación (no se manda el JSON completo de esas sesiones). null si no hay registros previos.
+export function computePreRoutineSummary(stats, startKey) {
+  const pre = (stats?.sessions || []).filter((s) => s.date < startKey);
+  if (!pre.length) return null;
+  const dates = [...new Set(pre.map((s) => s.date))].sort();
+  const weeksSpan = Math.max(1, daysBetween(dates[0], startKey) / 7);
+  return {
+    sessions: pre.length,
+    strength: pre.filter((s) => s.type === 'strength').length,
+    cardio: pre.filter((s) => s.type === 'cardio').length,
+    firstDate: dates[0],
+    lastDate: dates[dates.length - 1],
+    freqPerWeek: Number((dates.length / weeksSpan).toFixed(1)),
+    avgWeeklyTonnageKg: Math.round(pre.reduce((a, s) => a + (s.volumeKg || 0), 0) / weeksSpan),
+  };
 }
 
 export function computeStreak(days, snackBank, proteinBank, targets, refDate, dessertBank, customAntojoItems) {

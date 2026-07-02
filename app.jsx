@@ -29,6 +29,7 @@ import {
   computeTrendAnalysis, computeEvolution, interpretTrend, TREND_MIN_DAYS, TREND_WINDOW_DAYS,
   computeExerciseStats, computeRoutineExerciseProgress, computeStreak, computeComparison, computeRecents,
   computeProactiveInsights, computeCompositionFocus,
+  routineStartKey, routineWindowWeeks, computeRoutineDayAdherence, computePreRoutineSummary,
 } from './src/analytics.mjs';
 import { uuid, normalizeName, getDeviceId } from './src/util.mjs';
 import {
@@ -5859,13 +5860,43 @@ function ExercisesView({ state, setState, targets }) {
   const [csvFrom, setCsvFrom] = useState('');           // '' = sin límite inferior (todo)
   const [csvTo, setCsvTo] = useState(todayKey());
 
-  const stats = useMemo(() => computeExerciseStats(state.days || {}, todayKey(), 8), [state.days]);
+  // Ventana de las stats: 8 semanas fijas o "desde la rutina vigente" (pref de UI local,
+  // patrón ph-home-weight-window). Default: desde la rutina si existe.
+  const routineStart = routineStartKey(state.routine);
+  const [exWinPref, setExWinPref] = useState(() => {
+    try { const v = localStorage.getItem('ph-ex-window'); return v === '8w' || v === 'routine' ? v : null; } catch { return null; }
+  });
+  const winMode = (exWinPref === 'routine' && !routineStart) ? '8w' : (exWinPref || (routineStart ? 'routine' : '8w'));
+  const setWinMode = (m) => { setExWinPref(m); try { localStorage.setItem('ph-ex-window', m); } catch {} };
+
+  const stats = useMemo(() => (winMode === 'routine' && routineStart)
+    ? computeExerciseStats(state.days || {}, todayKey(), routineWindowWeeks(state.routine, todayKey()), { startKey: routineStart })
+    : computeExerciseStats(state.days || {}, todayKey(), 8),
+    [state.days, winMode, routineStart, state.routine]);
+  const winShort = winMode === 'routine' && routineStart
+    ? new Date(routineStart + 'T12:00:00').toLocaleDateString('es-CL', { day: 'numeric', month: 'short' })
+    : null;
+  const winLabel = winShort ? `desde rutina · ${winShort}` : `últimas ${stats.weeks} sem`;
+  const winWeeks = stats.effWeeks ?? stats.weeks; // divisor exacto (fraccional con rutina)
 
   // Récords y progresión acotados a la rutina vigente (cruce por slug; "otros" = lo no-rutina).
+  // Usa stats.byExercise, que es histórico completo — no depende del selector de ventana.
   const routineProg = useMemo(() => computeRoutineExerciseProgress(stats, state.routine, todayKey()), [stats, state.routine]);
 
+  // Adherencia por día de rutina (semana calendario lun-dom, distinta de la ventana móvil 7d
+  // de los chips por ejercicio de routineProg — son métricas distintas a propósito).
+  const dayAdh = useMemo(() => computeRoutineDayAdherence(stats, state.routine, todayKey()), [stats, state.routine]);
+
+  // Historial que ve la evaluación IA: acotado a la rutina vigente si hay ≥3 sesiones desde que
+  // se cargó; si no (o sin rutina), conducta clásica de 56 días. El shape de cada item NO cambia
+  // (el export MD/PDF y el hashSig dependen de él).
+  const sinceRoutineCount = useMemo(
+    () => (routineStart ? (stats.sessions || []).filter((s) => s.date >= routineStart).length : 0),
+    [stats.sessions, routineStart]);
+  const routineScoped = !!routineStart && sinceRoutineCount >= 3;
+
   const trainingHistory = useMemo(() => {
-    const start = shiftDate(todayKey(), -55);
+    const start = routineScoped ? routineStart : shiftDate(todayKey(), -55);
     return (stats.sessions || [])
       .filter((s) => s.date >= start)
       .map((s) => {
@@ -5885,9 +5916,21 @@ function ExercisesView({ state, setState, targets }) {
           })),
         };
       });
-  }, [stats.sessions]);
+  }, [stats.sessions, routineScoped, routineStart]);
 
-  const sig = useMemo(() => hashSig(trainingHistory), [trainingHistory]);
+  const nFuerza = useMemo(() => trainingHistory.filter((s) => s.tipo === 'strength').length, [trainingHistory]);
+  const nCardio = useMemo(() => trainingHistory.filter((s) => s.tipo === 'cardio').length, [trainingHistory]);
+  const preSummary = useMemo(
+    () => (routineScoped ? computePreRoutineSummary(stats, routineStart) : null),
+    [stats, routineScoped, routineStart]);
+
+  // El sig incluye la rutina (labels+slugs+updatedAt) y el modo de ventana: renovar la rutina o
+  // cambiar la ventana invalida la evaluación cacheada sola.
+  const routineSig = useMemo(() => hashSig(state.routine ? {
+    u: state.routine.updatedAt,
+    d: (state.routine.days || []).map((d) => ({ l: d.label, e: (d.exercises || []).map((x) => x.slug) })),
+  } : null), [state.routine]);
+  const sig = useMemo(() => hashSig({ h: trainingHistory, r: routineSig, w: winMode }), [trainingHistory, routineSig, winMode]);
   const isStale = cached && cached.sig !== sig;
   const cacheAgeMs = cached ? (Date.now() - new Date(cached.generatedAt).getTime()) : Infinity;
   const cacheOld = cacheAgeMs > 7 * 86400000;
@@ -5960,8 +6003,12 @@ function ExercisesView({ state, setState, targets }) {
     const gen = cached?.generatedAt
       ? new Date(cached.generatedAt).toLocaleString('es-CL', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
       : '';
+    const ctx = cached?.context;
     secs.push({ heading: 'Plan Hugo — Evaluación de rutina', lines: [
       gen ? `Generado: ${gen}` : null,
+      ctx ? (ctx.scope === 'routine'
+        ? `Alcance: rutina vigente${ctx.titulo ? ` "${ctx.titulo}"` : ''} · desde ${ctx.desde} · ${ctx.sesiones} sesiones (${ctx.fuerza} fuerza / ${ctx.cardio} cardio)`
+        : `Alcance: historial completo (56 días) · ${ctx.sesiones} sesiones (${ctx.fuerza} fuerza / ${ctx.cardio} cardio)`) : null,
       r.confidence ? `Confianza: ${r.confidence}` : null,
     ].filter(Boolean) });
     if (r.resumen || r.consistencia) secs.push({ heading: 'Resumen', lines: [r.resumen, r.consistencia ? `📅 ${r.consistencia}` : null].filter(Boolean) });
@@ -5972,10 +6019,11 @@ function ExercisesView({ state, setState, targets }) {
       secs.push({ heading: '🔧 Qué mejorar', lines });
     }
     if (r.desbalances) secs.push({ heading: '⚖️ Desbalances', lines: [r.desbalances] });
+    if (r.adherencia) secs.push({ heading: '📋 Adherencia a la rutina', lines: [r.adherencia] });
     if (r.progresion) secs.push({ heading: '📈 Progresión', lines: [r.progresion] });
     if (r.nota_critica) secs.push({ heading: '🎯 Nota crítica', lines: [r.nota_critica] });
     secs.push({ heading: '— Datos de respaldo —', lines: [
-      `Ventana: últimas ${stats.weeks} semanas`,
+      `Ventana: ${winLabel}`,
       `Frecuencia: ${stats.freqPerWeek.toFixed(1)}/sem (fuerza ${stats.freqStrengthPerWeek.toFixed(1)} + cardio ${stats.freqCardioPerWeek.toFixed(1)})`,
       `Sesiones: ${stats.totalSessions} totales · ${stats.sessionsThisMonth} este mes · última hace ${stats.daysSinceLast ?? '?'} días`,
     ] });
@@ -6031,10 +6079,29 @@ function ExercisesView({ state, setState, targets }) {
     if (stats.totalSessions < 3) { setError(`Necesitas al menos 3 sesiones registradas. Tienes ${stats.totalSessions}.`); return; }
     setLoading(true); setError(null);
     try {
+      // Rutina compacta para el prompt: sin warmup/ramp/anchor/notas (tokens acotados);
+      // la nota del día solo en días cardio-only (ahí ES el contenido, ej. "Z2 45 min").
+      const routineForPrompt = routineStart ? (state.routine.days || []).map((d) => ({
+        dia: d.label, duracion_min: d.durationMin ?? undefined,
+        nota: (d.exercises || []).length ? undefined : (d.note ?? undefined),
+        ejercicios: (d.exercises || []).map((e) => ({
+          nombre: e.name, series_reps: e.seriesReps ?? undefined,
+          peso_inicio: e.pesoInicio ?? undefined, descanso: e.descanso ?? undefined,
+        })),
+      })) : null;
+      const routineBlock = !routineForPrompt ? '' : `
+RUTINA VIGENTE "${state.routine.title}" (cargada el ${routineStart}):
+${JSON.stringify(routineForPrompt, null, 1)}
+${routineScoped ? `
+El HISTORIAL de abajo cubre SOLO las sesiones desde que empezó esta rutina (${trainingHistory.length}: ${nFuerza} fuerza / ${nCardio} cardio). Evalúa ADHERENCIA y PROGRESIÓN contra la RUTINA VIGENTE, día por día: ¿está cumpliendo cada día planificado (ejercicios, series×reps, frecuencia semanal)? ¿los pesos progresan respecto a peso_inicio? OJO: los nombres registrados vienen de Speediance en jerga traducida ("Squat con barra", "fila", "lat pulldown") y difieren de los de la rutina; trata movimientos equivalentes como el MISMO ejercicio, no critiques "falta de repetición" por diferencias de nombre.
+
+CONTEXTO PRE-RUTINA (solo referencia, NO lo evalúes en detalle): ${preSummary ? `${preSummary.sessions} sesiones (${preSummary.strength} fuerza / ${preSummary.cardio} cardio) entre ${preSummary.firstDate} y ${preSummary.lastDate}, ${preSummary.freqPerWeek}/sem, tonelaje medio ${preSummary.avgWeeklyTonnageKg} kg/sem.` : 'sin registros previos.'}` : `
+La rutina se cargó el ${routineStart} y hay solo ${sinceRoutineCount} sesiones desde entonces, así que el historial incluye sesiones ANTERIORES a la rutina (fecha < ${routineStart}). Distingue ambas etapas: evalúa adherencia a la rutina solo con las posteriores y baja la confidence si son pocas.`}
+`;
       const prompt = `Eres un entrenador de fuerza chileno evaluando el entrenamiento de Hugo (geriatra de 36 años en plan de pérdida de peso). USA TUTEO CHILENO. Sé directo, honesto y crítico — no adules. Usa números reales del historial.
 
-FRECUENCIA: ${stats.freqPerWeek.toFixed(1)} sesiones/semana (últimas ${stats.weeks} semanas), ${stats.totalSessions} sesiones totales registradas, última hace ${stats.daysSinceLast ?? '?'} días.
-
+FRECUENCIA: ${stats.freqPerWeek.toFixed(1)} sesiones/semana (${winLabel}), ${stats.totalSessions} sesiones totales registradas, última hace ${stats.daysSinceLast ?? '?'} días.
+${routineBlock}
 HISTORIAL (sesiones, recientes primero):
 ${JSON.stringify(trainingHistory, null, 2)}
 
@@ -6051,7 +6118,8 @@ Devuelve SOLO JSON, sin markdown:
   "seguir": ["cosas que está haciendo bien y debe mantener"],
   "mejorar": [ { "que": "qué cambiar", "porque": "por qué importa", "como": "cómo hacerlo, concreto" } ],
   "desbalances": "grupos sobre/subtrabajados con números (o 'sin datos suficientes' si no hay desglose por ejercicio)",
-  "progresion": "¿está progresando? evidencia",
+  "progresion": "¿está progresando? evidencia",${routineForPrompt ? `
+  "adherencia": "cumplimiento de los días de la rutina vigente, con números",` : ''}
   "nota_critica": "evaluación honesta y directa, sin adular",
   "confidence": "alta|media|baja"
 }
@@ -6064,7 +6132,16 @@ Reglas:
       const parsed = parseJsonLoose(text);
       if (!parsed?.resumen && !parsed?.mejorar) { setError('No se pudo parsear la respuesta.'); return; }
       setResponse(parsed);
-      setState((prev) => ({ ...prev, aiCache: { ...(prev.aiCache || {}), exercise: { sig, response: parsed, generatedAt: new Date().toISOString() } } }));
+      setState((prev) => ({ ...prev, aiCache: { ...(prev.aiCache || {}), exercise: {
+        sig, response: parsed, generatedAt: new Date().toISOString(),
+        // Contexto de generación: qué dataset vio Claude (se muestra en la card y el export).
+        context: {
+          scope: routineScoped ? 'routine' : 'all',
+          titulo: state.routine?.title || null,
+          desde: routineScoped ? routineStart : null,
+          sesiones: trainingHistory.length, fuerza: nFuerza, cardio: nCardio,
+        },
+      } } }));
     } catch (err) {
       setError(err.message || 'Error al consultar Claude');
     } finally { setLoading(false); }
@@ -6113,6 +6190,22 @@ Reglas:
         </div>
       ) : (
         <>
+          {/* Ventana de las stats: 8 sem fijas o desde la rutina vigente (mini select, patrón Peso) */}
+          <div className="flex items-center justify-between px-1">
+            <div className="bento-label">Estadísticas · {winLabel}</div>
+            {routineStart && (
+              <select
+                value={winMode}
+                onChange={(e) => setWinMode(e.target.value)}
+                aria-label="Ventana de las estadísticas de ejercicio"
+                className="bento-mono"
+                style={{ fontSize: 10, lineHeight: 1.4, color: 'var(--bento-muted)', background: 'var(--bento-surface)', border: '1px solid var(--bento-hairline)', borderRadius: 6, padding: '1px 4px', cursor: 'pointer', appearance: 'none', WebkitAppearance: 'none' }}>
+                <option value="routine">Desde rutina ({winShort})</option>
+                <option value="8w">8 sem</option>
+              </select>
+            )}
+          </div>
+
           {/* Hero · 4 stats */}
           <div className="bento-grid4">
             <div className="bento-card" style={{ padding: '16px 18px' }}>
@@ -6123,7 +6216,7 @@ Reglas:
               <div style={{ fontSize: 11, color: 'var(--bento-faint)', marginTop: 4 }}>
                 {stats.cardioSessions > 0
                   ? `🏋️ ${stats.freqStrengthPerWeek.toFixed(1)} · 🚴 ${stats.freqCardioPerWeek.toFixed(1)} /sem`
-                  : `últimas ${stats.weeks} sem`}
+                  : winLabel}
               </div>
             </div>
             <div className="bento-card" style={{ padding: '16px 18px' }}>
@@ -6199,7 +6292,7 @@ Reglas:
                 )}
               </div>
               <div className="bento-card">
-                <div className="bento-label" style={{ marginBottom: 16 }}>Esfuerzo medio · últimas {stats.weeks} sem</div>
+                <div className="bento-label" style={{ marginBottom: 16 }}>Esfuerzo medio · {winLabel}</div>
                 {(stats.effort.avgRpe != null || stats.effort.avgHr != null) ? (
                   <div className="grid grid-cols-2 gap-3">
                     <div>
@@ -6237,14 +6330,14 @@ Reglas:
           {/* Volumen por grupo muscular */}
           {stats.muscleVolume.length > 0 && (
             <div className="bento-card">
-              <div className="bento-label" style={{ marginBottom: 16 }}>Volumen por grupo muscular · series/sem ({stats.weeks} sem)</div>
+              <div className="bento-label" style={{ marginBottom: 16 }}>Volumen por grupo muscular · series/sem ({winLabel})</div>
               <div className="flex flex-col gap-3">
                 {stats.muscleVolume.map((m) => {
-                  const perWeek = m.sets / stats.weeks;
+                  const perWeek = m.sets / winWeeks;
                   return (
                   <div key={m.muscle} className="grid items-center gap-3" style={{ gridTemplateColumns: '84px 1fr 44px' }}>
                     <div className="capitalize" style={{ fontSize: 12, color: 'var(--bento-muted)' }}>{m.muscle}</div>
-                    <div style={{ height: 6, borderRadius: 99, background: 'var(--bento-surface)', overflow: 'hidden' }} title={`${m.sets} series en ${stats.weeks} sem`}>
+                    <div style={{ height: 6, borderRadius: 99, background: 'var(--bento-surface)', overflow: 'hidden' }} title={`${m.sets} series (${winLabel})`}>
                       <div style={{ height: '100%', borderRadius: 99, width: `${(m.sets / maxMuscle) * 100}%`, background: muscleColorVar(m.muscle) }} />
                     </div>
                     <div className="bento-mono" style={{ fontSize: 12, textAlign: 'right', fontWeight: 600 }}>{perWeek.toFixed(1)}</div>
@@ -6281,33 +6374,66 @@ Reglas:
             );
           })()}
 
-          {/* Adherencia a la rutina · esta semana */}
-          {routineProg.hasRoutine && (() => {
-            const r = routineProg.routine;
-            const done = r.filter((x) => x.trainedThisWeek).length;
+          {/* Adherencia a la rutina · esta semana (por DÍA de rutina, semana calendario lun-dom).
+              Los chips por ejercicio quedan como vista secundaria; usan ventana móvil de 7 días
+              (trainedThisWeek de routineProg) — métrica distinta a propósito. */}
+          {dayAdh.hasRoutine && (() => {
+            const fmtDia = (dk) => {
+              const d = new Date(dk + 'T12:00:00');
+              return `${DAY_SHORT[d.getDay()].toLowerCase()} ${d.getDate()}`;
+            };
             return (
               <div className="bento-card space-y-3">
                 <div className="flex items-center justify-between gap-2">
                   <div className="bento-label">🎯 Adherencia a la rutina · esta semana</div>
-                  <div className="bento-mono" style={{ fontSize: 12, fontWeight: 600 }}>{done}/{r.length}</div>
+                  <div className="bento-mono" style={{ fontSize: 12, fontWeight: 600 }}>{dayAdh.doneCount}/{dayAdh.totalDays} días</div>
                 </div>
-                <div className="flex flex-wrap gap-1.5">
-                  {r.map((x) => {
-                    const label = x.trainedThisWeek ? '✓' : (x.daysSince != null ? `${x.daysSince}d` : '—');
-                    return (
-                      <span key={x.slug} title={x.daysSince != null ? `Última hace ${x.daysSince} días` : 'Sin registro'}
-                        className="inline-flex items-center gap-1.5" style={{
-                          padding: '5px 9px', borderRadius: 8, fontSize: 12,
-                          background: x.trainedThisWeek ? 'rgba(122,154,120,0.16)' : 'var(--bento-surface)',
-                          color: x.trainedThisWeek ? 'var(--bento-pos)' : 'var(--bento-faint)',
-                          border: x.trainedThisWeek ? '1px solid var(--bento-pos)' : '1px solid var(--bento-hairline)',
-                        }}>
-                        {emojiForExercise(x.name)} <span className="truncate" style={{ maxWidth: 140 }}>{x.name}</span>
-                        <span className="bento-mono" style={{ fontSize: 10 }}>{label}</span>
+                <div className="flex flex-col gap-2">
+                  {dayAdh.days.map((d) => (
+                    <div key={d.id} className="flex items-center justify-between gap-2" style={{ fontSize: 12 }}>
+                      <span className="flex items-center gap-1.5 min-w-0">
+                        <span className="shrink-0">{d.isCardio ? '🚴' : '🏋️'}</span>
+                        <span className="truncate" style={{ color: d.status === 'pending' ? 'var(--bento-muted)' : 'var(--bento-ink)' }}>{d.label}</span>
                       </span>
-                    );
-                  })}
+                      {d.status === 'done' && (
+                        <span className="bento-mono shrink-0" style={{ fontSize: 11, fontWeight: 600, color: 'var(--bento-pos)' }} title={d.sessionName || ''}>✓ {fmtDia(d.date)}</span>
+                      )}
+                      {d.status === 'partial' && (
+                        <span className="bento-mono shrink-0" style={{ fontSize: 11, fontWeight: 600, color: 'var(--bento-yellow)' }} title={d.sessionName || ''}>{d.matched}/{d.planned} ej · {fmtDia(d.date)}</span>
+                      )}
+                      {d.status === 'pending' && (
+                        <span className="bento-mono shrink-0" style={{ fontSize: 11, color: 'var(--bento-faint)' }}>pendiente</span>
+                      )}
+                    </div>
+                  ))}
                 </div>
+                {dayAdh.extraSessions.length > 0 && (
+                  <p style={{ fontSize: 10.5, color: 'var(--bento-faint)' }}>
+                    +{dayAdh.extraSessions.length} sesión{dayAdh.extraSessions.length > 1 ? 'es' : ''} fuera de la rutina esta semana
+                  </p>
+                )}
+                {routineProg.hasRoutine && (
+                  <details>
+                    <summary style={{ fontSize: 10.5, color: 'var(--bento-faint)', cursor: 'pointer' }}>ver por ejercicio (últimos 7 días)</summary>
+                    <div className="flex flex-wrap gap-1.5" style={{ marginTop: 8 }}>
+                      {routineProg.routine.map((x) => {
+                        const label = x.trainedThisWeek ? '✓' : (x.daysSince != null ? `${x.daysSince}d` : '—');
+                        return (
+                          <span key={x.slug} title={x.daysSince != null ? `Última hace ${x.daysSince} días` : 'Sin registro'}
+                            className="inline-flex items-center gap-1.5" style={{
+                              padding: '5px 9px', borderRadius: 8, fontSize: 12,
+                              background: x.trainedThisWeek ? 'rgba(122,154,120,0.16)' : 'var(--bento-surface)',
+                              color: x.trainedThisWeek ? 'var(--bento-pos)' : 'var(--bento-faint)',
+                              border: x.trainedThisWeek ? '1px solid var(--bento-pos)' : '1px solid var(--bento-hairline)',
+                            }}>
+                            {emojiForExercise(x.name)} <span className="truncate" style={{ maxWidth: 140 }}>{x.name}</span>
+                            <span className="bento-mono" style={{ fontSize: 10 }}>{label}</span>
+                          </span>
+                        );
+                      })}
+                    </div>
+                  </details>
+                )}
               </div>
             );
           })()}
@@ -6477,12 +6603,25 @@ Reglas:
 
       {response && (
         <>
-          {response.confidence && (
-            <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full" style={{ background: 'var(--bento-surface)' }}>
-              <span style={{ width: 8, height: 8, borderRadius: 99, background: confColor === 'green' ? 'var(--bento-pos)' : confColor === 'amber' ? 'var(--bento-yellow)' : 'var(--bento-warm)' }} />
-              <span style={{ fontSize: 11, color: 'var(--bento-muted)' }}>Confianza {response.confidence}{isStale && ' · datos cambiaron'}</span>
-            </div>
-          )}
+          <div className="flex flex-wrap items-center gap-2">
+            {response.confidence && (
+              <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full" style={{ background: 'var(--bento-surface)' }}>
+                <span style={{ width: 8, height: 8, borderRadius: 99, background: confColor === 'green' ? 'var(--bento-pos)' : confColor === 'amber' ? 'var(--bento-yellow)' : 'var(--bento-warm)' }} />
+                <span style={{ fontSize: 11, color: 'var(--bento-muted)' }}>Confianza {response.confidence}{isStale && ' · datos cambiaron'}</span>
+              </div>
+            )}
+            {/* Contexto de generación: sobre qué dataset opinó Claude (cachés viejos no lo traen). */}
+            {cached?.context && (
+              <div className="inline-flex items-center px-3 py-1.5 rounded-full" style={{ background: 'var(--bento-surface)' }}>
+                <span style={{ fontSize: 11, color: 'var(--bento-muted)' }}>
+                  {cached.context.scope === 'routine'
+                    ? `${cached.context.titulo || 'Rutina'} · desde ${new Date(cached.context.desde + 'T12:00:00').toLocaleDateString('es-CL', { day: 'numeric', month: 'short' })}`
+                    : 'Historial completo · 56 días'}
+                  {` · ${cached.context.sesiones} sesiones (${cached.context.fuerza} fuerza / ${cached.context.cardio} cardio)`}
+                </span>
+              </div>
+            )}
+          </div>
 
           {(response.resumen || response.consistencia) && (
             <div className="bento-card space-y-2">
@@ -6522,6 +6661,13 @@ Reglas:
                   <p style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--bento-muted)' }}>{response.progresion}</p>
                 </div>
               )}
+            </div>
+          )}
+
+          {response.adherencia && (
+            <div className="bento-card">
+              <div className="bento-label" style={{ marginBottom: 10 }}>📋 Adherencia a la rutina</div>
+              <p style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--bento-muted)' }}>{response.adherencia}</p>
             </div>
           )}
 
