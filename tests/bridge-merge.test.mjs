@@ -4,6 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { todayKey } from '../src/dates.mjs';
+import { chatMealSig } from '../src/meals.mjs';
 import { mergeBridge, healthDateKey } from '../src/sync.mjs';
 
 // --- helpers de fixture ---
@@ -63,6 +64,35 @@ test('removedBridgeIds frena la reimportación de un borrado deliberado', () => 
   const { state, added } = mergeBridge(s0, bridge);
   assert.equal(added.meals, 0);
   assert.ok(!state.days['2026-06-10'], 'ni siquiera crea el día');
+});
+
+test('removedMealSigs (lápida por contenido): un extra de app empujado y luego borrado NO resucita', () => {
+  // El .gs reasigna el id en op:'add': el delete viaja con el uuid local y nunca alcanza la
+  // copia del servidor, y removedBridgeIds (por id) tampoco la frena. La lápida por firma sí.
+  const ts = Date.now() - 60_000; // reciente: dentro de la retención de la lápida
+  const s0 = baseState();
+  s0.bridge.removedBridgeIds = ['local-1']; // el delete por id local (no matchea al servidor)
+  s0.bridge.removedMealSigs = [{ sig: chatMealSig('almuerzo', 'Ensalada', 200), ts }];
+  const bridge = baseBridge({ meals: [{ id: 'srv-7', date: todayKey(new Date(ts)), ts: ts + 30_000, name: 'Ensalada', kcal: 200, mealSlot: 'almuerzo' }] });
+  const { state, added } = mergeBridge(s0, bridge);
+  assert.equal(added.meals, 0, 'el eco del borrado no se re-agrega');
+  assert.ok(!(state.days[todayKey(new Date(ts))]?.extras || []).length);
+  assert.ok(state.bridge.importedIds.includes('srv-7'), 'queda absorbido, no pendiente');
+});
+
+test('removedMealSigs se podan a los 10 días y no frenan repeticiones fuera de ventana', () => {
+  const oldTs = Date.now() - 11 * 24 * 60 * 60 * 1000;
+  const freshTs = Date.now() - 60_000;
+  const s0 = baseState();
+  s0.bridge.removedMealSigs = [
+    { sig: chatMealSig('cena', 'Atún', 130), ts: oldTs },       // vencida
+    { sig: chatMealSig('almuerzo', 'Pollo', 400), ts: freshTs }, // vigente, pero el meal llega FUERA de la ventana
+  ];
+  const mealTs = freshTs + 30 * 60 * 1000; // 30 min después: repetición legítima
+  const bridge = baseBridge({ meals: [{ id: 'srv-8', date: todayKey(new Date(mealTs)), ts: mealTs, name: 'Pollo', kcal: 400, mealSlot: 'almuerzo' }] });
+  const { state, added } = mergeBridge(s0, bridge);
+  assert.equal(added.meals, 1, 'fuera de la ventana de dedup la comida entra igual');
+  assert.deepEqual(state.bridge.removedMealSigs.map((r) => r.sig), [chatMealSig('almuerzo', 'Pollo', 400)], 'la lápida >10 días se podó');
 });
 
 test('reconciliación: poda el extra skill-chat huérfano (ya no está en el bridge), respeta los de la app', () => {

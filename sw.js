@@ -4,7 +4,7 @@
  * NO interceptamos llamadas a api.anthropic.com.
  */
 
-const CACHE_NAME = 'plan-hugo-v86-menu-semanal';
+const CACHE_NAME = 'plan-hugo-v87-meseta-solo-rutina-y-sw-sin-cache-http';
 const CORE_URLS = [
   './index.html',
   './app.js',
@@ -14,8 +14,12 @@ const CORE_URLS = [
 const CDN_HOSTS = ['unpkg.com'];
 
 self.addEventListener('install', (event) => {
+  // cache:'reload' salta el caché HTTP del navegador (Pages sirve max-age=600): sin esto, un SW
+  // recién instalado puede precachear el bundle VIEJO durante los 10 min post-deploy.
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(CORE_URLS)).catch(() => null)
+    caches.open(CACHE_NAME).then((cache) =>
+      cache.addAll(CORE_URLS.map((u) => new Request(u, { cache: 'reload' })))
+    ).catch(() => null)
   );
   self.skipWaiting();
 });
@@ -55,10 +59,11 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Same-origin (HTML, manifest, sw): network-first con fallback a cache
+  // Same-origin (HTML, manifest, sw): network-first con fallback a cache. cache:'no-cache'
+  // fuerza revalidar contra el servidor (si no, "network"-first sirve el caché HTTP stale).
   if (url.origin === self.location.origin) {
     event.respondWith(
-      fetch(request).then((resp) => {
+      fetch(request, { cache: 'no-cache' }).then((resp) => {
         if (resp.ok) {
           const copy = resp.clone();
           caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
