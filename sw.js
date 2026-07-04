@@ -4,7 +4,7 @@
  * NO interceptamos llamadas a api.anthropic.com.
  */
 
-const CACHE_NAME = 'plan-hugo-v85-eval-acotada-rutina';
+const CACHE_NAME = 'plan-hugo-v86-menu-semanal';
 const CORE_URLS = [
   './index.html',
   './app.js',

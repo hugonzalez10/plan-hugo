@@ -396,6 +396,13 @@ export function mergeBridge(state, rawBridge) {
   // del bridge ausente localmente se reimporta aunque su id figure en importedIds), así que
   // la intención de borrado vive aquí. Ver pushDelete / handlers de borrado.
   const removedBridgeIds = new Set((state.bridge?.removedBridgeIds) || []);
+  // Lápidas por CONTENIDO para extras de la app borrados tras el push: el .gs reasigna el id
+  // en op:'add', así que el delete viaja con el uuid local y nunca borra la copia del servidor;
+  // removedBridgeIds (por id) tampoco la frena. La firma slot|nombre|kcal + ventana sí la
+  // reconoce cuando vuelve como meal del bridge. Se podan junto con la retención del server.
+  const removedMealSigs = (state.bridge?.removedMealSigs || []).filter(
+    (r) => r && r.ts != null && (Date.now() - Number(r.ts)) < 10 * 24 * 60 * 60 * 1000,
+  );
   const days = { ...(state.days || {}) };
   const weights = Array.isArray(state.weights) ? [...state.weights] : [];
   const added = { meals: 0, weights: 0, workouts: 0, checks: 0, water: 0, health: 0, lifts: 0, foods: 0 };
@@ -449,6 +456,11 @@ export function mergeBridge(state, rawBridge) {
     // distinto. Lo damos por importado.
     const sig = chatMealSig(slot, m.name, m.kcal);
     if (d.extras.some((x) => chatMealSig(x.mealSlot, x.name, x.kcal) === sig && sameWindow(x.ts, m.ts))) {
+      importedIds.add(m.id); continue;
+    }
+    // Lápida por contenido: es el eco de un extra de la app que el usuario BORRÓ después del
+    // push (el id del servidor no coincide con el local, ver arriba). No resucitarlo.
+    if (removedMealSigs.some((r) => r.sig === sig && sameWindow(r.ts, m.ts))) {
       importedIds.add(m.id); continue;
     }
     d.extras.push({
@@ -768,6 +780,7 @@ export function mergeBridge(state, rawBridge) {
       // atrás de EXPECTED_BRIDGE_VERSION. undefined en rawBridge viejos → null (vieja, redeploy).
       deployedVersion: (rawBridge && rawBridge.bridgeVersion != null) ? rawBridge.bridgeVersion : null,
       importedIds: [...importedIds],
+      removedMealSigs, // ya podadas (>10 días) al inicio del merge
     },
   };
   return { state: nextState, added, dropped, warnings };
