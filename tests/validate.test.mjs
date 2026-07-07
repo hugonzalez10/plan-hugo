@@ -31,6 +31,26 @@ test('remapea fats→fat y kg→weightKg', () => {
   assert.equal(r.payload.weights[0].weightKg, 90.5);
 });
 
+test('remapea el set en español (nombre/proteina/carbohidratos/grasa/fibra/toma) — caso real cena 2026-07-06', () => {
+  // Réplica exacta de la entrada que la skill escribió con las claves traducidas: solo
+  // kcal/date/mealSlot/id/ts quedaron canónicos; el resto era ilegible para la app.
+  const { payload, dropped, warnings } = normalizeBridgePayload(baseBridge({ meals: [{
+    toma: 'cena', mealSlot: 'cena',
+    nombre: 'Cena: Pollo 170g + papa 100g + lechuga y pepino',
+    kcal: 376, proteina: 55.2, carbohidratos: 21.5, grasa: 6.2, fibra: 1.5,
+    date: '2026-07-06', id: '00c02b1d', ts: 1783392298565,
+  }] }));
+  assert.equal(dropped.meals, 0);
+  const m = payload.meals[0];
+  assert.equal(m.name, 'Cena: Pollo 170g + papa 100g + lechuga y pepino');
+  assert.equal(m.protein, 55.2);
+  assert.equal(m.carbs, 21.5);
+  assert.equal(m.fat, 6.2);
+  assert.equal(m.fiber, 1.5);
+  assert.equal(m.mealSlot, 'cena', 'toma no pisa el mealSlot ya presente');
+  assert.ok(warnings.some((w) => w.includes("'proteina'") && w.includes("'protein'")));
+});
+
 test('el canónico explícito gana sobre el alias (no lo pisa)', () => {
   const r = normalizeBridgePayload(baseBridge({ meals: [{ id: 'm1', date: '2026-06-20', name: 'X', kcal: 250, calories: 999 }] }));
   assert.equal(r.payload.meals[0].kcal, 250);
