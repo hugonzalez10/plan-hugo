@@ -24,9 +24,19 @@ export const FIELD_ALIASES = {
   cal: 'kcal',
   fats: 'fat',
   grasa: 'fat',
+  grasas: 'fat',
   kg: 'weightKg',
   weight: 'weightKg',
   pesoKg: 'weightKg',
+  // Set en español visto en producción (cena 2026-07-06 escrita por la skill con las
+  // claves traducidas): el dato quedaba guardado pero ilegible para la app y ?totals.
+  nombre: 'name',
+  proteina: 'protein',
+  'proteína': 'protein',
+  carbohidratos: 'carbs',
+  carbos: 'carbs',
+  fibra: 'fiber',
+  toma: 'mealSlot',
 };
 
 // — Tipos conceptuales (JSDoc). No se chequean en build (no hay TS), pero dan autocompletado
