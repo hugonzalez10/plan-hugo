@@ -219,6 +219,7 @@ export function buildSeed() {
     })),
     routine: null,
     exercise_videos: {},
+    exercise_prs: {},
     arsenalVersion: 3,
     foodsVersion: 2,
     bridge: { lastSyncAt: null, importedIds: [], pushedIds: [], removedBridgeIds: [] },

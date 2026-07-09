@@ -214,6 +214,8 @@ export function migrateState(parsed) {
   // Rutina (objeto singleton, null = sin rutina) + mapa de videos por slug (back-fill defensivo).
   if (next.routine !== null && (typeof next.routine !== 'object' || Array.isArray(next.routine))) next.routine = null;
   if (typeof next.exercise_videos !== 'object' || next.exercise_videos === null || Array.isArray(next.exercise_videos)) next.exercise_videos = {};
+  // PRs manuales por slug (anotados en la pestaña Rutina) — mismo patrón que exercise_videos.
+  if (typeof next.exercise_prs !== 'object' || next.exercise_prs === null || Array.isArray(next.exercise_prs)) next.exercise_prs = {};
   next.aiCache = next.aiCache || { coach: {}, weekly: {}, patterns: null, lastSubstitution: null };
   next.aiCache.coach = next.aiCache.coach || {};
   next.aiCache.weekly = next.aiCache.weekly || {};

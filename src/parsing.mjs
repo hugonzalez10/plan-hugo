@@ -71,7 +71,7 @@ export function parseJsonLoose(text) {
 // Líneas de prosa (calentamiento, rampa, ▶ enlaces, cardio de cierre, progresión) se ignoran
 // porque no calzan el patrón fila (nombre + peso-kg + series×reps).
 const RX_DAY_HEADER = /^#{0,3}\s*Día\s*(\d+)\s*[—–-]\s*(.+?)\s*(?:\(~?\s*(\d+)\s*min\))?\s*$/i;
-const RX_WEIGHT = /^\d+([.,]\d+)?\s*kg\b/i;            // "75 kg", "42,5 kg", "8 kg"
+const RX_WEIGHT = /^(\d+([.,]\d+)?\s*kg\b|ajustar\b)/i; // "75 kg", "42,5 kg", "8 kg", "ajustar" (core sin carga fija)
 const RX_REPS = /\d+\s*[×xX]\s*\d+/;                    // "4 × 8", "3 × 12 c/pierna"
 const RX_REST = /\b(min|seg|s)\b/i;                     // "2-3 min", "45-60 s", "2 min"
 
@@ -98,12 +98,13 @@ function _afterColon(line) {
 }
 
 export function parseRoutineTemplate(rawText) {
-  const lines = String(rawText || '').split(/\r?\n/).map((l) => l.trim());
+  // Sin líneas vacías: mammoth separa cada celda de tabla con \n\n, y la detección (b) mira
+  // lines[i+1]/lines[i+2] por índice directo — con huecos en blanco no calzaría ningún ejercicio.
+  const lines = String(rawText || '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   const days = [];
   let cur = null;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    if (!line) continue;
     const h = line.match(RX_DAY_HEADER);
     if (h) {
       cur = { label: `Día ${h[1]} — ${h[2].trim()}`, durationMin: h[3] ? Number(h[3]) : null, warmup: null, ramp: null, cardioClose: null, note: null, exercises: [] };
@@ -152,16 +153,22 @@ export function parseRoutineTemplate(rawText) {
 // Converge ambos caminos: estampa updatedAt, id por día y slug por ejercicio.
 export function normalizeRoutine(j) {
   const str = (v) => (v != null && String(v).trim() ? String(v).trim() : null);
-  const days = (Array.isArray(j?.days) ? j.days : []).map((d, i) => ({
+  // Clave de comparación de rampas: sin mayúsculas ni puntuación final, para detectar
+  // cuando la IA copió la rampa del día textual a un ejercicio (quedaría doble en la UI).
+  const rampKey = (v) => (v ? String(v).trim().toLowerCase().replace(/[.…\s]+$/, '') : null);
+  const days = (Array.isArray(j?.days) ? j.days : []).map((d, i) => {
+    const dayRamp = str(d?.ramp);
+    return {
     id: `dia-${i + 1}`,
     label: String(d?.label || `Día ${i + 1}`).trim(),
     durationMin: d?.durationMin != null && !isNaN(Number(d.durationMin)) ? Number(d.durationMin) : null,
     warmup: str(d?.warmup),
-    ramp: str(d?.ramp),
+    ramp: dayRamp,
     cardioClose: str(d?.cardioClose),
     note: str(d?.note),
     exercises: (Array.isArray(d?.exercises) ? d.exercises : []).map((ex) => {
       const name = String(ex?.name || '').trim();
+      const exRamp = str(ex?.ramp);
       return {
         slug: slugifyExercise(name),
         name,
@@ -169,11 +176,12 @@ export function normalizeRoutine(j) {
         pesoInicio: str(ex?.pesoInicio),
         seriesReps: str(ex?.seriesReps),
         descanso: str(ex?.descanso),
-        ramp: str(ex?.ramp),
+        ramp: exRamp && rampKey(exRamp) === rampKey(dayRamp) ? null : exRamp,
         notas: str(ex?.notas),
       };
     }).filter((ex) => ex.name),
-  }));
+    };
+  });
   return {
     title: String(j?.title || 'Rutina').trim() || 'Rutina',
     updatedAt: new Date().toISOString(),
