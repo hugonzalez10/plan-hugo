@@ -4,7 +4,7 @@
  * NO interceptamos llamadas a api.anthropic.com.
  */
 
-const CACHE_NAME = 'plan-hugo-v88-alias-campos-espanol-bridge';
+const CACHE_NAME = 'plan-hugo-v89-rutina-preview-estructurado-pesos-pr';
 const CORE_URLS = [
   './index.html',
   './app.js',
