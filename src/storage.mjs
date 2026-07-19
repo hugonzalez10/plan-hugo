@@ -216,6 +216,8 @@ export function migrateState(parsed) {
   if (typeof next.exercise_videos !== 'object' || next.exercise_videos === null || Array.isArray(next.exercise_videos)) next.exercise_videos = {};
   // PRs manuales por slug (anotados en la pestaña Rutina) — mismo patrón que exercise_videos.
   if (typeof next.exercise_prs !== 'object' || next.exercise_prs === null || Array.isArray(next.exercise_prs)) next.exercise_prs = {};
+  // Sueño (sección `sleep` del bridge, KPI #1) — array plano como weights.
+  if (!Array.isArray(next.sleep)) next.sleep = [];
   next.aiCache = next.aiCache || { coach: {}, weekly: {}, patterns: null, lastSubstitution: null };
   next.aiCache.coach = next.aiCache.coach || {};
   next.aiCache.weekly = next.aiCache.weekly || {};

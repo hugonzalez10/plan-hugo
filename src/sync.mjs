@@ -14,6 +14,7 @@ import {
 } from './fields.mjs';
 import { normalizeBridgePayload } from './validate.mjs';
 import { makeFood } from './foods.mjs';
+import { SLEEP_NUMERIC_FIELDS, SLEEP_STRING_FIELDS, sanitizeSleepMin } from './sleep.mjs';
 
 export const GIST_FILENAME = 'plan-hugo.json';
 export const GIST_DESCRIPTION = 'Plan Hugo · backup privado (no compartir)';
@@ -119,6 +120,7 @@ export function syncSig(state) {
     dessertBank: state.dessertBank ?? [], rules: state.rules ?? [],
     recipeBank: state.recipeBank ?? [], days: state.days ?? {},
     foods: state.foods ?? [],
+    sleep: state.sleep ?? [],
     weights, theme: state.theme ?? null,
   };
   const s = JSON.stringify(slice);
@@ -133,7 +135,7 @@ export function syncSig(state) {
 export function isPlausibleState(s) {
   if (!s || typeof s !== 'object') return false;
   if (s.days != null && (typeof s.days !== 'object' || Array.isArray(s.days))) return false;
-  for (const k of ['weights', 'snackBank', 'proteinBank', 'dessertBank', 'foods']) {
+  for (const k of ['weights', 'snackBank', 'proteinBank', 'dessertBank', 'foods', 'sleep']) {
     if (s[k] != null && !Array.isArray(s[k])) return false;
   }
   return true;
@@ -227,6 +229,9 @@ export function mergeRemoteState(prev, remote, updatedAt) {
   merged.days = days;
   merged.weights = unionBy(prev.weights, remote.weights, weightKey);
   merged.energy = unionBy(prev.energy, remote.energy, (e) => (e && e.date != null ? 'dt:' + e.date : null));
+  // sleep: una fila por (fecha|kind) — la clave es esa, no el id (dos devices pueden tener la
+  // misma noche con ids distintos: el del bridge y uno local aún sin eco).
+  merged.sleep = unionBy(prev.sleep, remote.sleep, (s) => (s && s.date != null ? 'dt:' + s.date + '|' + (s.kind || 'daily') : null));
   for (const bank of ['snackBank', 'proteinBank', 'dessertBank', 'recipeBank', 'rules', 'favorites']) {
     merged[bank] = unionBy(prev[bank], remote[bank], bankKey);
   }
@@ -262,7 +267,7 @@ export function withBridgeToken(url, token) {
 //   la app compara contra EXPECTED_BRIDGE_VERSION y avisa si la implementación desplegada quedó
 //   atrás (el síntoma clásico: campos nuevos descartados en silencio porque no se redeployó el .gs).
 //   SUBIR EN LOCKSTEP con BRIDGE_VERSION en apps-script/bridge-writer.gs cada vez que cambie el shape.
-export const EXPECTED_BRIDGE_VERSION = 4;
+export const EXPECTED_BRIDGE_VERSION = 5;
 
 // Drift de versión del bridge desplegado. Devuelve null si está al día; si no, el detalle para el
 // indicador. deployed=null = implementación vieja sin sello (todavía no redeployada).
@@ -332,6 +337,8 @@ export async function fetchBridge(url, token, opts = {}) {
       water: Array.isArray(data.water) ? data.water : [],
       health: Array.isArray(data.health) ? data.health : [],
       lifts: Array.isArray(data.lifts) ? data.lifts : [],
+      // Sueño (KPI #1). Los bridges viejos no traen la sección → [] (no rompe clientes).
+      sleep: Array.isArray(data.sleep) ? data.sleep : [],
       // Biblioteca de alimentos reusables (chat→app): los que la skill agregue al escanear/confirmar
       // fluyen acá y mergeBridge los suma a state.foods sin pisar los curados del usuario.
       foods: Array.isArray(data.foods) ? data.foods : [],
@@ -398,7 +405,7 @@ export function mergeBridge(state, rawBridge) {
   const removedBridgeIds = new Set((state.bridge?.removedBridgeIds) || []);
   const days = { ...(state.days || {}) };
   const weights = Array.isArray(state.weights) ? [...state.weights] : [];
-  const added = { meals: 0, weights: 0, workouts: 0, checks: 0, water: 0, health: 0, lifts: 0, foods: 0 };
+  const added = { meals: 0, weights: 0, workouts: 0, checks: 0, water: 0, health: 0, lifts: 0, foods: 0, sleep: 0 };
 
   const ensureDay = (dk) => {
     const base = days[dk] || { eaten: {}, snackId1: null, snackId2: null, proteinId: null, water: { ml: 0 }, skipped: [], nudgesDismissed: [], dessertAlmuerzoId: null, dessertCenaId: null, notes: null };
@@ -698,6 +705,42 @@ export function mergeBridge(state, rawBridge) {
     }
   }
 
+  // Sección `sleep` (KPI #1; esquema canónico en el .gs). Vive en state.sleep (array plano,
+  // como state.weights — las weekly/monthly no mapean a un día). Dedup: primero por id; si no,
+  // por (date|kind) —el eco del empuje app→bridge vuelve con id de servidor distinto y así se
+  // absorbe—. En un match se mergean los campos del bridge (autoridad para corregir la noche),
+  // con check de `changed` para que un sync sin novedades no churne el estado.
+  const sleepArr = Array.isArray(state.sleep) ? [...state.sleep] : [];
+  for (const s of (bridge.sleep || [])) {
+    if (s.id == null || removedBridgeIds.has(s.id)) continue;
+    const date = s.date; // validate ya exigió date (el dedup por date|kind la necesita exacta)
+    const kind = s.kind || 'daily';
+    if (kind === 'daily' && sanitizeSleepMin(s.asleepMin) == null) continue; // noche implausible (>14h): no entra
+    let idx = sleepArr.findIndex((x) => x && x.id === s.id);
+    if (idx < 0) idx = sleepArr.findIndex((x) => x && x.date === date && (x.kind || 'daily') === kind);
+    if (idx >= 0) {
+      const cur = sleepArr[idx];
+      const merged = { ...cur };
+      let changed = false;
+      for (const k of SLEEP_NUMERIC_FIELDS) {
+        if (s[k] != null && num(s[k]) !== merged[k]) { merged[k] = num(s[k]); changed = true; }
+      }
+      for (const k of SLEEP_STRING_FIELDS) {
+        if (s[k] != null && s[k] !== '' && s[k] !== merged[k]) { merged[k] = s[k]; changed = true; }
+      }
+      if (changed) { sleepArr[idx] = merged; added.sleep++; }
+      importedIds.add(s.id);
+      continue;
+    }
+    const out = { id: s.id, date, kind, asleepMin: num(s.asleepMin), ts: s.ts != null ? Number(s.ts) : Date.now() };
+    if (s.inBedMin != null) out.inBedMin = num(s.inBedMin);
+    for (const k of SLEEP_STRING_FIELDS) if (s[k] != null && s[k] !== '') out[k] = s[k];
+    if (!out.source) out.source = 'skill-chat';
+    sleepArr.push(out);
+    importedIds.add(s.id); added.sleep++;
+  }
+  const sleep = sleepArr.sort((a, b) => String(a?.date || '').localeCompare(String(b?.date || '')));
+
   // Serie `energy` (balance energético por día) que el bridge retiene para siempre. Se mergea
   // por fecha en state.energy (latest gana) SIN tocar el log de comidas: alimenta el TDEE
   // adaptativo en dispositivos cuyo `days` no tiene el historial (meals podadas a 30 días).
@@ -758,7 +801,7 @@ export function mergeBridge(state, rawBridge) {
   }
 
   const nextState = {
-    ...state, days, weights, energy, routine, exercise_videos, foods,
+    ...state, days, weights, energy, routine, exercise_videos, foods, sleep,
     bridge: {
       ...(state.bridge || {}),
       lastSyncAt: new Date().toISOString(),

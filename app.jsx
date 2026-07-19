@@ -42,6 +42,10 @@ import {
   sanitizeSleepHours,
 } from './src/fields.mjs';
 import {
+  SLEEP_FLOOR_MIN, SLEEP_TARGET_MIN, SLEEP_STRING_FIELDS,
+  fmtSleepMin, sleepStats, sanitizeSleepMin,
+} from './src/sleep.mjs';
+import {
   gistCreate, gistPush, gistPull, sanitizeStateForUpload, syncSig, applyRemoteState, hashSig,
   mergeRemoteState, isPlausibleState,
   withBridgeToken, fetchBridge, postBridgeDelete, mergeBridge, bridgeVersionDrift,
@@ -5606,6 +5610,122 @@ function HeartWatchImportModal({ state, setState, onClose }) {
 // recuperación de HeartWatch (HRV, SpO₂, FC durmiendo) + banderas automáticas + evaluación crítica
 // de Claude que cruza sueño/actividad/recuperación con la pérdida de peso y la adherencia. SOLO
 // LECTURA: nunca altera kcal ni totales.
+// ── Tarjeta de Sueño (KPI #1 del plan) ──────────────────────────────────────
+// Muestra última noche, promedio 7d y mini-tendencia 14d desde state.sleep (la sección
+// `sleep` del bridge; esquema canónico en el .gs). El SEMÁFORO lo colorea el promedio de
+// 7 días contra los umbrales de src/sleep.mjs (SLEEP_FLOOR_MIN/SLEEP_TARGET_MIN): bajo el
+// piso es el centinela duro que congela ajustes de dieta/carga. El input manual agrega una
+// entrada kind:"daily" que la cola de push empuja al /exec (op:'add', section:'sleep') —
+// mismo canal POST que meals/water/weights; NUNCA el conector de Drive.
+const SLEEP_TONE_COLOR = { red: 'var(--bento-warm)', amber: 'var(--bento-yellow)', green: 'var(--bento-pos)' };
+
+function SleepCard({ state, setState }) {
+  const [showForm, setShowForm] = useState(false);
+  const [fDate, setFDate] = useState(todayKey());
+  const [fMin, setFMin] = useState('');
+  const [fBedtime, setFBedtime] = useState('');
+  const stats = useMemo(() => sleepStats(state.sleep || []), [state.sleep]);
+  const toneColor = stats.tone ? SLEEP_TONE_COLOR[stats.tone] : 'var(--bento-faint)';
+  const toneLabel = stats.tone === 'red'
+    ? `Bajo el piso de ${fmtSleepMin(SLEEP_FLOOR_MIN)} — centinela: congela ajustes de dieta/carga`
+    : stats.tone === 'amber'
+      ? `Sobre el piso, bajo el objetivo de ${fmtSleepMin(SLEEP_TARGET_MIN)}`
+      : stats.tone === 'green' ? `Objetivo cumplido (≥${fmtSleepMin(SLEEP_TARGET_MIN)})` : null;
+  const maxMin = Math.max(SLEEP_TARGET_MIN, ...stats.series14.map((d) => d.asleepMin || 0));
+
+  const save = () => {
+    const min = sanitizeSleepMin(fMin);
+    if (!fDate || min == null) return;
+    setState((prev) => {
+      const arr = Array.isArray(prev.sleep) ? [...prev.sleep] : [];
+      const idx = arr.findIndex((x) => x && x.date === fDate && (x.kind || 'daily') === 'daily');
+      // id NUEVO también al corregir una noche existente: así la cola de push (que dedupea por
+      // pushedIds) reenvía la corrección, y el .gs la mergea por (date|kind) sin duplicar.
+      const entry = { id: uuid(), date: fDate, kind: 'daily', asleepMin: min, source: 'app', ts: Date.now() };
+      if (fBedtime) entry.bedtime = fBedtime;
+      const next = idx >= 0 ? arr.map((x, i) => (i === idx ? { ...x, ...entry } : x)) : [...arr, entry];
+      next.sort((a, b) => String(a?.date || '').localeCompare(String(b?.date || '')));
+      return { ...prev, sleep: next };
+    });
+    setFMin(''); setFBedtime(''); setShowForm(false);
+  };
+
+  return (
+    <div className="bento-card" style={{ minWidth: 0, borderLeft: `3px solid ${toneColor}` }}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="text-sm font-semibold flex items-center gap-1.5"><span>😴</span>Sueño <span className="text-[10px] font-normal px-1.5 py-0.5 rounded-full" style={{ background: 'var(--bento-surface)', color: 'var(--bento-muted)' }}>KPI #1</span></div>
+        <button type="button" onClick={() => setShowForm((v) => !v)}
+          className="shrink-0 px-2.5 py-1 rounded-lg text-xs font-semibold"
+          style={{ background: 'var(--bento-surface)', color: 'var(--bento-ink)' }}>
+          {showForm ? 'Cerrar' : '+ Registrar'}
+        </button>
+      </div>
+
+      {showForm && (
+        <div className="mt-3 flex flex-wrap items-end gap-2 text-xs">
+          <label className="flex flex-col gap-1" style={{ color: 'var(--bento-muted)' }}>Fecha
+            <input type="date" value={fDate} max={todayKey()} onChange={(e) => setFDate(e.target.value)}
+              className="px-2 py-1.5 rounded-lg border bg-transparent" style={{ borderColor: 'var(--bento-hairline)' }} />
+          </label>
+          <label className="flex flex-col gap-1" style={{ color: 'var(--bento-muted)' }}>Minutos dormido
+            <input type="number" inputMode="numeric" min="1" placeholder="387" value={fMin} onChange={(e) => setFMin(e.target.value)}
+              className="px-2 py-1.5 rounded-lg border bg-transparent w-24" style={{ borderColor: 'var(--bento-hairline)' }} />
+          </label>
+          <label className="flex flex-col gap-1" style={{ color: 'var(--bento-muted)' }}>Hora de dormir (opcional)
+            <input type="time" value={fBedtime} onChange={(e) => setFBedtime(e.target.value)}
+              className="px-2 py-1.5 rounded-lg border bg-transparent" style={{ borderColor: 'var(--bento-hairline)' }} />
+          </label>
+          <button type="button" onClick={save} disabled={sanitizeSleepMin(fMin) == null}
+            className="px-3 py-1.5 rounded-lg text-xs font-semibold disabled:opacity-40"
+            style={{ background: 'var(--bento-ink)', color: 'var(--bento-on-ink)' }}>Guardar</button>
+        </div>
+      )}
+
+      {(!stats.last && !showForm) ? (
+        <p className="mt-2 text-xs" style={{ color: 'var(--bento-faint)' }}>
+          Sin registros aún. Anótalo por chat ("dormí 6h 27min") o con + Registrar.
+        </p>
+      ) : stats.last && (
+        <>
+          <div className="mt-3 flex items-end gap-6 flex-wrap">
+            <div>
+              <div className="text-[11px]" style={{ color: 'var(--bento-faint)' }}>Última noche · {formatDateLabel(stats.last.date, todayKey())}</div>
+              <div className="text-xl font-bold tabular-nums">{fmtSleepMin(stats.last.asleepMin)}</div>
+              {stats.last.bedtime && <div className="text-[11px]" style={{ color: 'var(--bento-faint)' }}>a dormir {stats.last.bedtime}{stats.last.wakeTime ? ` · despertó ${stats.last.wakeTime}` : ''}</div>}
+            </div>
+            <div>
+              <div className="text-[11px]" style={{ color: 'var(--bento-faint)' }}>Promedio 7 días ({stats.avg7Count} {stats.avg7Count === 1 ? 'noche' : 'noches'})</div>
+              <div className="text-xl font-bold tabular-nums" style={{ color: toneColor }}>{fmtSleepMin(stats.avg7)}</div>
+            </div>
+          </div>
+          {toneLabel && <p className="mt-1.5 text-[11px]" style={{ color: toneColor }}>{toneLabel}</p>}
+
+          {/* Mini-tendencia: barras de los últimos 14 días. Las líneas punteadas del fondo son
+              el piso (6h) y el objetivo (6h30). Cada barra se colorea por SU noche. */}
+          <div className="mt-3 relative" style={{ height: 44 }}>
+            <div className="absolute inset-x-0" style={{ bottom: `${(SLEEP_FLOOR_MIN / maxMin) * 100}%`, borderTop: '1px dashed var(--bento-hairline)' }} />
+            <div className="absolute inset-x-0" style={{ bottom: `${(SLEEP_TARGET_MIN / maxMin) * 100}%`, borderTop: '1px dashed var(--bento-hairline)' }} />
+            <div className="absolute inset-0 flex items-end gap-[3px]">
+              {stats.series14.map((d) => (
+                <div key={d.date} className="flex-1 rounded-t"
+                  title={`${formatDateLabel(d.date, todayKey())}: ${fmtSleepMin(d.asleepMin)}`}
+                  style={d.asleepMin != null
+                    ? { height: `${Math.max(6, (d.asleepMin / maxMin) * 100)}%`, background: SLEEP_TONE_COLOR[d.asleepMin < SLEEP_FLOOR_MIN ? 'red' : d.asleepMin < SLEEP_TARGET_MIN ? 'amber' : 'green'] }
+                    : { height: 3, background: 'var(--bento-hairline)' }} />
+              ))}
+            </div>
+          </div>
+          <div className="mt-1 flex justify-between text-[10px]" style={{ color: 'var(--bento-faint)' }}>
+            <span>{shortDate(stats.series14[0].date)}</span>
+            <span>{`<${fmtSleepMin(SLEEP_FLOOR_MIN)} rojo · ≥${fmtSleepMin(SLEEP_TARGET_MIN)} verde`}</span>
+            <span>{shortDate(stats.series14[13].date)}</span>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function HealthView({ state, setState, targets }) {
   const apiKey = state.settings?.anthropicApiKey;
   const cached = state.aiCache?.health;
@@ -5793,6 +5913,10 @@ Reglas: 2 a 4 recomendaciones, las más importantes y accionables. Si una dimens
           <span>⌚</span> Importar
         </button>
       </div>
+
+      {/* Sueño (KPI #1): siempre visible, aunque no haya datos de Apple Health — la sección
+          `sleep` del bridge es independiente de day.health.sleepHours (contexto del Shortcut). */}
+      <SleepCard state={state} setState={setState} />
 
       {daysWithHealth === 0 ? (
         <div className="bento-card text-center text-sm" style={{ borderStyle: 'dashed', color: 'var(--bento-muted)' }}>
@@ -11698,8 +11822,19 @@ function App() {
       if (wt.time) entry.time = wt.time;
       out.push({ localId: wt.id, section: 'weights', date: wdate, entry });
     }
+    // Sueño: lo nacido en la APP (input manual de SleepCard, source:'app') se empuja a la
+    // sección `sleep` del bridge por el mismo canal. Sin ventana (log liviano); el .gs
+    // dedupea/mergea por (date|kind), así una corrección re-empujada corrige la fila allá.
+    for (const s of (state.sleep || [])) {
+      if (!s || s.id == null || s.date == null || imported.has(s.id) || pushed.has(s.id)) continue;
+      if (s.source !== 'app') continue; // lo que vino del bridge/chat ya vive allá
+      const entry = { date: s.date, kind: s.kind || 'daily', asleepMin: numv(s.asleepMin), source: 'app', ts: s.ts != null ? s.ts : null };
+      if (s.inBedMin != null) entry.inBedMin = numv(s.inBedMin);
+      for (const k of SLEEP_STRING_FIELDS) if (s[k] && k !== 'source') entry[k] = s[k];
+      out.push({ localId: s.id, section: 'sleep', date: s.date, entry });
+    }
     return out;
-  }, [state.days, state.weights, state.bridge]);
+  }, [state.days, state.weights, state.sleep, state.bridge]);
   const pushBody = useMemo(() => JSON.stringify(pushPayload), [pushPayload]);
   useEffect(() => {
     if (!bridgeUrl) return;
