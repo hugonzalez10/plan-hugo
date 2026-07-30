@@ -4,7 +4,7 @@
  * NO interceptamos llamadas a api.anthropic.com.
  */
 
-const CACHE_NAME = 'plan-hugo-v89-rutina-preview-estructurado-pesos-pr';
+const CACHE_NAME = 'plan-hugo-v90-congelar-metas-perfil-2000';
 const CORE_URLS = [
   './index.html',
   './app.js',
