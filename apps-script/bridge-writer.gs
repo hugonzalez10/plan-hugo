@@ -32,11 +32,13 @@
 // ── Contrato ─────────────────────────────────────────────────────────────────
 //  GET  /exec?w=add&section=...&...  → ESCRITURA INLINE (chat por curl/bash o app).
 //                                       Arma una entrada desde params key=value y la
-//                                       aplica. section ∈ meals|weights|workouts|checks|lifts.
+//                                       aplica. section ∈ meals|weights|workouts|checks|lifts|sleep.
 //                                       Ej: ?w=add&section=meals&date=..&name=..&kcal=..
 //                                       workouts acepta además avgHr|maxHr|hrZonePct("86/12/1/0/0")|rpe|volumeKg.
 //                                       lifts (una SERIE de fuerza): exercise|setNumber|weightKg|reps|
 //                                       rpe|isPR|bilateralFlag (dedup por ejercicio+fecha+nº de serie).
+//                                       sleep (KPI #1, ver esquema abajo): date|kind|asleepMin|inBedMin|
+//                                       bedtime|wakeTime|periodStart|periodEnd|note (dedup por fecha+kind).
 //                                       El SERVIDOR asigna el id (uuid) y deduplica por
 //                                       CONTENIDO (ver "Dedup" abajo); el id del cliente
 //                                       es opcional/ignorado en esta rama.
@@ -84,7 +86,7 @@
 //  Formato del "delta" (lo que postea el chat/app):
 //    { "op":"add", "section":"meals", "today":"2026-05-30",
 //      "entries":[ { ...una o varias entradas... } ] }
-//    section ∈ meals | weights | workouts | checks | lifts
+//    section ∈ meals | weights | workouts | checks | lifts | sleep
 //  Borrado:  { "op":"delete", "section":"meals", "id":"<id>" }
 //  Update :  { "op":"update", "section":"weights", "date":"<date>"(o "id":"<id>"),
 //             "fields":{ ...campos a mergear... } }  (también acepta los campos planos
@@ -99,6 +101,9 @@
 //     · workouts : nombre normalizado | date              (+ ventana ±5 min sobre ts)
 //     · weights  : date  → si ya hay medición del día, MERGEA campos (no duplica)
 //     · checks   : meal | date  → idempotente
+//     · sleep    : date | kind  → SIN ventana de 5 min: una noche por fecha (kind:"daily")
+//                  y a lo más un promedio semanal/mensual por fecha; re-registrar la misma
+//                  noche MERGEA campos (corrige, no duplica). Ver esquema abajo.
 //   Conviene mandar `ts` (ms) o `time` para que la ventana funcione; si faltan, el
 //   servidor sella `ts` con la hora de llegada. La normalización debe ser idéntica a
 //   `normalizeName` de app.jsx (minúsculas, trim, espacios colapsados) o el dedup
@@ -118,6 +123,31 @@
 //    { "op":"config", "config":{ goal, sex, age, heightCm, weightKg, activityLevel,
 //      kcalTarget, kcalDeficit, targets:{kcalMax,proteinMin,...,bmr,tdee} } }
 //  Se guarda en `config`. GET ?config=1 lo devuelve. NO se poda.
+//
+//  ── SLEEP (KPI #1 del plan — esquema canónico, ÚNICA fuente de verdad) ───────
+//  El sueño es el centinela duro del plan: <6h de promedio en 7 días congela ajustes de
+//  dieta/carga (los umbrales viven en la app: src/sleep.mjs → SLEEP_FLOOR_MIN=360,
+//  SLEEP_TARGET_MIN=390). Una entrada por noche (kind:"daily") y, opcionalmente,
+//  promedios de tendencia (kind:"weekly"/"monthly"). La skill food-tracker escribe
+//  esta sección con el mismo ?w=add / op:add que las demás; este comentario es el
+//  contrato que la skill debe copiar (no inventar campos).
+//    {
+//      "date": "2026-07-19",         // requerido. daily: la noche que TERMINA ese día
+//      "kind": "daily",              // "daily" | "weekly" | "monthly" (ausente = "daily")
+//      "asleepMin": 387,             // requerido: minutos dormido (Apple Salud "al dormir")
+//      "inBedMin": 402,              // opcional: minutos en cama
+//      "bedtime": "23:42",           // opcional: hora de acostarse
+//      "wakeTime": "06:09",          // opcional: hora de despertar
+//      "periodStart": "2026-07-13",  // solo weekly/monthly: inicio del período promediado
+//      "periodEnd": "2026-07-19",    // solo weekly/monthly: fin del período
+//      "source": "apple-health",     // apple-health | app | skill-chat | manual
+//      "note": ""                    // opcional
+//    }
+//  El SERVIDOR asigna `id` (uuid) y sella `ts`, igual que las demás secciones. Dedup por
+//  CONTENIDO = date|kind (sin ventana de 5 min): re-registrar la misma noche corrige la
+//  fila existente (merge de campos, ver SLEEP_MERGE_FIELDS). Poda: kind:"daily" sigue la
+//  retención estándar de los logs (RETENTION.sleep); weekly/monthly están EXENTOS para
+//  conservar el histórico de tendencia.
 //
 // ── CORS ─────────────────────────────────────────────────────────────────────
 //  ContentService NO permite fijar cabeceras (no se puede poner
@@ -152,7 +182,7 @@ var SHARED_TOKEN = ''; // candado DESACTIVADO (2026-06-05): rompía el registro 
 // el código fuente y la versión desplegada deja de ser silencioso (el síntoma clásico: campos
 // nuevos descartados sin aviso). SUBIR EN LOCKSTEP con EXPECTED_BRIDGE_VERSION cada vez que cambie
 // el shape servido, y redeployar este .gs.
-var BRIDGE_VERSION = 4;
+var BRIDGE_VERSION = 5;
 
 function _authed(e) {
   if (!SHARED_TOKEN) return true; // auth desactivada mientras el token esté vacío
@@ -186,9 +216,13 @@ var UPLOAD_TITLE = 'plan-hugo-bridge.upload.json';
 //   · lifts → 0: un registro por SERIE de ejercicio ancla (sentadilla, peso muerto, …). Es la serie
 //     de progresión de fuerza/PRs; liviana (~pocas filas por sesión de fuerza) y podarla rompería el
 //     historial de cargas. Nunca se poda; mergea por ejercicio+fecha+nº de serie (no duplica).
-var RETENTION    = { weights: 0, meals: 30, workouts: 0, checks: 30, water: 30, energy: 0, health: 0, lifts: 0 };
+//   · sleep → 30: misma retención que los demás logs diarios (meals/checks/water). Es el KPI #1
+//     (centinela: <6h promedio 7d congela ajustes), pero la serie diaria solo se necesita cerca
+//     de hoy; el histórico de tendencia vive en las entradas kind:"weekly"/"monthly", que están
+//     EXENTAS de la poda (ver _prune) y se conservan para siempre.
+var RETENTION    = { weights: 0, meals: 30, workouts: 0, checks: 30, water: 30, energy: 0, health: 0, lifts: 0, sleep: 30 };
 var SNAPSHOT_RETENTION_DAYS = 30; // los snapshots por fecha siguen la misma ventana que meals
-var SECTIONS     = ['meals', 'weights', 'workouts', 'checks', 'water', 'energy', 'health', 'lifts'];
+var SECTIONS     = ['meals', 'weights', 'workouts', 'checks', 'water', 'energy', 'health', 'lifts', 'sleep'];
 // Campos de la sección `energy` que se mergean por fecha (latest gana). Mantener en sync con
 // buildEnergySeries() de app.jsx.
 var ENERGY_MERGE_FIELDS = ['kcalIn', 'trendWeightKg'];
@@ -209,6 +243,10 @@ var WORKOUT_MERGE_FIELDS = ['type', 'activity', 'minutes', 'volumeKg', 'distance
 // (ejercicio|fecha|nº de serie): re-registrar una serie la CORRIGE, no la duplica. Los booleanos
 // isPR/bilateralFlag se mergean también (el guard `!= null && !== ''` deja escribir `false`).
 var LIFT_MERGE_FIELDS = ['weightKg', 'reps', 'rpe', 'isPR', 'bilateralFlag'];
+// Campos de una entrada de sueño (sección sleep, ver esquema en la cabecera) que se mergean
+// sobre la fila existente del mismo (date|kind): re-registrar la noche la CORRIGE, no la
+// duplica (mismo patrón que weights por fecha). `date`/`kind` son la firma, no se tocan.
+var SLEEP_MERGE_FIELDS = ['asleepMin', 'inBedMin', 'bedtime', 'wakeTime', 'periodStart', 'periodEnd', 'source', 'note'];
 var WINDOW_MS    = 5 * 60 * 1000; // ventana de dedup por contenido (meals/workouts)
 // Campos de composición que se mergean sobre la medición del día (no duplica peso).
 // Lista COMPLETA alineada con WEIGHT_FIELDS + STRING_FIELDS + SEGMENT_FIELDS de app.jsx:
@@ -289,8 +327,15 @@ function _prune(bridge) {
   SECTIONS.forEach(function (s) {
     var days = RETENTION[s];
     if (!days || days <= 0) return; // 0 / ausente = no podar (weights)
+    if (!Array.isArray(bridge[s])) return; // sección ausente (bridge viejo pre-sleep): nada que podar
     var cutoff = _daysAgoKey(days);
-    bridge[s] = bridge[s].filter(function (e) { return !e || !e.date || e.date >= cutoff; });
+    bridge[s] = bridge[s].filter(function (e) {
+      if (!e || !e.date) return true;
+      // sleep weekly/monthly = histórico de tendencia: EXENTO de la poda (solo la serie
+      // diaria sigue la retención). Ver el esquema de sleep en la cabecera.
+      if (s === 'sleep' && (e.kind === 'weekly' || e.kind === 'monthly')) return true;
+      return e.date >= cutoff;
+    });
   });
   if (bridge.snapshots) {
     var snapCutoff = _daysAgoKey(SNAPSHOT_RETENTION_DAYS);
@@ -573,6 +618,10 @@ function _sig(sec, e) {
   if (sec === 'health')   return (e.date || '');
   if (sec === 'checks')   return _norm(e.meal) + '|' + (e.date || '');
   if (sec === 'lifts')    return _norm(e.exercise) + '|' + (e.date || '') + '|' + (e.setNumber != null ? e.setNumber : '');
+  // sleep: una fila por (fecha, tipo). kind ausente = "daily". SIN ventana de 5 min (la
+  // ventana solo aplica a meals/workouts): la misma noche registrada dos veces con horas
+  // distintas sigue siendo la misma noche → mergea, no duplica.
+  if (sec === 'sleep')    return (e.date || '') + '|' + _norm(e.kind || 'daily');
   return null;
 }
 
@@ -672,6 +721,7 @@ function _inferWorkoutType(name) {
 //   · meals/workouts → misma firma de contenido Y |Δts| ≤ WINDOW_MS.
 //   · weights        → misma fecha → merge de campos en la existente (no duplica).
 //   · checks         → misma (meal|fecha) → idempotente, descarta el repetido.
+//   · sleep          → misma (fecha|kind) → merge de campos en la existente (no duplica).
 // `assignId`: true en `op:add` (autoridad del servidor, reasigna siempre); false en
 // la unión de un bridge completo / auto-heal (conserva ids existentes; solo asigna
 // si faltan) para no churnar ids en cada lectura. Devuelve cuántas entradas agregó.
@@ -736,6 +786,12 @@ function _contentUnion(bridge, sec, entries, assignId) {
         var curL = bridge[sec][hitIdx];
         LIFT_MERGE_FIELDS.forEach(function (k) {
           if (e[k] != null && e[k] !== '') curL[k] = e[k];
+        });
+      } else if (sec === 'sleep') {
+        // Misma noche/período (fecha|kind) → corrige los campos en sitio (no duplica).
+        var curS = bridge[sec][hitIdx];
+        SLEEP_MERGE_FIELDS.forEach(function (k) {
+          if (e[k] != null && e[k] !== '') curS[k] = e[k];
         });
       }
       return; // dedup: ya existe (o mergeado, en weights/energy/workouts/lifts)
@@ -927,13 +983,16 @@ function _entryFromParams(p) {
     if (p.waterMl != null && p.waterMl !== '') p.ml = p.waterMl;
     else if (p.water != null && p.water !== '') p.ml = p.water;
   }
-  // Strings: campos de comida + `exercise` (sección lifts) + `hrZonePct` (workouts, "86/12/1/0/0").
-  ['date', 'time', 'name', 'mealSlot', 'meal', 'gi', 'notes', 'exercise', 'hrZonePct'].forEach(function (k) {
+  // Strings: campos de comida + `exercise` (sección lifts) + `hrZonePct` (workouts, "86/12/1/0/0")
+  // + los de sueño (kind/bedtime/wakeTime/periodStart/periodEnd/note, ver esquema en la cabecera).
+  ['date', 'time', 'name', 'mealSlot', 'meal', 'gi', 'notes', 'exercise', 'hrZonePct',
+   'kind', 'bedtime', 'wakeTime', 'periodStart', 'periodEnd', 'note'].forEach(function (k) {
     if (p[k] != null && p[k] !== '') entry[k] = p[k];
   });
-  // Numéricos: comida/peso + entrenamiento (avgHr/maxHr/rpe/volumeKg) + serie de fuerza (setNumber/reps).
+  // Numéricos: comida/peso + entrenamiento (avgHr/maxHr/rpe/volumeKg) + serie de fuerza (setNumber/reps)
+  // + sueño (asleepMin/inBedMin).
   ['kcal', 'protein', 'carbs', 'fat', 'fiber', 'minutes', 'ts', 'ml',
-   'avgHr', 'maxHr', 'rpe', 'volumeKg', 'setNumber', 'reps',
+   'avgHr', 'maxHr', 'rpe', 'volumeKg', 'setNumber', 'reps', 'asleepMin', 'inBedMin',
    'weightKg', 'bodyFatPct', 'score', 'fatKg', 'subcutaneousFatKg', 'muscleKg',
    'skeletalMuscleKg', 'fatFreeMassKg', 'waterKg', 'proteinKg', 'boneKg',
    'musclePct', 'waterPct', 'proteinPct', 'bmi', 'ffmi', 'metabolicAge', 'visceralFat',

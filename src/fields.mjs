@@ -99,6 +99,7 @@ export const FIELD_ALIASES = {
  * @property {Array<Object>} checks
  * @property {Array<{id:string, ml:number, ts?:number, date?:string, source?:string, deviceId?:string}>} water
  * @property {HealthDay[]} health
+ * @property {Array<{id:string, date:string, kind:('daily'|'weekly'|'monthly'), asleepMin:number, inBedMin?:number, bedtime?:string, wakeTime?:string, periodStart?:string, periodEnd?:string, source?:string, note?:string}>} sleep  KPI #1 — esquema canónico en el .gs
  */
 
 // Métricas diarias de salud (Apple Health vía Shortcut + recuperación de HeartWatch vía importador
