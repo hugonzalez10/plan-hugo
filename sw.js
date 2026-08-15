@@ -4,7 +4,7 @@
  * NO interceptamos llamadas a api.anthropic.com.
  */
 
-const CACHE_NAME = 'plan-hugo-v91-metrica-sueno';
+const CACHE_NAME = 'plan-hugo-v92-menu-semanal';
 const CORE_URLS = [
   './index.html',
   './app.js',
