@@ -25,6 +25,10 @@ import {
 } from './src/meals.mjs';
 import { evaluateRule, getRulesStatus, evaluateAllRules } from './src/rules.mjs';
 import {
+  WEEKLY_MENU, menuAppliesToDate, hasStrengthWorkout, menuTomasForDay,
+  activeMenuToma, tomaCoverage, menuExtraFromVariant, projectedMenuTotals, slotDoubleLogWarning,
+} from './src/menu.mjs';
+import {
   computeAdaptiveTDEE, buildEnergySeries, computePlanAdjustment, dayMetsTarget,
   computeTrendAnalysis, computeEvolution, interpretTrend, TREND_MIN_DAYS, TREND_WINDOW_DAYS,
   computeExerciseStats, computeRoutineExerciseProgress, computeStreak, computeComparison, computeRecents,
@@ -3166,6 +3170,121 @@ function ActivityMetric({ label, value }) {
   );
 }
 
+// ── Menú del día (menú semanal L–V, src/menu.mjs) ──────────────────────────────────
+// Consulta + registro: la toma vigente sale destacada, cada toma expande a sus variantes
+// con macros y "✓ Comí esto" registra un extra normal (mismo camino que quicklog: reglas
+// + push al bridge). Una toma con CUALQUIER registro en su slot (chat/foto/banco) sale
+// "cubierta" sin botón — la protección principal contra el doble conteo chat↔app.
+const MENU_TAG_ICON = { ruta: '🚗', casa: '🏠', 'cero-cocción': '🧊' };
+function menuMacrosLabel(m) {
+  return `${Math.round(m.kcal)} kcal · P ${m.protein} · C ${m.carbs} · G ${m.fat} · F ${m.fiber}`;
+}
+
+function MenuVariantRow({ toma, variant, onEat }) {
+  const tagIcons = (variant.tags || []).map((t) => MENU_TAG_ICON[t]).filter(Boolean).join(' ');
+  return (
+    <div className="rounded-xl bg-gray-50 dark:bg-gray-800/50 px-3 py-2">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="text-xs font-semibold text-gray-800 dark:text-gray-200">
+            {variant.name} {tagIcons && <span className="font-normal">{tagIcons}</span>}
+          </div>
+          <div className="text-[10px] text-gray-500 dark:text-gray-400 mt-0.5">{(variant.items || []).join(' · ')}</div>
+          <div className="text-[11px] font-medium text-emerald-700 dark:text-emerald-400 mt-0.5">{menuMacrosLabel(variant.macros)}</div>
+        </div>
+        <button onClick={() => onEat(toma, variant)}
+          className="shrink-0 px-2.5 py-1.5 rounded-full text-[11px] font-semibold bg-emerald-500 text-white hover:bg-emerald-600">
+          ✓ {toma.isSupplement ? 'Tomado' : 'Comí esto'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function MenuDayCard({ day, dateKey, isToday, onEatVariant, onRemoveExtra }) {
+  const [openId, setOpenId] = useState(null); // null → sigue a la toma activa; '' → todo colapsado
+  if (!menuAppliesToDate(dateKey)) return null;
+  const hasStrength = hasStrengthWorkout(day);
+  const proj = projectedMenuTotals(menuTomasForDay({ hasStrength }));
+  const active = isToday ? activeMenuToma(WEEKLY_MENU.tomas) : null;
+  const expandedId = openId === null ? active?.id : (openId || null);
+  const toggle = (id) => setOpenId(expandedId === id ? '' : id);
+
+  return (
+    <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 overflow-hidden">
+      <div className="px-4 pt-3.5 pb-2 flex items-center gap-2 flex-wrap">
+        <span className="text-base">📋</span>
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Menú del día</h3>
+        <span className="text-[10px] text-gray-400 dark:text-gray-500">L–V</span>
+        <span className="ml-auto text-[10px] font-medium text-gray-500 dark:text-gray-400">
+          cierre ~{Math.round(proj.kcal)} kcal · P {Math.round(proj.protein)} · F {Math.round(proj.fiber)}
+        </span>
+      </div>
+      <div className="px-2 pb-2 space-y-1">
+        {WEEKLY_MENU.tomas.map((toma) => {
+          const cov = tomaCoverage(day, toma);
+          const presuenoOff = toma.condition === 'strength-day' && !hasStrength;
+          const isActive = active?.id === toma.id && cov.status === 'pendiente';
+          const isOpen = expandedId === toma.id && !presuenoOff;
+          const warn = slotDoubleLogWarning(day, toma);
+          const statusIcon = cov.status === 'cubierta' ? '✓' : cov.status === 'omitida' ? '🚫' : '○';
+          const timeLabel = toma.time + (toma.timeEnd ? `–${toma.timeEnd}` : '');
+          const respaldos = toma.variants.filter((v) => (v.tags || []).includes('respaldo'));
+          const principales = toma.variants.filter((v) => !(v.tags || []).includes('respaldo'));
+          return (
+            <div key={toma.id}
+              className={`rounded-xl ${isActive ? 'ring-2 ring-emerald-400 dark:ring-emerald-600' : ''} ${presuenoOff ? 'opacity-50' : ''}`}>
+              <button onClick={() => !presuenoOff && toggle(toma.id)}
+                className="w-full px-2 py-1.5 flex items-center gap-2 text-left">
+                <span className={`text-xs font-bold w-4 text-center ${cov.status === 'cubierta' ? 'text-emerald-600 dark:text-emerald-400' : 'text-gray-400 dark:text-gray-500'}`}>{statusIcon}</span>
+                <span className="text-sm">{toma.emoji}</span>
+                <span className="text-xs font-semibold text-gray-800 dark:text-gray-200">{toma.label}</span>
+                <span className="text-[10px] text-gray-400 dark:text-gray-500">{timeLabel}</span>
+                {isActive && <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300">AHORA</span>}
+                {warn && <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300">⚠︎ doble registro</span>}
+                <span className="ml-auto text-[10px] text-gray-400 dark:text-gray-500 truncate max-w-[40%]">
+                  {presuenoOff ? 'Solo días de fuerza — hoy no va'
+                    : cov.status === 'cubierta' ? (cov.extras.length ? cov.extras.map((x) => x.name).join(' + ') : 'del banco ✓')
+                    : cov.status === 'omitida' ? 'Hoy no va'
+                    : toma.variants.length > 1 ? `${toma.variants.length} opciones` : ''}
+                </span>
+              </button>
+              {isOpen && cov.status !== 'cubierta' && cov.status !== 'omitida' && (
+                <div className="px-2 pb-2 space-y-1.5">
+                  {toma.note && <p className="text-[10px] text-gray-400 dark:text-gray-500 italic px-1">{toma.note}</p>}
+                  {principales.map((v) => <MenuVariantRow key={v.id} toma={toma} variant={v} onEat={onEatVariant} />)}
+                  {respaldos.length > 0 && (
+                    <details>
+                      <summary className="text-[10px] font-semibold text-gray-400 dark:text-gray-500 px-1 cursor-pointer">Respaldos</summary>
+                      <div className="space-y-1.5 mt-1.5">
+                        {respaldos.map((v) => <MenuVariantRow key={v.id} toma={toma} variant={v} onEat={onEatVariant} />)}
+                      </div>
+                    </details>
+                  )}
+                </div>
+              )}
+              {isOpen && cov.status === 'cubierta' && (
+                <div className="px-2 pb-2 space-y-1">
+                  {cov.extras.map((x) => (
+                    <div key={x.id} className="flex items-center justify-between gap-2 rounded-xl bg-gray-50 dark:bg-gray-800/50 px-3 py-1.5">
+                      <span className="text-[11px] text-gray-600 dark:text-gray-300 truncate">📝 {x.name} · {Math.round(Number(x.kcal) || 0)} kcal</span>
+                      {x.source === 'menu' && (
+                        <button onClick={() => onRemoveExtra(toma, x.id)}
+                          className="shrink-0 text-[10px] font-semibold text-gray-400 dark:text-gray-500 hover:text-red-500">↩︎ Quitar</button>
+                      )}
+                    </div>
+                  ))}
+                  {cov.viaBank && <p className="text-[10px] text-gray-400 dark:text-gray-500 px-1">Cubierta con un ítem del banco (ver su sección más abajo).</p>}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function WaterTracker({ day, onUpdate, target }) {
   const ml = Number(day?.water?.ml) || 0;            // agua que Hugo marca en la app (editable con +/-)
   const bridgeMl = Number(day?.water?.bridgeMl) || 0; // agua registrada por chat (section water[])
@@ -3883,9 +4002,17 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
       // Detectar extras/ejercicio que el patch ELIMINA, para (1) avisarle al bridge y (2)
       // anotarlos en removedBridgeIds, así mergeBridge no los reimporta. POST idempotente.
       const removed = [];
+      const removedSigs = [];
       if (Array.isArray(patch.extras)) {
         const keep = new Set(patch.extras.map((e) => e && e.id));
-        for (const e of (prevDay.extras || [])) if (e && e.id != null && !keep.has(e.id)) removed.push(['meals', e.id]);
+        for (const e of (prevDay.extras || [])) {
+          if (!e || e.id == null || keep.has(e.id)) continue;
+          removed.push(['meals', e.id]);
+          // Lápida por contenido: la copia en el servidor de un extra de la APP lleva OTRO id
+          // (el .gs reasigna en op:'add'), así que el delete por id no la alcanza y volvería
+          // como skill-chat en el próximo merge. mergeBridge la frena por firma+ventana.
+          removedSigs.push({ sig: chatMealSig(e.mealSlot, e.name, e.kcal), ts: e.ts ?? Date.now() });
+        }
       }
       if (Array.isArray(patch.exercise)) {
         const keep = new Set(patch.exercise.map((e) => e && e.id));
@@ -3895,7 +4022,7 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
       if (removed.length) {
         for (const [section, id] of removed) postBridgeDelete(prev.settings, section, id);
         const rb = new Set([...(prev.bridge?.removedBridgeIds || []), ...removed.map((r) => r[1])]);
-        bridge = { ...(prev.bridge || {}), removedBridgeIds: [...rb] };
+        bridge = { ...(prev.bridge || {}), removedBridgeIds: [...rb], removedMealSigs: [...(prev.bridge?.removedMealSigs || []), ...removedSigs] };
       }
       return { ...prev, bridge, days: { ...prev.days, [today]: { ...prevDay, ...patch } } };
     });
@@ -4010,6 +4137,23 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
       }],
     });
     tryWithRules(actions, { prospectiveKcal: Number(item.kcal) || 0 }, doSave);
+  };
+
+  // Registra una variante del menú del día como extra (card MenuDayCard). Mismo camino que
+  // quicklog: reglas + push al bridge + conteo en computeDayTotals. El mealSlot exacto viene
+  // de menuExtraFromVariant; las colaciones/cena marcan eaten (criterio de pickForSlot) y el
+  // registro saca el slot de "no comí" si estaba omitido.
+  const eatMenuVariant = (toma, variant) => {
+    const extra = menuExtraFromVariant(toma, variant, { id: uuid(), ts: Date.now() });
+    const doSave = () => {
+      const patch = { extras: [...(day.extras || []), extra] };
+      if (toma.slot === 'colacion1' || toma.slot === 'colacion2' || toma.slot === 'cena') {
+        patch.eaten = { ...(day.eaten || {}), [toma.slot]: true };
+      }
+      if (toma.slot) patch.skipped = (day.skipped || []).filter((s) => s !== toma.slot);
+      updateDay(patch);
+    };
+    tryWithRules(['add_extra'], { prospectiveKcal: extra.kcal }, doSave);
   };
 
   // Marca/desmarca un alimento como favorito (estado global, persiste entre días). Keyed por
@@ -4388,6 +4532,9 @@ function TodayView({ state, setState, dateKey, setDateKey, targets, onAddMealCap
         <WaterTracker day={day} onUpdate={updateDay} target={targets?.waterTarget || 3000} />
 
         <ActivityCard day={day} />
+
+        <MenuDayCard day={day} dateKey={today} isToday={isToday} onEatVariant={eatMenuVariant}
+          onRemoveExtra={(toma, id) => removeSlotExtra(toma.slot || 'extra', id)} />
 
         {renderFixedSlot('desayuno', 'Desayuno', '08:00', desayunoExtras)}
         {renderColacion('colacion1', 'Colación 1', '11:00', false, colacion1Extras)}

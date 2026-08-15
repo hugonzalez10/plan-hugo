@@ -150,6 +150,11 @@ export function migrateState(parsed) {
   //  · removedFoodKeys → foods (por nombre normalizado) que el usuario borró; mergeBridge no los
   //    reimporta del bridge (anti-resurrección, espejo de removedBridgeIds para la sección foods).
   if (!Array.isArray(next.bridge.removedFoodKeys)) next.bridge.removedFoodKeys = [];
+  //  · removedMealSigs → firmas {sig, ts} de extras de la APP borrados tras ser empujados. El
+  //    .gs reasigna id en op:'add', así que el delete por id local nunca alcanza la copia del
+  //    servidor y removedBridgeIds no la frena: sin esta lápida por contenido, el extra borrado
+  //    resucitaba como skill-chat en el próximo merge. Ver mergeBridge.
+  if (!Array.isArray(next.bridge.removedMealSigs)) next.bridge.removedMealSigs = [];
   next.snackBank = next.snackBank.map((s) => ({
     carbs: 0, fat: 0, fiber: 0, ...s,
   }));
