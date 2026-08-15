@@ -49,7 +49,7 @@ const isLocatable = (it) => (typeof it.date === 'string' && it.date) || it.ts !=
 export function normalizeBridgePayload(bridge) {
   const b = bridge || {};
   const warnings = [];
-  const dropped = { meals: 0, weights: 0, workouts: 0, water: 0, health: 0, checks: 0, lifts: 0, foods: 0 };
+  const dropped = { meals: 0, weights: 0, workouts: 0, water: 0, health: 0, checks: 0, lifts: 0, foods: 0, sleep: 0 };
 
   const meals = (Array.isArray(b.meals) ? b.meals : []).flatMap((raw, i) => {
     if (raw == null) { dropped.meals++; return []; }
@@ -134,7 +134,21 @@ export function normalizeBridgePayload(bridge) {
     return [{ ...raw }];
   });
 
-  const payload = { ...b, meals, weights, workouts, water, health, checks, lifts, foods };
+  // sleep (KPI #1; esquema canónico en el .gs): exige id + date (el dedup es por date|kind) y
+  // asleepMin numérico — es el campo cabecera, como kcal en meals: sin él la noche no aporta nada.
+  const sleep = (Array.isArray(b.sleep) ? b.sleep : []).flatMap((raw, i) => {
+    if (raw == null) { dropped.sleep++; return []; }
+    const label = `sleep ${raw.id ?? `#${i}`}`;
+    if (isAbsent(raw.id)) { warnings.push(`${label}: sin id — descartado`); dropped.sleep++; return []; }
+    if (isAbsent(raw.date)) { warnings.push(`${label}: sin date — descartado`); dropped.sleep++; return []; }
+    const { item, badFields } = coerceNumeric(raw, ['asleepMin', 'inBedMin'], label, warnings);
+    if (badFields.includes('asleepMin') || isAbsent(item.asleepMin)) {
+      warnings.push(`${label}: sin asleepMin numérico — descartado`); dropped.sleep++; return [];
+    }
+    return [item];
+  });
+
+  const payload = { ...b, meals, weights, workouts, water, health, checks, lifts, foods, sleep };
   return { payload, dropped, warnings };
 }
 

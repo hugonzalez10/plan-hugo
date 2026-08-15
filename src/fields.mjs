@@ -24,9 +24,19 @@ export const FIELD_ALIASES = {
   cal: 'kcal',
   fats: 'fat',
   grasa: 'fat',
+  grasas: 'fat',
   kg: 'weightKg',
   weight: 'weightKg',
   pesoKg: 'weightKg',
+  // Set en español visto en producción (cena 2026-07-06 escrita por la skill con las
+  // claves traducidas): el dato quedaba guardado pero ilegible para la app y ?totals.
+  nombre: 'name',
+  proteina: 'protein',
+  'proteína': 'protein',
+  carbohidratos: 'carbs',
+  carbos: 'carbs',
+  fibra: 'fiber',
+  toma: 'mealSlot',
 };
 
 // — Tipos conceptuales (JSDoc). No se chequean en build (no hay TS), pero dan autocompletado
@@ -89,6 +99,7 @@ export const FIELD_ALIASES = {
  * @property {Array<Object>} checks
  * @property {Array<{id:string, ml:number, ts?:number, date?:string, source?:string, deviceId?:string}>} water
  * @property {HealthDay[]} health
+ * @property {Array<{id:string, date:string, kind:('daily'|'weekly'|'monthly'), asleepMin:number, inBedMin?:number, bedtime?:string, wakeTime?:string, periodStart?:string, periodEnd?:string, source?:string, note?:string}>} sleep  KPI #1 — esquema canónico en el .gs
  */
 
 // Métricas diarias de salud (Apple Health vía Shortcut + recuperación de HeartWatch vía importador

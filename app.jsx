@@ -46,6 +46,10 @@ import {
   sanitizeSleepHours,
 } from './src/fields.mjs';
 import {
+  SLEEP_FLOOR_MIN, SLEEP_TARGET_MIN, SLEEP_STRING_FIELDS,
+  fmtSleepMin, sleepStats, sanitizeSleepMin,
+} from './src/sleep.mjs';
+import {
   gistCreate, gistPush, gistPull, sanitizeStateForUpload, syncSig, applyRemoteState, hashSig,
   mergeRemoteState, isPlausibleState,
   withBridgeToken, fetchBridge, postBridgeDelete, mergeBridge, bridgeVersionDrift,
@@ -5161,13 +5165,183 @@ function RoutineBlock({ icon, label, text }) {
   );
 }
 
+// Tabs de días de la rutina (compartidos entre la vista principal y el preview de renovación).
+function RoutineDayTabs({ days, activeId, onSelect }) {
+  return (
+    <div className="flex gap-2 overflow-x-auto pb-1" style={{ scrollbarWidth: 'none' }}>
+      {days.map((d) => {
+        const on = d.id === activeId;
+        return (
+          <button key={d.id} onClick={() => onSelect(d.id)}
+            className="px-3 py-2 rounded-xl text-sm font-medium whitespace-nowrap shrink-0"
+            style={on
+              ? { background: 'var(--bento-ink)', color: 'var(--bento-on-ink)' }
+              : { background: 'var(--bento-surface)', color: 'var(--bento-faint)' }}>
+            {d.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// Card de un ejercicio de la rutina: nombre + carga + video. Con `onSave` (solo rutina ya
+// guardada) el ✏️ abre edición in situ de peso/series; con `onOpenPr` muestra el chip 🏆
+// del último PR anotado a mano (o "Anotar PR" si no hay).
+function RoutineExerciseCard({ ex, index, hasVideo, onVideo, onSave, lastPr, onOpenPr }) {
+  const [editing, setEditing] = useState(false);
+  const [peso, setPeso] = useState('');
+  const [series, setSeries] = useState('');
+  const detail = [ex.pesoInicio, ex.seriesReps].filter(Boolean).join(' × ');
+  // La IA a veces devuelve la rampa ya redactada como "Rampa en …" — no anteponer "Rampa:" de nuevo.
+  const rampText = ex.ramp ? (/^rampa\b/i.test(ex.ramp) ? ex.ramp : `Rampa: ${ex.ramp}`) : null;
+  const startEdit = () => { setPeso(ex.pesoInicio || ''); setSeries(ex.seriesReps || ''); setEditing(true); };
+  const save = () => {
+    onSave({ pesoInicio: peso.trim() || null, seriesReps: series.trim() || null });
+    setEditing(false);
+  };
+  const inputCls = 'w-full px-3 py-2 rounded-xl text-sm bg-gray-100 dark:bg-gray-800 border border-transparent focus:border-emerald-500 outline-none';
+  return (
+    <div className="bento-card" style={{ padding: 16 }}>
+      <div className="flex items-start gap-3">
+        <div className="bento-num shrink-0" style={{ fontSize: 13, color: 'var(--bento-faint)', width: 20, paddingTop: 2 }}>{String(index + 1).padStart(2, '0')}</div>
+        <div className="min-w-0 flex-1">
+          <div className="font-semibold text-sm">{ex.anchor ? '⚓ ' : ''}{ex.name}</div>
+          {editing ? (
+            <div className="mt-2 space-y-1.5">
+              <input value={peso} onChange={(e) => setPeso(e.target.value)} placeholder="Peso (ej. 80 kg)" className={inputCls} />
+              <input value={series} onChange={(e) => setSeries(e.target.value)} placeholder="Series × reps (ej. 4 × 8)" className={inputCls} />
+              <div className="flex gap-1.5 pt-0.5">
+                <button onClick={save} className="flex-1 px-3 py-2 rounded-xl text-xs font-bold" style={{ background: 'var(--bento-ink)', color: 'var(--bento-on-ink)' }}>Guardar</button>
+                <button onClick={() => setEditing(false)} className="flex-1 px-3 py-2 rounded-xl text-xs font-medium border border-gray-300 dark:border-gray-700">Cancelar</button>
+              </div>
+            </div>
+          ) : (
+            <>
+              {detail && <div className="bento-mono" style={{ fontSize: 12.5, color: 'var(--bento-muted)', marginTop: 2 }}>{detail}</div>}
+              {ex.descanso && <div style={{ fontSize: 11, color: 'var(--bento-faint)', marginTop: 2 }}>Descanso {ex.descanso}</div>}
+              {rampText && <div style={{ fontSize: 11, marginTop: 4, color: 'var(--bento-blue)' }}>📈 {rampText}</div>}
+              {ex.notas && <div style={{ fontSize: 11, color: 'var(--bento-faint)', marginTop: 4, fontStyle: 'italic' }}>{ex.notas}</div>}
+              {onOpenPr && (
+                <button onClick={onOpenPr} className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium" style={{ background: 'var(--bento-surface)', color: 'var(--bento-muted)', marginTop: 6 }}>
+                  🏆 {lastPr ? `PR ${lastPr.weightKg} kg${lastPr.reps ? ` × ${lastPr.reps}` : ''} · ${shortDate(lastPr.dateKey)}` : 'Anotar PR'}
+                </button>
+              )}
+            </>
+          )}
+        </div>
+        <div className="shrink-0 flex flex-col items-stretch gap-1.5">
+          <button onClick={onVideo}
+            className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-sm font-medium"
+            style={hasVideo
+              ? { background: 'var(--bento-ink)', color: 'var(--bento-on-ink)' }
+              : { background: 'var(--bento-surface)', color: 'var(--bento-muted)' }}>
+            {hasVideo ? '🎬 Ver' : '▶ Video'}
+          </button>
+          {onSave && !editing && (
+            <button onClick={startEdit} title="Editar peso y series"
+              className="px-3 py-2 rounded-xl text-sm" style={{ background: 'var(--bento-surface)', color: 'var(--bento-muted)' }}>✏️</button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Modal de PRs manuales por ejercicio: anota marcas propias (kg × reps + nota). Viven en
+// state.exercise_prs keyed por slug — separadas de los récords automáticos del bridge
+// (pestaña Ejercicios) y persisten entre renovaciones de rutina, igual que los videos.
+function RoutinePrModal({ exercise, entries, onAdd, onRemove, onClose }) {
+  const [peso, setPeso] = useState('');
+  const [reps, setReps] = useState('');
+  const [nota, setNota] = useState('');
+  const [error, setError] = useState(null);
+  const inputCls = 'px-3 py-2 rounded-xl text-sm bg-gray-100 dark:bg-gray-800 border border-transparent focus:border-emerald-500 outline-none';
+  const add = () => {
+    const w = Number(String(peso).trim().replace(',', '.'));
+    if (!isFinite(w) || w <= 0) { setError('Ingresa el peso en kg (ej. 85 o 42,5).'); return; }
+    const r = parseInt(reps, 10);
+    onAdd({ weightKg: w, reps: Number.isFinite(r) && r > 0 ? r : null, dateKey: todayKey(), note: nota.trim() || null });
+    setPeso(''); setReps(''); setNota(''); setError(null);
+  };
+  const list = [...entries].reverse(); // más reciente arriba
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 p-4" onClick={onClose}>
+      <div className="w-full max-w-md bg-white dark:bg-gray-900 rounded-2xl shadow-xl border border-gray-200 dark:border-gray-800 p-5 space-y-4" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between gap-2">
+          <h2 className="text-base font-bold truncate">🏆 {exercise.anchor ? '⚓ ' : ''}{exercise.name}</h2>
+          <button onClick={onClose} className="w-8 h-8 rounded-full bg-gray-100 dark:bg-gray-800 text-sm shrink-0">✕</button>
+        </div>
+        <div className="flex gap-2">
+          <input type="text" inputMode="decimal" placeholder="kg" value={peso}
+            onChange={(e) => { setPeso(e.target.value); setError(null); }} className={`${inputCls} w-20`} />
+          <input type="text" inputMode="numeric" placeholder="reps" value={reps}
+            onChange={(e) => setReps(e.target.value)} className={`${inputCls} w-20`} />
+          <input type="text" placeholder="nota (opcional)" value={nota}
+            onChange={(e) => setNota(e.target.value)} className={`${inputCls} flex-1 min-w-0`} />
+        </div>
+        {error && <p className="text-xs" style={{ color: 'var(--bento-warm)' }}>{error}</p>}
+        <button onClick={add} className="w-full px-3 py-2 rounded-xl text-sm font-bold" style={{ background: 'var(--bento-ink)', color: 'var(--bento-on-ink)' }}>Anotar PR de hoy</button>
+        {list.length ? (
+          <div className="space-y-1.5 overflow-y-auto" style={{ maxHeight: 200 }}>
+            {list.map((pr, i) => (
+              <div key={i} className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl" style={{ background: 'var(--bento-surface)' }}>
+                <div className="text-sm min-w-0">
+                  <span className="font-semibold">{pr.weightKg} kg{pr.reps ? ` × ${pr.reps}` : ''}</span>
+                  <span className="text-xs" style={{ color: 'var(--bento-faint)' }}> · {shortDate(pr.dateKey)}</span>
+                  {pr.note && <div className="text-xs truncate" style={{ color: 'var(--bento-faint)' }}>{pr.note}</div>}
+                </div>
+                <button onClick={() => onRemove(entries.length - 1 - i)} title="Borrar"
+                  className="w-7 h-7 rounded-full bg-gray-100 dark:bg-gray-800 text-xs shrink-0">✕</button>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-xs text-gray-500 dark:text-gray-400">Sin PRs anotados aún. Este es tu registro manual — separado de los récords automáticos de la pestaña Ejercicios.</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Detalle de un día de rutina: bloques de prosa + card por ejercicio. Compartido entre la
+// vista principal y el preview de renovación; `onEditExercise`/`onOpenPr` (editar cargas y
+// PRs) solo vienen desde la rutina ya guardada.
+function RoutineDayDetail({ day, videos, onVideo, prs, onEditExercise, onOpenPr }) {
+  return (
+    <div className="space-y-2.5">
+      <div className="bento-label px-1">{day.exercises.length} ejercicios{day.durationMin ? ` · ~${day.durationMin} min` : ''}</div>
+      <RoutineBlock icon="🔥" label="Calentamiento" text={day.warmup} />
+      <RoutineBlock icon="📈" label="Rampa de aproximación" text={day.ramp} />
+      {day.exercises.map((ex, i) => {
+        const entries = (prs && prs[ex.slug]) || [];
+        return (
+          <RoutineExerciseCard key={`${ex.slug}-${i}`} ex={ex} index={i}
+            hasVideo={!!videos[ex.slug]?.youtube_id}
+            onVideo={() => onVideo({ slug: ex.slug, name: ex.name, anchor: ex.anchor })}
+            onSave={onEditExercise ? (patch) => onEditExercise(day.id, i, patch) : null}
+            lastPr={entries.length ? entries[entries.length - 1] : null}
+            onOpenPr={onOpenPr ? () => onOpenPr({ slug: ex.slug, name: ex.name, anchor: ex.anchor }) : null}
+          />
+        );
+      })}
+      <RoutineBlock icon="🚴" label="Cardio" text={day.note} />
+      <RoutineBlock icon="🚴" label="Cardio de cierre" text={day.cardioClose} />
+      {!day.exercises.length && !day.note && <div className="bento-card text-sm text-center py-6" style={{ color: 'var(--bento-faint)' }}>Este día no tiene ejercicios.</div>}
+    </div>
+  );
+}
+
 function RoutineView({ state, setState }) {
   const apiKey = state.settings?.anthropicApiKey;
   const routine = state.routine;
   const videos = state.exercise_videos || {};
+  const prs = state.exercise_prs || {};
   const [activeDayId, setActiveDayId] = useState(routine?.days?.[0]?.id ?? null);
   const [videoModal, setVideoModal] = useState(null); // { slug, name, anchor } | null
+  const [prModal, setPrModal] = useState(null);       // { slug, name, anchor } | null
   const [preview, setPreview] = useState(null);        // { routine, source } | null
+  const [previewDayId, setPreviewDayId] = useState(null);
 
   // Si cambia la rutina (renovación) y el día activo ya no existe, vuelve al primero.
   const activeDay = useMemo(() => {
@@ -5189,51 +5363,97 @@ function RoutineView({ state, setState }) {
     });
   };
 
+  // Edita peso/series de un ejercicio de la rutina guardada. NO toca routine.updatedAt: ese
+  // timestamp ancla la ventana del historial de la evaluación IA (Ejercicios) y no debe
+  // resetearse por un ajuste de carga.
+  const editExercise = (dayId, idx, patch) => {
+    setState((prev) => {
+      if (!prev.routine?.days) return prev;
+      const days = prev.routine.days.map((d) => (d.id !== dayId ? d : {
+        ...d, exercises: d.exercises.map((ex, i) => (i === idx ? { ...ex, ...patch } : ex)),
+      }));
+      return { ...prev, routine: { ...prev.routine, days } };
+    });
+  };
+
+  // PRs manuales por slug — sobreviven renovaciones de rutina (igual que exercise_videos).
+  const addPr = (slug, entry) => {
+    setState((prev) => ({
+      ...prev,
+      exercise_prs: { ...(prev.exercise_prs || {}), [slug]: [...((prev.exercise_prs || {})[slug] || []), entry] },
+    }));
+  };
+  const removePr = (slug, idx) => {
+    setState((prev) => {
+      const next = { ...(prev.exercise_prs || {}) };
+      const list = (next[slug] || []).filter((_, i) => i !== idx);
+      if (list.length) next[slug] = list; else delete next[slug];
+      return { ...prev, exercise_prs: next };
+    });
+  };
+
+  const openPreview = (r, s) => { setPreview({ routine: r, source: s }); setPreviewDayId(r.days[0]?.id ?? null); };
+
   const confirmRenew = () => {
     if (!preview) return;
     const saved = { ...preview.routine, updatedAt: new Date().toISOString() };
-    setState((prev) => ({ ...prev, routine: saved })); // exercise_videos intacto → videos persisten por slug
+    setState((prev) => ({ ...prev, routine: saved })); // exercise_videos/exercise_prs intactos → persisten por slug
     setActiveDayId(saved.days[0]?.id ?? null);
-    setPreview(null);
+    setPreview(null); setPreviewDayId(null);
   };
 
-  // ── Preview de renovación (antes de guardar) ──
+  // Modales compartidos entre el preview y la vista principal (video y PRs por ejercicio).
+  const modals = (
+    <>
+      {videoModal && (
+        <RoutineVideoModal
+          exercise={videoModal}
+          video={videos[videoModal.slug] || null}
+          onAssign={(id) => assignVideo(videoModal.slug, id)}
+          onRemove={() => { removeVideo(videoModal.slug); setVideoModal(null); }}
+          onClose={() => setVideoModal(null)}
+        />
+      )}
+      {prModal && (
+        <RoutinePrModal
+          exercise={prModal}
+          entries={prs[prModal.slug] || []}
+          onAdd={(entry) => addPr(prModal.slug, entry)}
+          onRemove={(i) => removePr(prModal.slug, i)}
+          onClose={() => setPrModal(null)}
+        />
+      )}
+    </>
+  );
+
+  // ── Preview de renovación (antes de guardar): misma vista por día que la rutina vigente,
+  // con Guardar/Cancelar arriba (visibles sin scroll) y videos asignables desde ya (van a
+  // exercise_videos por slug, independiente de si después guarda o cancela).
   if (preview) {
-    const allEx = preview.routine.days.flatMap((d) => d.exercises);
+    const days = preview.routine.days;
+    const pDay = days.find((d) => d.id === previewDayId) || days[0] || null;
+    const allEx = days.flatMap((d) => d.exercises);
     const sinVideo = allEx.filter((ex) => !videos[ex.slug]);
     return (
       <div className="px-4 pt-4 pb-24 space-y-4">
-        <div className="bento-card">
+        <div className="bento-card space-y-3">
           <div className="flex items-center justify-between">
             <h2 className="text-lg font-bold">Revisar rutina</h2>
             <span className="text-xs px-2 py-1 rounded-full" style={{ background: 'var(--bento-surface)', color: 'var(--bento-faint)' }}>
               {preview.source === 'ai' ? '🤖 IA' : '📐 Plantilla'}
             </span>
           </div>
-          <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
-            {preview.routine.days.length} días · {allEx.length} ejercicios
+          <p className="text-sm text-gray-500 dark:text-gray-400">
+            {days.length} días · {allEx.length} ejercicios — revisa cada día y guarda. Puedes asignar videos desde ya.
           </p>
+          <div className="flex gap-2">
+            <button onClick={confirmRenew} className="flex-1 px-3 py-3 rounded-xl text-sm font-bold" style={{ background: 'var(--bento-ink)', color: 'var(--bento-on-ink)' }}>✓ Guardar rutina</button>
+            <button onClick={() => { setPreview(null); setPreviewDayId(null); }} className="flex-1 px-3 py-3 rounded-xl text-sm font-medium border border-gray-300 dark:border-gray-700">Cancelar</button>
+          </div>
         </div>
 
-        {preview.routine.days.map((d) => (
-          <div key={d.id} className="bento-card">
-            <div className="font-semibold text-sm">{d.label}{d.durationMin ? ` · ~${d.durationMin} min` : ''}</div>
-            {d.warmup && <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">🔥 {d.warmup}</div>}
-            {d.ramp && <div className="text-xs mt-1" style={{ color: 'var(--bento-blue)' }}>📈 {d.ramp}</div>}
-            <ul className="mt-2 space-y-1">
-              {d.exercises.map((ex, i) => (
-                <li key={i} className="text-sm text-gray-600 dark:text-gray-300">
-                  {ex.anchor ? '⚓ ' : ''}{ex.name}
-                  {(ex.pesoInicio || ex.seriesReps) ? <span className="text-gray-400"> · {[ex.pesoInicio, ex.seriesReps].filter(Boolean).join(' × ')}</span> : null}
-                  {ex.ramp && <span className="block text-xs" style={{ color: 'var(--bento-blue)' }}>📈 Rampa: {ex.ramp}</span>}
-                </li>
-              ))}
-              {!d.exercises.length && !d.note && <li className="text-sm text-gray-400">Sin ejercicios detectados</li>}
-            </ul>
-            {d.note && <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">🚴 {d.note}</div>}
-            {d.cardioClose && <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">🚴 Cardio de cierre: {d.cardioClose}</div>}
-          </div>
-        ))}
+        <RoutineDayTabs days={days} activeId={pDay?.id} onSelect={setPreviewDayId} />
+        {pDay && <RoutineDayDetail day={pDay} videos={videos} onVideo={setVideoModal} />}
 
         {sinVideo.length > 0 && (
           <div className="bento-card">
@@ -5246,10 +5466,7 @@ function RoutineView({ state, setState }) {
           </div>
         )}
 
-        <div className="flex gap-2">
-          <button onClick={confirmRenew} className="flex-1 px-3 py-3 rounded-xl text-sm font-bold" style={{ background: 'var(--bento-ink)', color: 'var(--bento-on-ink)' }}>Guardar rutina</button>
-          <button onClick={() => setPreview(null)} className="flex-1 px-3 py-3 rounded-xl text-sm font-medium border border-gray-300 dark:border-gray-700">Cancelar</button>
-        </div>
+        {modals}
       </div>
     );
   }
@@ -5262,7 +5479,7 @@ function RoutineView({ state, setState }) {
           <div className="text-4xl">📐</div>
           <h2 className="text-lg font-bold">Sin rutina aún</h2>
           <p className="text-sm text-gray-500 dark:text-gray-400 max-w-xs mx-auto">Sube el documento de tu rutina (.docx) para verla por día y asignar videos de técnica.</p>
-          <div className="flex justify-center pt-1"><RoutineUpload apiKey={apiKey} onParsed={(r, s) => setPreview({ routine: r, source: s })} label="Subir rutina (.docx)" /></div>
+          <div className="flex justify-center pt-1"><RoutineUpload apiKey={apiKey} onParsed={openPreview} label="Subir rutina (.docx)" /></div>
           {!apiKey && <p className="text-xs text-gray-400">Sin API key se usa el parser de plantilla (formato Speediance).</p>}
         </div>
       </div>
@@ -5270,7 +5487,6 @@ function RoutineView({ state, setState }) {
   }
 
   // ── Vista principal ──
-  const modalEx = videoModal;
   const allExercises = routine.days.flatMap((d) => d.exercises);
   const totalEx = allExercises.length;
   const withVideo = allExercises.filter((ex) => videos[ex.slug]?.youtube_id).length;
@@ -5284,7 +5500,7 @@ function RoutineView({ state, setState }) {
             {routine.updatedAt ? `Actualizada ${shortDate(routine.updatedAt.slice(0, 10))}` : 'Tu rutina vigente'}
           </p>
         </div>
-        <div className="shrink-0"><RoutineUpload apiKey={apiKey} onParsed={(r, s) => setPreview({ routine: r, source: s })} /></div>
+        <div className="shrink-0"><RoutineUpload apiKey={apiKey} onParsed={openPreview} /></div>
       </div>
 
       {/* Hero · 3 stats */}
@@ -5307,66 +5523,14 @@ function RoutineView({ state, setState }) {
       </div>
 
       {/* Day tabs */}
-      <div className="flex gap-2 overflow-x-auto pb-1" style={{ scrollbarWidth: 'none' }}>
-        {routine.days.map((d) => {
-          const on = d.id === activeDay?.id;
-          return (
-            <button key={d.id} onClick={() => setActiveDayId(d.id)}
-              className="px-3 py-2 rounded-xl text-sm font-medium whitespace-nowrap shrink-0"
-              style={on
-                ? { background: 'var(--bento-ink)', color: 'var(--bento-on-ink)' }
-                : { background: 'var(--bento-surface)', color: 'var(--bento-faint)' }}>
-              {d.label}
-            </button>
-          );
-        })}
-      </div>
+      <RoutineDayTabs days={routine.days} activeId={activeDay?.id} onSelect={setActiveDayId} />
 
       {activeDay && (
-        <div className="space-y-2.5">
-          <div className="bento-label px-1">{activeDay.exercises.length} ejercicios{activeDay.durationMin ? ` · ~${activeDay.durationMin} min` : ''}</div>
-          <RoutineBlock icon="🔥" label="Calentamiento" text={activeDay.warmup} />
-          <RoutineBlock icon="📈" label="Rampa de aproximación" text={activeDay.ramp} />
-          {activeDay.exercises.map((ex, i) => {
-            const hasVideo = !!videos[ex.slug]?.youtube_id;
-            const detail = [ex.pesoInicio, ex.seriesReps].filter(Boolean).join(' × ');
-            return (
-              <div key={i} className="bento-card" style={{ padding: 16 }}>
-                <div className="flex items-start gap-3">
-                  <div className="bento-num shrink-0" style={{ fontSize: 13, color: 'var(--bento-faint)', width: 20, paddingTop: 2 }}>{String(i + 1).padStart(2, '0')}</div>
-                  <div className="min-w-0 flex-1">
-                    <div className="font-semibold text-sm">{ex.anchor ? '⚓ ' : ''}{ex.name}</div>
-                    {detail && <div className="bento-mono" style={{ fontSize: 12.5, color: 'var(--bento-muted)', marginTop: 2 }}>{detail}</div>}
-                    {ex.descanso && <div style={{ fontSize: 11, color: 'var(--bento-faint)', marginTop: 2 }}>Descanso {ex.descanso}</div>}
-                    {ex.ramp && <div style={{ fontSize: 11, marginTop: 4, color: 'var(--bento-blue)' }}>📈 Rampa: {ex.ramp}</div>}
-                    {ex.notas && <div style={{ fontSize: 11, color: 'var(--bento-faint)', marginTop: 4, fontStyle: 'italic' }}>{ex.notas}</div>}
-                  </div>
-                  <button onClick={() => setVideoModal({ slug: ex.slug, name: ex.name, anchor: ex.anchor })}
-                    className="shrink-0 flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm font-medium"
-                    style={hasVideo
-                      ? { background: 'var(--bento-ink)', color: 'var(--bento-on-ink)' }
-                      : { background: 'var(--bento-surface)', color: 'var(--bento-muted)' }}>
-                    {hasVideo ? '🎬 Ver' : '▶ Video'}
-                  </button>
-                </div>
-              </div>
-            );
-          })}
-          <RoutineBlock icon="🚴" label="Cardio" text={activeDay.note} />
-          <RoutineBlock icon="🚴" label="Cardio de cierre" text={activeDay.cardioClose} />
-          {!activeDay.exercises.length && !activeDay.note && <div className="bento-card text-sm text-center py-6" style={{ color: 'var(--bento-faint)' }}>Este día no tiene ejercicios.</div>}
-        </div>
+        <RoutineDayDetail day={activeDay} videos={videos} onVideo={setVideoModal}
+          prs={prs} onEditExercise={editExercise} onOpenPr={setPrModal} />
       )}
 
-      {modalEx && (
-        <RoutineVideoModal
-          exercise={modalEx}
-          video={videos[modalEx.slug] || null}
-          onAssign={(id) => assignVideo(modalEx.slug, id)}
-          onRemove={() => { removeVideo(modalEx.slug); setVideoModal(null); }}
-          onClose={() => setVideoModal(null)}
-        />
-      )}
+      {modals}
     </div>
   );
 }
@@ -5593,6 +5757,122 @@ function HeartWatchImportModal({ state, setState, onClose }) {
 // recuperación de HeartWatch (HRV, SpO₂, FC durmiendo) + banderas automáticas + evaluación crítica
 // de Claude que cruza sueño/actividad/recuperación con la pérdida de peso y la adherencia. SOLO
 // LECTURA: nunca altera kcal ni totales.
+// ── Tarjeta de Sueño (KPI #1 del plan) ──────────────────────────────────────
+// Muestra última noche, promedio 7d y mini-tendencia 14d desde state.sleep (la sección
+// `sleep` del bridge; esquema canónico en el .gs). El SEMÁFORO lo colorea el promedio de
+// 7 días contra los umbrales de src/sleep.mjs (SLEEP_FLOOR_MIN/SLEEP_TARGET_MIN): bajo el
+// piso es el centinela duro que congela ajustes de dieta/carga. El input manual agrega una
+// entrada kind:"daily" que la cola de push empuja al /exec (op:'add', section:'sleep') —
+// mismo canal POST que meals/water/weights; NUNCA el conector de Drive.
+const SLEEP_TONE_COLOR = { red: 'var(--bento-warm)', amber: 'var(--bento-yellow)', green: 'var(--bento-pos)' };
+
+function SleepCard({ state, setState }) {
+  const [showForm, setShowForm] = useState(false);
+  const [fDate, setFDate] = useState(todayKey());
+  const [fMin, setFMin] = useState('');
+  const [fBedtime, setFBedtime] = useState('');
+  const stats = useMemo(() => sleepStats(state.sleep || []), [state.sleep]);
+  const toneColor = stats.tone ? SLEEP_TONE_COLOR[stats.tone] : 'var(--bento-faint)';
+  const toneLabel = stats.tone === 'red'
+    ? `Bajo el piso de ${fmtSleepMin(SLEEP_FLOOR_MIN)} — centinela: congela ajustes de dieta/carga`
+    : stats.tone === 'amber'
+      ? `Sobre el piso, bajo el objetivo de ${fmtSleepMin(SLEEP_TARGET_MIN)}`
+      : stats.tone === 'green' ? `Objetivo cumplido (≥${fmtSleepMin(SLEEP_TARGET_MIN)})` : null;
+  const maxMin = Math.max(SLEEP_TARGET_MIN, ...stats.series14.map((d) => d.asleepMin || 0));
+
+  const save = () => {
+    const min = sanitizeSleepMin(fMin);
+    if (!fDate || min == null) return;
+    setState((prev) => {
+      const arr = Array.isArray(prev.sleep) ? [...prev.sleep] : [];
+      const idx = arr.findIndex((x) => x && x.date === fDate && (x.kind || 'daily') === 'daily');
+      // id NUEVO también al corregir una noche existente: así la cola de push (que dedupea por
+      // pushedIds) reenvía la corrección, y el .gs la mergea por (date|kind) sin duplicar.
+      const entry = { id: uuid(), date: fDate, kind: 'daily', asleepMin: min, source: 'app', ts: Date.now() };
+      if (fBedtime) entry.bedtime = fBedtime;
+      const next = idx >= 0 ? arr.map((x, i) => (i === idx ? { ...x, ...entry } : x)) : [...arr, entry];
+      next.sort((a, b) => String(a?.date || '').localeCompare(String(b?.date || '')));
+      return { ...prev, sleep: next };
+    });
+    setFMin(''); setFBedtime(''); setShowForm(false);
+  };
+
+  return (
+    <div className="bento-card" style={{ minWidth: 0, borderLeft: `3px solid ${toneColor}` }}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="text-sm font-semibold flex items-center gap-1.5"><span>😴</span>Sueño <span className="text-[10px] font-normal px-1.5 py-0.5 rounded-full" style={{ background: 'var(--bento-surface)', color: 'var(--bento-muted)' }}>KPI #1</span></div>
+        <button type="button" onClick={() => setShowForm((v) => !v)}
+          className="shrink-0 px-2.5 py-1 rounded-lg text-xs font-semibold"
+          style={{ background: 'var(--bento-surface)', color: 'var(--bento-ink)' }}>
+          {showForm ? 'Cerrar' : '+ Registrar'}
+        </button>
+      </div>
+
+      {showForm && (
+        <div className="mt-3 flex flex-wrap items-end gap-2 text-xs">
+          <label className="flex flex-col gap-1" style={{ color: 'var(--bento-muted)' }}>Fecha
+            <input type="date" value={fDate} max={todayKey()} onChange={(e) => setFDate(e.target.value)}
+              className="px-2 py-1.5 rounded-lg border bg-transparent" style={{ borderColor: 'var(--bento-hairline)' }} />
+          </label>
+          <label className="flex flex-col gap-1" style={{ color: 'var(--bento-muted)' }}>Minutos dormido
+            <input type="number" inputMode="numeric" min="1" placeholder="387" value={fMin} onChange={(e) => setFMin(e.target.value)}
+              className="px-2 py-1.5 rounded-lg border bg-transparent w-24" style={{ borderColor: 'var(--bento-hairline)' }} />
+          </label>
+          <label className="flex flex-col gap-1" style={{ color: 'var(--bento-muted)' }}>Hora de dormir (opcional)
+            <input type="time" value={fBedtime} onChange={(e) => setFBedtime(e.target.value)}
+              className="px-2 py-1.5 rounded-lg border bg-transparent" style={{ borderColor: 'var(--bento-hairline)' }} />
+          </label>
+          <button type="button" onClick={save} disabled={sanitizeSleepMin(fMin) == null}
+            className="px-3 py-1.5 rounded-lg text-xs font-semibold disabled:opacity-40"
+            style={{ background: 'var(--bento-ink)', color: 'var(--bento-on-ink)' }}>Guardar</button>
+        </div>
+      )}
+
+      {(!stats.last && !showForm) ? (
+        <p className="mt-2 text-xs" style={{ color: 'var(--bento-faint)' }}>
+          Sin registros aún. Anótalo por chat ("dormí 6h 27min") o con + Registrar.
+        </p>
+      ) : stats.last && (
+        <>
+          <div className="mt-3 flex items-end gap-6 flex-wrap">
+            <div>
+              <div className="text-[11px]" style={{ color: 'var(--bento-faint)' }}>Última noche · {formatDateLabel(stats.last.date, todayKey())}</div>
+              <div className="text-xl font-bold tabular-nums">{fmtSleepMin(stats.last.asleepMin)}</div>
+              {stats.last.bedtime && <div className="text-[11px]" style={{ color: 'var(--bento-faint)' }}>a dormir {stats.last.bedtime}{stats.last.wakeTime ? ` · despertó ${stats.last.wakeTime}` : ''}</div>}
+            </div>
+            <div>
+              <div className="text-[11px]" style={{ color: 'var(--bento-faint)' }}>Promedio 7 días ({stats.avg7Count} {stats.avg7Count === 1 ? 'noche' : 'noches'})</div>
+              <div className="text-xl font-bold tabular-nums" style={{ color: toneColor }}>{fmtSleepMin(stats.avg7)}</div>
+            </div>
+          </div>
+          {toneLabel && <p className="mt-1.5 text-[11px]" style={{ color: toneColor }}>{toneLabel}</p>}
+
+          {/* Mini-tendencia: barras de los últimos 14 días. Las líneas punteadas del fondo son
+              el piso (6h) y el objetivo (6h30). Cada barra se colorea por SU noche. */}
+          <div className="mt-3 relative" style={{ height: 44 }}>
+            <div className="absolute inset-x-0" style={{ bottom: `${(SLEEP_FLOOR_MIN / maxMin) * 100}%`, borderTop: '1px dashed var(--bento-hairline)' }} />
+            <div className="absolute inset-x-0" style={{ bottom: `${(SLEEP_TARGET_MIN / maxMin) * 100}%`, borderTop: '1px dashed var(--bento-hairline)' }} />
+            <div className="absolute inset-0 flex items-end gap-[3px]">
+              {stats.series14.map((d) => (
+                <div key={d.date} className="flex-1 rounded-t"
+                  title={`${formatDateLabel(d.date, todayKey())}: ${fmtSleepMin(d.asleepMin)}`}
+                  style={d.asleepMin != null
+                    ? { height: `${Math.max(6, (d.asleepMin / maxMin) * 100)}%`, background: SLEEP_TONE_COLOR[d.asleepMin < SLEEP_FLOOR_MIN ? 'red' : d.asleepMin < SLEEP_TARGET_MIN ? 'amber' : 'green'] }
+                    : { height: 3, background: 'var(--bento-hairline)' }} />
+              ))}
+            </div>
+          </div>
+          <div className="mt-1 flex justify-between text-[10px]" style={{ color: 'var(--bento-faint)' }}>
+            <span>{shortDate(stats.series14[0].date)}</span>
+            <span>{`<${fmtSleepMin(SLEEP_FLOOR_MIN)} rojo · ≥${fmtSleepMin(SLEEP_TARGET_MIN)} verde`}</span>
+            <span>{shortDate(stats.series14[13].date)}</span>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function HealthView({ state, setState, targets }) {
   const apiKey = state.settings?.anthropicApiKey;
   const cached = state.aiCache?.health;
@@ -5780,6 +6060,10 @@ Reglas: 2 a 4 recomendaciones, las más importantes y accionables. Si una dimens
           <span>⌚</span> Importar
         </button>
       </div>
+
+      {/* Sueño (KPI #1): siempre visible, aunque no haya datos de Apple Health — la sección
+          `sleep` del bridge es independiente de day.health.sleepHours (contexto del Shortcut). */}
+      <SleepCard state={state} setState={setState} />
 
       {daysWithHealth === 0 ? (
         <div className="bento-card text-center text-sm" style={{ borderStyle: 'dashed', color: 'var(--bento-muted)' }}>
@@ -11685,8 +11969,19 @@ function App() {
       if (wt.time) entry.time = wt.time;
       out.push({ localId: wt.id, section: 'weights', date: wdate, entry });
     }
+    // Sueño: lo nacido en la APP (input manual de SleepCard, source:'app') se empuja a la
+    // sección `sleep` del bridge por el mismo canal. Sin ventana (log liviano); el .gs
+    // dedupea/mergea por (date|kind), así una corrección re-empujada corrige la fila allá.
+    for (const s of (state.sleep || [])) {
+      if (!s || s.id == null || s.date == null || imported.has(s.id) || pushed.has(s.id)) continue;
+      if (s.source !== 'app') continue; // lo que vino del bridge/chat ya vive allá
+      const entry = { date: s.date, kind: s.kind || 'daily', asleepMin: numv(s.asleepMin), source: 'app', ts: s.ts != null ? s.ts : null };
+      if (s.inBedMin != null) entry.inBedMin = numv(s.inBedMin);
+      for (const k of SLEEP_STRING_FIELDS) if (s[k] && k !== 'source') entry[k] = s[k];
+      out.push({ localId: s.id, section: 'sleep', date: s.date, entry });
+    }
     return out;
-  }, [state.days, state.weights, state.bridge]);
+  }, [state.days, state.weights, state.sleep, state.bridge]);
   const pushBody = useMemo(() => JSON.stringify(pushPayload), [pushPayload]);
   useEffect(() => {
     if (!bridgeUrl) return;

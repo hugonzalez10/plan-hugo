@@ -32,6 +32,7 @@ const factory = new Function(`
     _mealSlot, _slotByTime, _entryFromParams, _checkRedundant, _inferWorkoutType,
     SECTIONS, WINDOW_MS, RETENTION, SNAPSHOT_RETENTION_DAYS,
     HEALTH_MERGE_FIELDS, WORKOUT_MERGE_FIELDS, ENERGY_MERGE_FIELDS, WEIGHT_MERGE_FIELDS, LIFT_MERGE_FIELDS,
+    SLEEP_MERGE_FIELDS,
   };
 `);
 

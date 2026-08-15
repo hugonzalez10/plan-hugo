@@ -1,15 +1,16 @@
 ---
 name: food-tracker
 description: >
-  Registra alimentación, peso, ejercicio y agua diarios del Dr. Hugo González con
-  fotos o texto, estima calorías/macros/composición con visión IA y escribe el JSON
+  Registra alimentación, peso, ejercicio, agua y sueño diarios del Dr. Hugo González
+  con fotos o texto, estima calorías/macros/composición con visión IA y escribe el JSON
   del bridge para que la app "Plan Hugo" lo consuma sin llamar a la API. USAR SIEMPRE
   que Hugo mande una foto de comida, una captura de báscula/composición (peso, %
-  grasa, músculo) o de entrenamiento (Apple Fitness, Strava), o diga "comí X",
-  "registra/anota esto", "cuántas calorías tiene esto", "pésame esto", "registra mi
-  peso", "anota este entrenamiento/ejercicio", "registra/agrega/añade/suma X de agua",
-  "tomé X vasos", "me tomé una botella/un litro", o cualquier variación de registro de
-  comida, peso, actividad o agua. agregar/añadir/sumar = registrar (ej. "agrega 1.5lt
+  grasa, músculo), de entrenamiento (Apple Fitness, Strava) o de sueño (Apple Salud,
+  AutoSleep), o diga "comí X", "registra/anota esto", "cuántas calorías tiene esto",
+  "pésame esto", "registra mi peso", "anota este entrenamiento/ejercicio",
+  "registra/agrega/añade/suma X de agua", "tomé X vasos", "me tomé una botella/un
+  litro", "dormí X horas", "registra mi sueño", o cualquier variación de registro de
+  comida, peso, actividad, agua o sueño. agregar/añadir/sumar = registrar (ej. "agrega 1.5lt
   de agua" = 1500 ml). También activar con "cómo voy hoy", "cuánto llevo", "resumen
   del día". También CONSULTAS DE BIBLIOTECA ("qué alimentos tengo", "qué macros tiene
   X"): responde desde la tabla de la skill + `?foods=1`, NO de memoria.
@@ -19,7 +20,7 @@ description: >
 
 La skill hace TODO el trabajo con IA. La app solo lee el JSON desde Drive y lo
 mergea a su estado local. **Un solo archivo en Drive: `plan-hugo-bridge.json`**
-con secciones (`meals`, `weights`, `workouts`, `checks`, `water`, `lifts`).
+con secciones (`meals`, `weights`, `workouts`, `checks`, `water`, `lifts`, `health`).
 
 ## Persistencia — registro por `curl`/Bash al Apps Script (LEER ANTES DE GUARDAR)
 
@@ -161,6 +162,10 @@ Antes de procesar, decide qué es:
   agua", "me tomé un litro", "anota un vaso de agua" → sección `water`. Convierte a
   **ml**: vaso ≈ 250 ml, botella ≈ 500 ml, litro/jarro = 1000 ml. Si la cantidad es
   ambigua, pregunta en una línea cuántos ml/vasos.
+- **Sueño / salud** → captura de Apple Salud (Sueño), AutoSleep/HeartWatch, o texto
+  tipo "dormí 6 horas y media" → sección `health` (una fila por día, solo contexto:
+  nunca toca kcal ni totales). Normalmente el atajo de iOS sube esto solo; este flujo
+  es el **backfill manual** cuando el atajo falló o marcó 0. Ver formato en Paso 3.
 - **Consulta de biblioteca** (NO es registro) → "qué alimentos tengo", "qué hay en mi
   biblioteca", "lista mis alimentos", "qué macros tiene X", "cuánta proteína tiene X
   por 100 g". → **Responde desde la base conocida, NO de memoria ni del menú semanal:**
@@ -457,6 +462,28 @@ Convierte vasos/botellas a ml en el Paso 0 antes de armar la entrada.
 { "date": "2026-05-28", "time": "17:10", "ml": 500, "source": "skill-chat" }
 ```
 
+**Sueño / salud** → push a `health` (UNA fila por día; el servidor mergea por `date`
+exacta y por campo — el último no-nulo gana — así que completar el sueño de un día NO
+pisa los pasos/kcal que el atajo ya subió). Reglas específicas de esta sección:
+- **`date` en formato `dd-mm-yy`** (p. ej. `"05-07-26"`), NO `YYYY-MM-DD`: es el formato
+  con que el atajo de iOS escribe sus filas, y el dedup es por string exacta — con otro
+  formato crearías una fila duplicada del mismo día en vez de completar la existente.
+- **El sueño pertenece al día en que Hugo DESPIERTA** (igual que Apple Salud): la noche
+  del viernes al sábado se registra con la fecha del sábado.
+- `sleepHours` en **horas decimales** del total "Dormido"/"Asleep" (7 h 25 min → 7.42).
+  **NO uses "En cama"/"In Bed"** (infla). Un valor >14 h es doble conteo: no lo escribas
+  (la app igual lo descarta).
+- Manda **solo los campos que de verdad leíste** en la captura; nunca rellenes con 0
+  los que no aparecen (un 0 pisa el dato bueno del atajo). Campos aceptados:
+  `sleepHours, steps, activeEnergyKcal, restingHr, vo2max, hrvSleep, spo2Sleep`.
+- Una captura con varios días (vista semanal de Salud) → una entrada por día, todas en
+  un solo POST del delta.
+```json
+{ "section": "health", "entries": [
+  { "date": "05-07-26", "sleepHours": 6.8, "source": "skill-chat" },
+  { "date": "06-07-26", "sleepHours": 7.25, "source": "skill-chat" } ] }
+```
+
 ---
 
 ## Paso 4 — Registrar con `curl`/Bash al Apps Script (sin tocar Drive)
@@ -475,8 +502,9 @@ curl -sL --data '{"op":"add","section":"meals","today":"2026-05-30","entries":[
 - **`--data` SIN `-X POST`** (el `/exec` responde con un 302 a
   `script.googleusercontent.com`; con `-X POST` reintenta el POST y da 405).
 - **`-L` obligatorio** para seguir ese redirect y leer la respuesta.
-- `section` ∈ `meals|weights|workouts|checks|water`. `entries` admite varias (p. ej. dos
-  workouts de una foto). El servidor asigna el `id` y dedup por contenido.
+- `section` ∈ `meals|weights|workouts|checks|water|health`. `entries` admite varias (p. ej.
+  dos workouts de una foto, o varios días de sueño). El servidor asigna el `id` y dedup
+  por contenido.
 
 **Alternativa — GET inline (`?w=add`, una entrada por llamada):**
 ```bash
@@ -492,6 +520,9 @@ curl -sL "$BRIDGE_URL?w=add&section=meals&date=2026-05-30&time=20:48\
   - `workouts`: cardio → `name,type,activity,kcal,minutes,distanceM,avgPowerW,avgCadenceRpm,avgHr,time`; fuerza → `name,type,kcal,minutes,volumeKg,time`. **El desglose `exercises[]` NO cabe por GET (es un array): para fuerza con desglose usa el POST del delta.** Una llamada por entrenamiento.
   - `water`: `ml` (+ `date`, opcional `time`). **Append-only: cada registro SUMA** al
     agua del día — nunca reemplaza ni se colapsa. Ej. "tomé 500 ml" → `?w=add&section=water&date=2026-06-05&ml=500&source=skill-chat`. El `waterMl` del día sale en la respuesta y en `?totals=`.
+  - `health`: `sleepHours,steps,activeEnergyKcal,restingHr,vo2max` (+ `date` en
+    **`dd-mm-yy`**, ver Paso 3). Ej. `?w=add&section=health&date=05-07-26&sleepHours=6.8&source=skill-chat`.
+    Para varios días de una captura usa el POST del delta.
 - También puedes mandar el delta entero por GET: `BRIDGE_URL?delta=<json url-encoded>&k=$BRIDGE_TOKEN`.
 
 Cualquiera de los dos responde con los totales del día ya sumados:
@@ -581,6 +612,14 @@ sola línea, accionable. Las demás (racha, comida atrasada, peso) quedan para "
 💧 Agua: +[ml registrados] ml → [waterMl total]/[meta waterTarget] ml hoy
 ```
 Usa el `waterMl` que devuelve la respuesta del registro (o `?totals=`); no recalcules.
+
+### Sueño / salud
+```
+😴 Sueño registrado: [una línea por día → "sáb 5 jul: 6.8 h"]
+[si prom <6 h en los días registrados: nota breve — dormir corto compromete la
+retención muscular y la adherencia calórica]
+```
+Es contexto (no cambia kcal ni totales); no muestres tabla de macros aquí.
 
 ---
 

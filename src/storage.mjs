@@ -45,6 +45,20 @@ export function migrateState(parsed) {
     if (next.userProfile.lastAdjustmentDate === undefined) {
       next.userProfile.lastAdjustmentDate = null;
     }
+    // Metas diarias congeladas (CLAUDE.md: "Targets diarios congelados"). En modo Auto el
+    // TDEE adaptativo cayó a su piso (0.7×) y arrastró la meta a 1694 kcal → bucle de
+    // subingesta (la app manda comer menos → ingesta media baja → TDEE reconstruido baja →
+    // meta baja más). Se congela UNA vez como override manual: kcal=2000 (→ carbos/grasa
+    // derivan a 200/67 en calcTargets), proteína piso 200, agua 3675. Con kcalTarget manual
+    // calcTargets corta antes de mirar opts.adaptiveTdee, así que la meta queda desacoplada
+    // del adaptativo (que sigue vivo solo para el análisis de Peso). Las guardas == null no
+    // pisan un override que Hugo ya tenga; el flag frozenTargetsV1 corre esto una sola vez.
+    if (up.goal === 'lose' && !up.frozenTargetsV1) {
+      if (up.kcalTarget == null) up.kcalTarget = 2000;
+      if (up.proteinTarget == null) up.proteinTarget = 200;
+      if (up.waterTarget == null) up.waterTarget = 3675;
+      up.frozenTargetsV1 = true;
+    }
   }
   next.days = next.days || {};
   next.settings = next.settings || {};
@@ -219,6 +233,10 @@ export function migrateState(parsed) {
   // Rutina (objeto singleton, null = sin rutina) + mapa de videos por slug (back-fill defensivo).
   if (next.routine !== null && (typeof next.routine !== 'object' || Array.isArray(next.routine))) next.routine = null;
   if (typeof next.exercise_videos !== 'object' || next.exercise_videos === null || Array.isArray(next.exercise_videos)) next.exercise_videos = {};
+  // PRs manuales por slug (anotados en la pestaña Rutina) — mismo patrón que exercise_videos.
+  if (typeof next.exercise_prs !== 'object' || next.exercise_prs === null || Array.isArray(next.exercise_prs)) next.exercise_prs = {};
+  // Sueño (sección `sleep` del bridge, KPI #1) — array plano como weights.
+  if (!Array.isArray(next.sleep)) next.sleep = [];
   next.aiCache = next.aiCache || { coach: {}, weekly: {}, patterns: null, lastSubstitution: null };
   next.aiCache.coach = next.aiCache.coach || {};
   next.aiCache.weekly = next.aiCache.weekly || {};
